@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 .DS_Store
+data/
+checkpoints/
+samples/
+*.npz
+*.npy
+*.pt
+*.log

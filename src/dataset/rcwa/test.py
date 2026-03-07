@@ -1,74 +1,113 @@
+import json
+import math
+import statistics
+import time
+from pathlib import Path
+
 import torch
-# 从rcwa.py导入核心仿真函数
-from rcwa import torcwa_simulation
 
-# ===================== 1. 配置论文典型结构参数（核心！对应论文图9/3.4节）=====================
-# 硅中空砖超表面-固定参数（论文143行：C4v对称，砖高H固定450nm）
-H = 450.0    # 砖高(nm)
-# 1250nm二阶微分器-最优结构参数（论文图9(a)：W=152, L=339, P=610）
-P = 610.0    # 晶胞周期(nm)
-W = 152.0    # 内孔边缘长度(nm)
-L_brick = 339.0  # 砖块边缘长度(nm)
-# 工作参数（论文3.4节：二阶微分器目标波长1250nm，入射角0°）
-lam = 1250.0 # 入射波长(nm)
-tet = 0.0    # 入射角(°)，论文重点验证0°入射基础特性
-# 材料参数（论文123行：基底SiO2，结构Si，无损耗）
-substrate = "SiO2"
-structure = "Si"
+from rcwa import build_hollow_brick_mask, torcwa_simulation
 
-# ===================== 2. 设备配置（自动CUDA/CPU）=====================
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(f"仿真设备: {device}")
 
-# ===================== 3. 生成64x64中空砖结构层（适配RCWA网格，C4v对称）=====================
-# 网格分辨率：64x64，单像素尺寸=晶胞周期/64
-pixel_size = P / 64
-# 计算砖块/内孔在64x64网格中的像素范围（中心对称，C4v）
-# 砖块像素范围：从中心向四周扩展L_brick/2
-brick_half_pix = int((L_brick / 2) / pixel_size)
-# 内孔像素范围：从中心向四周扩展W/2
-hole_half_pix = int((W / 2) / pixel_size)
-# 初始化64x64结构层：0=空气，1=硅
-layer = torch.zeros((64, 64), device=device, dtype=torch.float32)
-# 绘制硅砖块（中心区域）
-center = 64 // 2
-layer[center-brick_half_pix:center+brick_half_pix,
-      center-brick_half_pix:center+brick_half_pix] = 1.0
-# 绘制内部空气孔（挖去中心区域）
-layer[center-hole_half_pix:center+hole_half_pix,
-      center-hole_half_pix:center+hole_half_pix] = 0.0
+# 论文二阶微分目标角谱
+TARGET = [0.00, 0.04, 0.16, 0.36, 0.64, 1.00]
 
-# ===================== 4. 构建RCWA仿真物理参数字典=====================
-phy_kwargs = {
-    "periodicity": P,    # 晶胞周期
-    "h": H,              # 结构层厚度（砖高）
-    "lam": lam,          # 入射波长
-    "tet": tet,          # 入射角
-    "substrate": substrate,  # 衬底材料
-    "structure": structure   # 结构材料
-}
+# 论文角度采样
+ANGLES = [0, 5, 10, 15, 20, 25]
 
-# ===================== 5. 调用RCWA仿真函数（极简配置，论文一致）=====================
-print(f"开始RCWA仿真：波长{lam}nm | 周期{P}nm | 入射角{tet}°")
-# rcwa_orders=7：与rcwa.py示例一致，兼顾精度与速度
-sim_result = torcwa_simulation(
-    phy_kwargs=phy_kwargs,
-    layer=layer,
-    rcwa_orders=7,
-    device=device
-)
 
-# ===================== 6. 提取并打印核心结果（论文重点关注|t_pp|）=====================
-# 仿真结果：t_matrix是2x2复矩阵 [[t_ss, t_sp], [t_ps, t_pp]]
-t_matrix = sim_result["t_matrix"]
-t_ss, t_sp = t_matrix[0,0], t_matrix[0,1]
-t_ps, t_pp = t_matrix[1,0], t_matrix[1,1]
+def run_case(nx, order, device="cpu"):
 
-# 打印复数值+模值（论文中均用模值|t(α)|表示透射系数，145行）
-print("\n===================== 仿真结果（Jones矩阵-0阶透射）=====================")
-print(f"t_ss (s-s偏振): {t_ss:.4f} | 模值: {torch.abs(t_ss):.4f}")
-print(f"t_sp (s-p偏振): {t_sp:.4f} | 模值: {torch.abs(t_sp):.4f}")
-print(f"t_ps (p-s偏振): {t_ps:.4f} | 模值: {torch.abs(t_ps):.4f}")
-print(f"t_pp (p-p偏振): {t_pp:.4f} | 模值: {torch.abs(t_pp):.4f}")
-print("========================================================================")
-print(f"论文核心关注通道：p-p偏振透射模值 = {torch.abs(t_pp):.4f}")
+    layer = build_hollow_brick_mask(
+        periodicity=611.0,
+        L_outer=340.0,
+        W_inner=153.0,
+        nx=nx,
+        device=device,
+    )
+
+    vals = []
+    timings = []
+
+    for ang in ANGLES:
+
+        phy = {
+            "periodicity": 611.0,
+            "h": 450.0,
+            "lam": 1250.0,
+
+            "tet": float(ang),
+            "phi": 0.0,
+            "angle_unit": "deg",
+
+            "angle_layer": "input",
+
+            "input_medium": "air",
+            "output_medium": "SiO2",
+
+            "structure": "Si",
+
+            # 使用论文材料参数
+            "n_output": 1.45,
+            "n_structure": 3.48,
+        }
+
+        t0 = time.perf_counter()
+
+        out = torcwa_simulation(
+            phy,
+            layer,
+            rcwa_orders=order,
+            project=False,
+            device=device,
+        )
+
+        timings.append(time.perf_counter() - t0)
+
+        # 论文比较的是 |t_pp|
+        tpp = out["t_matrix"][1, 1]
+        vals.append(float(torch.abs(tpp).detach().cpu()))
+
+    vmax = max(vals)
+    norm = [v / vmax if vmax > 0 else 0.0 for v in vals]
+
+    mae = sum(abs(a - b) for a, b in zip(norm, TARGET)) / len(TARGET)
+    rmse = math.sqrt(sum((a - b) ** 2 for a, b in zip(norm, TARGET)) / len(TARGET))
+
+    return {
+        "nx": nx,
+        "order": order,
+        "raw_abs_tpp": vals,
+        "norm_abs_tpp": norm,
+        "target": TARGET,
+        "mae_vs_target": mae,
+        "rmse_vs_target": rmse,
+        "avg_time_s": statistics.mean(timings),
+        "total_time_s": sum(timings),
+    }
+
+
+if __name__ == "__main__":
+
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    # RCWA 收敛测试
+    cases = [
+        (64, 7),
+        (128, 9),
+        (128, 11),
+    ]
+
+    results = []
+
+    for nx, order in cases:
+        print(f"Running nx={nx}, order={order} on {device} ...", flush=True)
+        results.append(run_case(nx, order, device=device))
+
+    out_path = Path(__file__).resolve().parent / "run_tableS2_check_results.json"
+
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+
+    print(json.dumps(results, indent=2))
+    print(f"Wrote {out_path}")
