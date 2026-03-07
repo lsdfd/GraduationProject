@@ -2,6 +2,7 @@
 """读取 structures.npy，批量做 RCWA 仿真。"""
 
 import argparse
+import concurrent.futures as cf
 import json
 import time
 from datetime import datetime
@@ -71,6 +72,13 @@ def simulate_one(structure, device, orders):
     return real, imag, failures
 
 
+def worker(args):
+    idx, structure, devices, orders = args
+    t0 = time.perf_counter()
+    real, imag, failures = simulate_one(structure, devices[idx % len(devices)], orders)
+    return idx, real, imag, failures, time.perf_counter() - t0
+
+
 def save_npz(path, structures, real, imag):
     np.savez(
         path,
@@ -91,10 +99,10 @@ def main():
     p.add_argument("--structures")
     p.add_argument("--out")
     p.add_argument("--log")
-    p.add_argument("--max_samples", type=int, default=100)
+    p.add_argument("--max_samples", type=int, default=1000)
     p.add_argument("--rcwa_orders", type=int, default=7)
     p.add_argument("--save_every", type=int, default=10)
-    p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--device", default="auto" if torch.cuda.is_available() else "cpu")
     a = p.parse_args()
 
     structures_path = Path(a.structures) if a.structures else DEFAULT_STRUCTURES
@@ -111,12 +119,17 @@ def main():
     real = np.full((len(structures), len(LAMBDAS), len(THETAS)), np.nan, dtype=np.float32)
     imag = np.full_like(real, np.nan)
     failed = []
+    if a.device == "auto":
+        devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())] if torch.cuda.device_count() > 1 else ["cuda:0"]
+    else:
+        devices = [a.device]
 
-    log(log_path, f"开始 RCWA 批量仿真，样本数={len(structures)}，device={a.device}，orders={a.rcwa_orders}")
-    for idx, structure in enumerate(structures):
-        t0 = time.perf_counter()
-        real[idx], imag[idx], failures = simulate_one(structure, a.device, a.rcwa_orders)
-        dt = time.perf_counter() - t0
+    log(log_path, f"开始 RCWA 批量仿真，样本数={len(structures)}，devices={devices}，orders={a.rcwa_orders}")
+    jobs = ((i, s, devices, a.rcwa_orders) for i, s in enumerate(structures))
+    runner = cf.ProcessPoolExecutor(max_workers=len(devices)) if len(devices) > 1 else None
+    iterator = runner.map(worker, jobs) if runner else map(worker, jobs)
+    for idx, r, im, failures, dt in iterator:
+        real[idx], imag[idx] = r, im
         if failures:
             failed.append({"index": idx, "failures": failures})
             log(log_path, f"样本 {idx + 1}/{len(structures)} 失败点数={len(failures)}，用时={dt:.2f}s")
@@ -125,6 +138,8 @@ def main():
         if (idx + 1) % max(1, a.save_every) == 0 or idx + 1 == len(structures):
             save_npz(out_path, structures, real, imag)
             log(log_path, f"已保存中间结果: {out_path}")
+    if runner:
+        runner.shutdown()
 
     with out_path.with_name(f"{out_path.stem}_failures.json").open("w", encoding="utf-8") as f:
         json.dump(failed, f, ensure_ascii=False, indent=2)
