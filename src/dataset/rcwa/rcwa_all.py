@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -90,7 +91,8 @@ def main():
     p.add_argument("--structures")
     p.add_argument("--out")
     p.add_argument("--log")
-    p.add_argument("--rcwa_orders", type=int, default=9)
+    p.add_argument("--max_samples", type=int, default=100)
+    p.add_argument("--rcwa_orders", type=int, default=7)
     p.add_argument("--save_every", type=int, default=10)
     p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     a = p.parse_args()
@@ -99,6 +101,7 @@ def main():
     out_path = Path(a.out) if a.out else DEFAULT_OUT
     log_path = Path(a.log) if a.log else DEFAULT_LOG
     structures = np.load(structures_path).astype(np.uint8)
+    structures = structures[: max(1, a.max_samples)]
 
     if structures.ndim != 3 or structures.shape[1:] != (64, 64):
         raise ValueError(f"structures.npy 应为 [N, 64, 64]，实际得到 {structures.shape}")
@@ -111,12 +114,14 @@ def main():
 
     log(log_path, f"开始 RCWA 批量仿真，样本数={len(structures)}，device={a.device}，orders={a.rcwa_orders}")
     for idx, structure in enumerate(structures):
+        t0 = time.perf_counter()
         real[idx], imag[idx], failures = simulate_one(structure, a.device, a.rcwa_orders)
+        dt = time.perf_counter() - t0
         if failures:
             failed.append({"index": idx, "failures": failures})
-            log(log_path, f"样本 {idx + 1}/{len(structures)} 失败点数={len(failures)}")
+            log(log_path, f"样本 {idx + 1}/{len(structures)} 失败点数={len(failures)}，用时={dt:.2f}s")
         else:
-            log(log_path, f"样本 {idx + 1}/{len(structures)} 完成")
+            log(log_path, f"样本 {idx + 1}/{len(structures)} 完成，用时={dt:.2f}s")
         if (idx + 1) % max(1, a.save_every) == 0 or idx + 1 == len(structures):
             save_npz(out_path, structures, real, imag)
             log(log_path, f"已保存中间结果: {out_path}")

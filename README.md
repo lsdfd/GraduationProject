@@ -30,7 +30,7 @@ src/
 
 `src/dataset/structure/dataset_pre.py`
 
-- 默认生成 `1000` 个 `64x64` 二值结构
+- 默认生成 `100` 个 `64x64` 二值结构
 - 每个样本使用不同随机种子
 - 结构满足 `C4 + sigma_x` 对称
 - 约定 `1 = 材料`，`0 = 空气`
@@ -61,7 +61,7 @@ python src/dataset/structure/dataset_pre.py
 - `lambda = 1000, 1050, ..., 1500`，共 `11` 个点
 - `theta = -40, -35, ..., 40`，共 `17` 个点
 
-输出到 `data/train_data.npz`，并额外写：
+默认只取前 `100` 个结构，默认 `rcwa_orders=7`。输出到 `data/train_data.npz`，并额外写：
 
 - `data/rcwa.log`
 - `data/train_data_failures.json`
@@ -70,6 +70,12 @@ python src/dataset/structure/dataset_pre.py
 
 ```bash
 python src/dataset/rcwa/rcwa_all.py
+```
+
+如果要修改样本数或阶数：
+
+```bash
+python src/dataset/rcwa/rcwa_all.py --max_samples 100 --rcwa_orders 7
 ```
 
 ### 3. 训练数据格式
