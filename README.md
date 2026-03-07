@@ -183,6 +183,38 @@ python src/model/sample.py
 - RCWA 部分必须有 `torch + torcwa`
 - TensorBoard 可视化依赖 `torch.utils.tensorboard`
 
+## 环境准备
+
+推荐使用 `conda` 单独创建环境。
+
+### 1. 拉取项目
+
+```bash
+git clone https://github.com/lsdfd/GraduationProject.git
+cd GraduationProject
+```
+
+### 2. 创建 conda 环境
+
+```bash
+conda create -n metagen python=3.10 -y
+conda activate metagen
+```
+
+### 3. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+如果你的 `torch` / `torcwa` 需要匹配特定 CUDA 版本，建议先按官方方式安装对应版本的 `torch`，再安装其余依赖。
+
+### 4. 可选：查看训练曲线
+
+```bash
+tensorboard --logdir runs
+```
+
 ## 当前已知问题
 
 这份仓库仍然是研究代码，不是完全整理好的工程，目前已知缺口有：
