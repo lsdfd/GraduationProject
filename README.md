@@ -18,6 +18,7 @@ src/
     ├── dataset.py      # 训练数据读取
     ├── models.py       # 前向代理 + 条件 UNet
     ├── diffusion.py    # 扩散过程
+    ├── train_utils.py  # 训练日志与可视化工具
     ├── train_forward.py
     ├── train_diffusion.py
     └── sample.py
@@ -100,12 +101,21 @@ python src/dataset/rcwa/rcwa_all.py
 - 输入结构 `[1, 64, 64]`
 - 预测条件图 `[C, 11, 17]`
 - 当前损失是 `L1`
+- 训练日志由 `src/model/train_utils.py` 统一管理
 
 运行：
 
 ```bash
 python src/model/train_forward.py
 ```
+
+输出：
+
+- `checkpoints/forward_last.pt`
+- `checkpoints/forward_best.pt`
+- `checkpoints/cond_stats.npz`
+- `checkpoints/forward_log.csv`
+- `runs/forward`（如果环境支持 TensorBoard）
 
 ### 条件扩散模型
 
@@ -114,12 +124,22 @@ python src/model/train_forward.py
 - 用条件图反推结构
 - 同时使用前向代理提供的 physics loss
 - 输入结构训练时会从 `[0, 1]` 映射到 `[-1, 1]`
+- 当前 U-Net 比最初版本更深，并在低分辨率层加入轻量 attention
+- 训练日志与预览样本也由 `src/model/train_utils.py` 统一管理
 
 运行：
 
 ```bash
 python src/model/train_diffusion.py
 ```
+
+输出：
+
+- `checkpoints/diffusion_last.pt`
+- `checkpoints/diffusion_best.pt`
+- `checkpoints/diffusion_log.csv`
+- `checkpoints/diffusion_preview/*.npy`
+- `runs/diffusion`（如果环境支持 TensorBoard）
 
 ### 采样
 
@@ -128,12 +148,23 @@ python src/model/train_diffusion.py
 - 输入目标条件 `data/target_cond.npy`
 - 生成多个候选结构
 - 用前向代理排序，保留误差最小的样本
+- 同时保存前向代理预测出的条件图，方便和目标条件直接比较
 
 运行：
 
 ```bash
 python src/model/sample.py
 ```
+
+输出目录默认是 `samples/`，主要包括：
+
+- `all_samples.npy`
+- `all_pred_cond.npy`
+- `target_cond.npy`
+- `all_errors.npy`
+- `topk_indices.npy`
+- `topk_samples.npy`
+- `topk_pred_cond.npy`
 
 ## 依赖
 
@@ -150,6 +181,7 @@ python src/model/sample.py
 
 - 批量结构生成默认不依赖 `matplotlib`，只有单独画图时才会导入
 - RCWA 部分必须有 `torch + torcwa`
+- TensorBoard 可视化依赖 `torch.utils.tensorboard`
 
 ## 当前已知问题
 
@@ -159,7 +191,7 @@ python src/model/sample.py
 2. 各脚本默认使用仓库根目录下的相对路径 `data/...`、`checkpoints/...`、`samples/...`，建议始终在仓库根目录执行命令。
 3. RCWA 批量仿真计算量较大，目前只有日志、定期保存和失败记录，没有断点续跑。
 4. `train_data.npz` 中失败点会用 `NaN` 保存，训练前需要自行确认是否要过滤失败样本。
-5. 仓库里仍有一些历史文件和未整理的 git 变更，推送前建议先确认哪些内容需要保留。
+5. 当前模型仍然是研究型轻量实现，不是基于 `diffusers` 或 `accelerate` 的完整工程化扩散框架。
 
 ## 建议运行顺序
 
@@ -169,4 +201,10 @@ python src/dataset/rcwa/rcwa_all.py
 python src/model/train_forward.py
 python src/model/train_diffusion.py
 python src/model/sample.py
+```
+
+如果环境支持 TensorBoard，可用下面命令查看训练曲线：
+
+```bash
+tensorboard --logdir runs
 ```

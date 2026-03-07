@@ -1,9 +1,11 @@
 import os
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
 from dataset import RCWADataset
 from models import ConditionalUNet, ForwardSurrogate
 from diffusion import GaussianDiffusion
+from train_utils import TrainLogger
 
 
 def main():
@@ -21,10 +23,12 @@ def main():
         "lambda_phys": 0.5,
         "lambda_bin": 0.05,
         "cond_drop_prob": 0.1,
+        "preview_every": 20,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
     }
 
     os.makedirs(cfg["save_dir"], exist_ok=True)
+    logger = TrainLogger("diffusion", cfg["save_dir"], ["epoch", "train_loss", "val_loss", "train_diff", "train_phys", "train_bin"])
 
     dataset = RCWADataset(cfg["data_path"])
     cond_channels = dataset[0][1].shape[0]
@@ -59,6 +63,9 @@ def main():
     for epoch in range(cfg["epochs"]):
         diffusion.train()
         train_loss = 0.0
+        train_diff = 0.0
+        train_phys = 0.0
+        train_bin = 0.0
 
         for x01, cond in train_loader:
             x01 = x01.to(cfg["device"])   # [0,1]
@@ -79,8 +86,14 @@ def main():
             opt.step()
 
             train_loss += loss.item() * x01.size(0)
+            train_diff += log_dict.get("loss_diff", 0.0) * x01.size(0)
+            train_phys += log_dict.get("loss_phys", 0.0) * x01.size(0)
+            train_bin += log_dict.get("loss_bin", 0.0) * x01.size(0)
 
         train_loss /= len(train_loader.dataset)
+        train_diff /= len(train_loader.dataset)
+        train_phys /= len(train_loader.dataset)
+        train_bin /= len(train_loader.dataset)
 
         diffusion.eval()
         val_loss = 0.0
@@ -103,6 +116,17 @@ def main():
         val_loss /= len(val_loader.dataset)
 
         print(f"[Diffusion] epoch={epoch:03d} train={train_loss:.6f} val={val_loss:.6f}")
+        logger.log_scalars(
+            epoch,
+            [epoch, train_loss, val_loss, train_diff, train_phys, train_bin],
+            {
+                "loss/train": train_loss,
+                "loss/val": val_loss,
+                "loss_diff/train": train_diff,
+                "loss_phys/train": train_phys,
+                "loss_bin/train": train_bin,
+            },
+        )
 
         ckpt = {
             "diffusion": diffusion.state_dict(),
@@ -110,9 +134,16 @@ def main():
         }
         torch.save(ckpt, os.path.join(cfg["save_dir"], "diffusion_last.pt"))
 
+        if (epoch + 1) % cfg["preview_every"] == 0:
+            preview_cond = val_set[0][1].unsqueeze(0).to(cfg["device"])
+            preview = diffusion.sample(preview_cond, cfg_scale=3.0).cpu()
+            logger.save_preview(epoch, preview)
+
         if val_loss < best_val:
             best_val = val_loss
             torch.save(ckpt, os.path.join(cfg["save_dir"], "diffusion_best.pt"))
+
+    logger.close()
 
 
 if __name__ == "__main__":

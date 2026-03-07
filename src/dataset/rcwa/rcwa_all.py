@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""读取 structures.npy，批量做 RCWA 仿真，并输出适配 model 的 train_data.npz。"""
+"""读取 structures.npy，批量做 RCWA 仿真。"""
 
 import argparse
 import json
@@ -12,26 +12,26 @@ import torch
 try:
     from rcwa import torcwa_simulation
 except ModuleNotFoundError as exc:
-    torcwa_simulation = None
-    IMPORT_ERROR = exc
+    torcwa_simulation, IMPORT_ERROR = None, exc
 else:
     IMPORT_ERROR = None
 
+ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_STRUCTURES = ROOT / "data" / "structures" / "structures.npy"
+DEFAULT_OUT = ROOT / "data" / "train_data.npz"
+DEFAULT_LOG = ROOT / "data" / "rcwa.log"
+LAMBDAS = np.arange(1000.0, 1500.1, 50.0, dtype=np.float32)
+THETAS = np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
 
-LAMBDAS = np.arange(1000.0, 1500.0 + 1e-6, 50.0, dtype=np.float32)
-THETAS = np.arange(-40.0, 40.0 + 1e-6, 5.0, dtype=np.float32)
 
-
-def append_log(log_path, message):
-    """同时写文件和终端，方便长任务排查。"""
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+def log(path, msg):
+    line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
     print(line, flush=True)
-    with log_path.open("a", encoding="utf-8") as f:
+    with path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
 
 
-def build_phy_kwargs(lam, theta):
-    """集中管理物理参数，避免脚本里散落常数。"""
+def phy_kwargs(lam, theta):
     return {
         "periodicity": 500.0,
         "h": 500.0,
@@ -46,129 +46,83 @@ def build_phy_kwargs(lam, theta):
     }
 
 
-def simulate_one_structure(structure, device, rcwa_orders):
-    """返回单个结构的 tpp 复数图，shape 为 [11, 17] = [lambda, theta]。"""
+def simulate_one(structure, device, orders):
     layer = torch.from_numpy(structure.astype(np.float32)).to(device)
-    tpp = np.full((len(LAMBDAS), len(THETAS)), np.nan + 1j * np.nan, dtype=np.complex64)
-    ok = True
+    real = np.full((len(LAMBDAS), len(THETAS)), np.nan, dtype=np.float32)
+    imag = np.full_like(real, np.nan)
     failures = []
 
     for i, lam in enumerate(LAMBDAS):
         for j, theta in enumerate(THETAS):
             try:
                 out = torcwa_simulation(
-                    build_phy_kwargs(lam, theta),
+                    phy_kwargs(lam, theta),
                     layer,
-                    rcwa_orders=rcwa_orders,
+                    rcwa_orders=orders,
                     project=False,
                     device=device,
                 )
-                tpp[i, j] = complex(out["tpp"].detach().cpu().item())
+                value = complex(out["tpp"].detach().cpu().item())
+                real[i, j], imag[i, j] = value.real, value.imag
             except Exception as exc:
-                ok = False
-                failures.append(
-                    {
-                        "lambda_nm": float(lam),
-                        "theta_deg": float(theta),
-                        "error": str(exc),
-                    }
-                )
+                failures.append({"lambda_nm": float(lam), "theta_deg": float(theta), "error": str(exc)})
 
-    return tpp, ok, failures
+    return real, imag, failures
 
 
-def save_partial(save_path, structures, tpp_real, tpp_imag):
-    """定期落盘，避免长任务中断后完全丢失。"""
+def save_npz(path, structures, real, imag):
     np.savez(
-        save_path,
+        path,
         structures=structures,
-        tpp_real=tpp_real,
-        tpp_imag=tpp_imag,
-        tpp_mag=np.sqrt(tpp_real**2 + tpp_imag**2),
+        tpp_real=real,
+        tpp_imag=imag,
+        tpp_mag=np.sqrt(real**2 + imag**2),
         lambdas=LAMBDAS,
         thetas=THETAS,
     )
 
 
-def build_dataset(structures_path, save_path, log_path, rcwa_orders, save_every, device):
+def main():
     if torcwa_simulation is None:
         raise ModuleNotFoundError(f"无法导入 RCWA 依赖，请先安装 torcwa。原始错误: {IMPORT_ERROR}")
 
+    p = argparse.ArgumentParser(description="批量仿真 structures.npy")
+    p.add_argument("--structures")
+    p.add_argument("--out")
+    p.add_argument("--log")
+    p.add_argument("--rcwa_orders", type=int, default=9)
+    p.add_argument("--save_every", type=int, default=10)
+    p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
+    a = p.parse_args()
+
+    structures_path = Path(a.structures) if a.structures else DEFAULT_STRUCTURES
+    out_path = Path(a.out) if a.out else DEFAULT_OUT
+    log_path = Path(a.log) if a.log else DEFAULT_LOG
     structures = np.load(structures_path).astype(np.uint8)
+
     if structures.ndim != 3 or structures.shape[1:] != (64, 64):
         raise ValueError(f"structures.npy 应为 [N, 64, 64]，实际得到 {structures.shape}")
 
-    save_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    real = np.full((len(structures), len(LAMBDAS), len(THETAS)), np.nan, dtype=np.float32)
+    imag = np.full_like(real, np.nan)
+    failed = []
 
-    tpp_real = np.full((len(structures), len(LAMBDAS), len(THETAS)), np.nan, dtype=np.float32)
-    tpp_imag = np.full((len(structures), len(LAMBDAS), len(THETAS)), np.nan, dtype=np.float32)
-    failed_samples = []
-
-    append_log(log_path, f"开始 RCWA 批量仿真，样本数={len(structures)}，device={device}，orders={rcwa_orders}")
-
+    log(log_path, f"开始 RCWA 批量仿真，样本数={len(structures)}，device={a.device}，orders={a.rcwa_orders}")
     for idx, structure in enumerate(structures):
-        tpp, ok, failures = simulate_one_structure(structure, device=device, rcwa_orders=rcwa_orders)
-        tpp_real[idx] = tpp.real.astype(np.float32)
-        tpp_imag[idx] = tpp.imag.astype(np.float32)
-
-        if ok:
-            append_log(log_path, f"样本 {idx + 1}/{len(structures)} 完成")
+        real[idx], imag[idx], failures = simulate_one(structure, a.device, a.rcwa_orders)
+        if failures:
+            failed.append({"index": idx, "failures": failures})
+            log(log_path, f"样本 {idx + 1}/{len(structures)} 失败点数={len(failures)}")
         else:
-            failed_samples.append({"index": idx, "failures": failures})
-            append_log(log_path, f"样本 {idx + 1}/{len(structures)} 存在失败点，失败数={len(failures)}")
+            log(log_path, f"样本 {idx + 1}/{len(structures)} 完成")
+        if (idx + 1) % max(1, a.save_every) == 0 or idx + 1 == len(structures):
+            save_npz(out_path, structures, real, imag)
+            log(log_path, f"已保存中间结果: {out_path}")
 
-        if (idx + 1) % save_every == 0 or idx + 1 == len(structures):
-            save_partial(save_path, structures, tpp_real, tpp_imag)
-            append_log(log_path, f"已保存中间结果: {save_path}")
-
-    failure_path = save_path.with_name(save_path.stem + "_failures.json")
-    with failure_path.open("w", encoding="utf-8") as f:
-        json.dump(failed_samples, f, ensure_ascii=False, indent=2)
-
-    append_log(log_path, f"主数据保存完成: {save_path}")
-    append_log(log_path, f"失败日志保存完成: {failure_path}")
-
-
-def main():
-    repo_root = Path(__file__).resolve().parents[3]
-    parser = argparse.ArgumentParser(description="批量仿真 structures.npy，并生成 model 可直接读取的 train_data.npz")
-    parser.add_argument(
-        "--structures",
-        type=str,
-        default=str(repo_root / "data" / "structures" / "structures.npy"),
-        help="结构数组路径，默认 data/structures/structures.npy",
-    )
-    parser.add_argument(
-        "--out",
-        type=str,
-        default=str(repo_root / "data" / "train_data.npz"),
-        help="输出 npz 路径，默认 data/train_data.npz",
-    )
-    parser.add_argument(
-        "--log",
-        type=str,
-        default=str(repo_root / "data" / "rcwa.log"),
-        help="日志路径，默认 data/rcwa.log",
-    )
-    parser.add_argument("--rcwa_orders", type=int, default=9, help="RCWA 截断阶数，默认 9")
-    parser.add_argument("--save_every", type=int, default=10, help="每多少个样本保存一次中间结果，默认 10")
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda:0" if torch.cuda.is_available() else "cpu",
-        help="仿真设备，默认自动选择 cuda:0 或 cpu",
-    )
-    args = parser.parse_args()
-
-    build_dataset(
-        structures_path=Path(args.structures),
-        save_path=Path(args.out),
-        log_path=Path(args.log),
-        rcwa_orders=args.rcwa_orders,
-        save_every=max(1, args.save_every),
-        device=args.device,
-    )
+    with out_path.with_name(f"{out_path.stem}_failures.json").open("w", encoding="utf-8") as f:
+        json.dump(failed, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":

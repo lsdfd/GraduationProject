@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from dataset import RCWADataset
 from models import ForwardSurrogate
+from train_utils import TrainLogger
 
 
 def main():
@@ -21,6 +22,7 @@ def main():
     }
 
     os.makedirs(cfg["save_dir"], exist_ok=True)
+    logger = TrainLogger("forward", cfg["save_dir"], ["epoch", "train_loss", "val_loss"])
 
     dataset = RCWADataset(cfg["data_path"])
     cond_channels = dataset[0][1].shape[0]
@@ -80,6 +82,7 @@ def main():
         val_loss /= len(val_loader.dataset)
 
         print(f"[Forward] epoch={epoch:03d} train={train_loss:.6f} val={val_loss:.6f}")
+        logger.log_scalars(epoch, [epoch, train_loss, val_loss], {"loss/train": train_loss, "loss/val": val_loss})
 
         ckpt = {
             "model": model.state_dict(),
@@ -90,6 +93,8 @@ def main():
         if val_loss < best_val:
             best_val = val_loss
             torch.save(ckpt, os.path.join(cfg["save_dir"], "forward_best.pt"))
+
+    logger.close()
 
 
 if __name__ == "__main__":
