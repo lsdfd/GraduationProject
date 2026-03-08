@@ -217,7 +217,7 @@ class ConditionalUNet(nn.Module):
         self.up_res1 = ResBlock(base_ch * 4 + base_ch * 4, base_ch * 4, time_dim, cond_dim)
 
         self.up2 = Upsample(base_ch * 4)
-        self.up_res2 = ResBlock(base_ch * 4 + base_ch * 4, base_ch * 2, time_dim, cond_dim)
+        self.up_res2 = ResBlock(base_ch * 4 + base_ch * 2, base_ch * 2, time_dim, cond_dim)
 
         self.up3 = Upsample(base_ch * 2)
         self.up_res3 = ResBlock(base_ch * 2 + base_ch, base_ch, time_dim, cond_dim)

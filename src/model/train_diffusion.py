@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
@@ -28,7 +29,7 @@ def main():
     }
 
     os.makedirs(cfg["save_dir"], exist_ok=True)
-    logger = TrainLogger("diffusion", cfg["save_dir"], ["epoch", "train_loss", "val_loss", "train_diff", "train_phys", "train_bin"])
+    logger = TrainLogger("diffusion", cfg["save_dir"], ["epoch", "train_loss", "val_loss", "train_diff", "train_phys", "train_bin", "epoch_time_s", "total_time_s"])
 
     dataset = RCWADataset(cfg["data_path"])
     cond_channels = dataset[0][1].shape[0]
@@ -60,7 +61,9 @@ def main():
 
     best_val = 1e9
 
+    total_t0 = time.perf_counter()
     for epoch in range(cfg["epochs"]):
+        epoch_t0 = time.perf_counter()
         diffusion.train()
         train_loss = 0.0
         train_diff = 0.0
@@ -115,16 +118,20 @@ def main():
 
         val_loss /= len(val_loader.dataset)
 
-        print(f"[Diffusion] epoch={epoch:03d} train={train_loss:.6f} val={val_loss:.6f}")
+        epoch_time = time.perf_counter() - epoch_t0
+        total_time = time.perf_counter() - total_t0
+        print(f"[Diffusion] epoch={epoch:03d} train={train_loss:.6f} val={val_loss:.6f} epoch_time={epoch_time:.2f}s total={total_time:.2f}s")
         logger.log_scalars(
             epoch,
-            [epoch, train_loss, val_loss, train_diff, train_phys, train_bin],
+            [epoch, train_loss, val_loss, train_diff, train_phys, train_bin, epoch_time, total_time],
             {
                 "loss/train": train_loss,
                 "loss/val": val_loss,
                 "loss_diff/train": train_diff,
                 "loss_phys/train": train_phys,
                 "loss_bin/train": train_bin,
+                "time/epoch_s": epoch_time,
+                "time/total_s": total_time,
             },
         )
 

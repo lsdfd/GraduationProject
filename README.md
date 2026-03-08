@@ -172,6 +172,56 @@ python src/model/sample.py
 - `topk_samples.npy`
 - `topk_pred_cond.npy`
 
+### 推理与后处理
+
+`src/infer/laplas.py`
+
+- 不再从外部读取 `target_cond.npy`
+- 直接构造一个以 `1250 nm` 为中心、带外平滑衰减的二阶微分目标条件
+- 调用扩散模型生成候选结构
+- 用前向代理排序
+- 可选调用一次 RCWA，对最优结构和理想条件计算真实误差
+- 会额外保存 `tpp(lambda, theta)` 热力图
+
+运行：
+
+```bash
+python src/infer/laplas.py
+python src/infer/laplas.py --rcwa_eval
+```
+
+输出目录默认是 `samples/laplas/`，主要包括：
+
+- `target_cond_raw.npy`
+- `target_cond_norm.npy`
+- `all_samples.npy`
+- `topk_samples.npy`
+- `summary.json`
+- `target_tpp.png`
+- `best_tpp.png`
+- `best_rcwa_tpp.png`（仅 `--rcwa_eval` 时）
+
+`src/infer/optimization.py`
+
+- 读取扩散输出的结构作为初值
+- 用前向代理模型做轻量拓扑优化
+- 同时加入二值化、平滑、最小特征和对称性约束
+- 可选在最终结果上调用 RCWA 做一次误差评估
+
+运行：
+
+```bash
+python src/infer/optimization.py
+python src/infer/optimization.py --rcwa_eval
+```
+
+输出目录默认是 `samples/optimized/`，主要包括：
+
+- `optimized_continuous.npy`
+- `optimized_binary.npy`
+- `optimized_pred_cond.npy`
+- `optimization_log.json`
+
 ## 依赖
 
 仓库目前没有完整依赖锁定文件，至少需要：
@@ -234,11 +284,13 @@ tensorboard --logdir runs
 ## 建议运行顺序
 
 ```bash
-python src/dataset/structure/dataset_pre.py
-python src/dataset/rcwa/rcwa_all.py
-python src/model/train_forward.py
-python src/model/train_diffusion.py
+python src/dataset/structure/dataset_pre.py   # 几秒钟
+python src/dataset/rcwa/rcwa_all.py           # 100 个数据约 40 min；1000 个数据按此线性估算
+python src/model/train_forward.py             # 几分钟
+python src/model/train_diffusion.py           # 1000 个数据约 60 min（和 GPU/epoch 有关）
 python src/model/sample.py
+python src/infer/laplas.py
+python src/infer/optimization.py
 ```
 
 如果环境支持 TensorBoard，可用下面命令查看训练曲线：
