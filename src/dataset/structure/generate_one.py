@@ -118,7 +118,19 @@ def check_symmetry(b):
 # 主流程：粗网格随机 -> 对称化 -> 插值 -> 两次高斯+二值化
 # ============================================================
 
-def generate_structure():
+def generate_structure(
+    RNG_SEED=RNG_SEED,
+    N_COARSE=N_COARSE,
+    N_FINE=N_FINE,
+    SIGMA1=SIGMA1,
+    SIGMA2=SIGMA2,
+    TARGET_FILL=TARGET_FILL,
+    MIN_FEATURE_PX=MIN_FEATURE_PX,
+    SAVE_FIG=SAVE_FIG,
+    SAVE_NPY=SAVE_NPY,
+):
+    # Keep backward-compatible kwargs for dataset_pre.py.
+    _ = SAVE_FIG, SAVE_NPY
     rng = np.random.default_rng(RNG_SEED)
 
     # 1) 粗网格随机场
