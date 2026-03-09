@@ -100,15 +100,15 @@ def eval_rcwa(x, target_raw, device):
     if torcwa_simulation is None:
         return None
     layer = x.squeeze().to(device)
-    real = np.full((17,), np.nan, np.float32)
-    imag = np.full_like(real, np.nan)
+    tpp = np.full((17,), np.nan, np.float32)
+    tss = np.full_like(tpp, np.nan)
     lam = 1250.0
     for j, theta in enumerate(np.arange(-40.0, 40.1, 5.0)):
         out = torcwa_simulation({"periodicity": 500.0, "h": 500.0, "lam": lam, "tet": theta, "phi": 0.0, "angle_unit": "deg", "angle_layer": "input", "input_medium": "air", "output_medium": "SiO2", "structure": "Si", "n_input": 1.0, "n_output": 1.45, "n_structure": 3.4}, layer, rcwa_orders=7, project=False, device=device)
-        z = complex(out["tpp"].detach().cpu().item())
-        real[j], imag[j] = z.real, z.imag
+        tpp[j] = float(out["tpp_mag"].detach().cpu().item())
+        tss[j] = float(out["tss_mag"].detach().cpu().item())
     i = int(np.argmin(np.abs(np.arange(1000.0, 1500.1, 50.0) - 1250.0)))
-    pred = np.stack([real, imag], axis=0) if target_raw.shape[0] == 2 else np.sqrt(real ** 2 + imag ** 2)[None]
+    pred = np.stack([tpp, tss], axis=0) if target_raw.shape[0] == 2 else tpp[None]
     return float(np.mean(np.abs(pred - target_raw[:, i])))
 
 

@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy.ndimage import zoom, gaussian_filter, binary_opening, binary_closing
 
@@ -14,7 +15,7 @@ N_FINE = 64              # 最终细网格尺寸
 
 SIGMA1 = 1.6             # 第一次高斯滤波：控制大轮廓是否碎
 SIGMA2 = 1.0             # 第二次高斯滤波：控制边界是否圆滑
-TARGET_FILL = 0.4      # 目标占空比（材料面积比例），0~1
+TARGET_FILL = 0.4     # 目标占空比（材料面积比例），0~1
 MIN_FEATURE_PX = 5      # 最小特征尺寸（像素级近似控制），越大越不碎
 
 SAVE_FIG = True          # 是否保存流程图
@@ -117,17 +118,7 @@ def check_symmetry(b):
 # 主流程：粗网格随机 -> 对称化 -> 插值 -> 两次高斯+二值化
 # ============================================================
 
-def generate_structure(
-    RNG_SEED=RNG_SEED,
-    N_COARSE=N_COARSE,
-    N_FINE=N_FINE,
-    SIGMA1=SIGMA1,
-    SIGMA2=SIGMA2,
-    TARGET_FILL=TARGET_FILL,
-    MIN_FEATURE_PX=MIN_FEATURE_PX,
-    SAVE_FIG=SAVE_FIG,
-    SAVE_NPY=SAVE_NPY,
-):
+def generate_structure():
     rng = np.random.default_rng(RNG_SEED)
 
     # 1) 粗网格随机场
@@ -181,9 +172,7 @@ def generate_structure(
 # 画图：黑色 = 材料，白色 = 空气
 # ============================================================
 
-def plot_results(data, save_fig=SAVE_FIG):
-    import matplotlib.pyplot as plt
-
+def plot_results(data):
     fig, axes = plt.subplots(2, 4, figsize=(12, 7))
     axes = axes.ravel()
 
@@ -221,7 +210,7 @@ def plot_results(data, save_fig=SAVE_FIG):
 
     plt.tight_layout()
 
-    if save_fig:
+    if SAVE_FIG:
         fig_path = SAVE_DIR / "freeform_c4_sigmax_demo.png"
         fig.savefig(fig_path, dpi=200, bbox_inches="tight")
         print(f"流程图已保存到: {fig_path}")
@@ -233,8 +222,8 @@ def plot_results(data, save_fig=SAVE_FIG):
 # 保存最终数组
 # ============================================================
 
-def save_final_array(final, save_npy=SAVE_NPY):
-    if save_npy:
+def save_final_array(final):
+    if SAVE_NPY:
         npy_path = SAVE_DIR / "final_structure_64x64.npy"
         np.save(npy_path, final)
         print(f"最终数组已保存到: {npy_path}")
@@ -259,5 +248,5 @@ if __name__ == "__main__":
     print("- 结构太瘦：增大 TARGET_FILL")
     print("- 想更细节：增大 N_COARSE；想更大块：减小 N_COARSE")
 
-    save_final_array(final, save_npy=SAVE_NPY)
-    plot_results(data, save_fig=SAVE_FIG)
+    save_final_array(final)
+    plot_results(data)

@@ -32,7 +32,7 @@ class ConditionEncoder2D(nn.Module):
     输入:
       cond [B,C,11,17]
         B: batch size
-        C: 条件通道数，当前项目里通常是 2（tpp_real, tpp_imag）
+        C: 条件通道数，当前项目里通常是 2（tpp_mag, tss_mag）
         11: 波长采样点数
         17: 角度采样点数
 

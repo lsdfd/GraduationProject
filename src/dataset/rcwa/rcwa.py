@@ -114,7 +114,8 @@ def torcwa_simulation(phy_kwargs, layer, rcwa_orders=13, validity_guard=False, p
     返回:
     - t_matrix: 2x2 复数 Jones 透射矩阵
     - all: 展平后的长度 4 复数向量
-    - tpp: t_matrix[1, 1]
+    - tpp / tss: 复数透射系数
+    - tpp_mag / tss_mag: 对应模值
     """
     _ = validity_guard  # keep API compatibility
 
@@ -226,7 +227,10 @@ def torcwa_simulation(phy_kwargs, layer, rcwa_orders=13, validity_guard=False, p
     return {
         "t_matrix": t_matrix,
         "all": t_matrix.reshape(-1),
+        "tss": tss,
         "tpp": tpp,
+        "tss_mag": torch.abs(tss),
+        "tpp_mag": torch.abs(tpp),
     }
 
 

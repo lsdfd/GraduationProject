@@ -7,7 +7,7 @@ from diffusion import GaussianDiffusion
 
 
 def load_target_cond(target_path, stats_path, device):
-    target = np.load(target_path).astype(np.float32)   # [C,11,17]
+    target = np.load(target_path).astype(np.float32)   # [C,11,17], C order: [tpp_mag, tss_mag]
     stats = np.load(stats_path)
     target = (target[None, ...] - stats["mean"].astype(np.float32)) / stats["std"].astype(np.float32)
     return torch.from_numpy(target).to(device)

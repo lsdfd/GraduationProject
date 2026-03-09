@@ -10,18 +10,10 @@ class RCWADataset(Dataset):
         structures = data["structures"].astype(np.float32)
         assert structures.ndim == 3, "structures shape must be [N, 64, 64]"
 
-        if "tpp_real" in data.files and "tpp_imag" in data.files:
-            cond = np.stack([data["tpp_real"], data["tpp_imag"]], axis=1).astype(np.float32)  # [N,2,11,17]
-        elif "tpp_mag" in data.files:
-            cond = data["tpp_mag"][:, None, :, :].astype(np.float32)  # [N,1,11,17]
-        elif "tpp" in data.files:
-            tpp = data["tpp"]
-            if np.iscomplexobj(tpp):
-                cond = np.stack([tpp.real, tpp.imag], axis=1).astype(np.float32)
-            else:
-                cond = tpp[:, None, :, :].astype(np.float32)
-        else:
-            raise ValueError("Need tpp_real/tpp_imag or tpp_mag or tpp in npz.")
+        # Strict new format: two magnitude channels [tpp_mag, tss_mag].
+        if "tpp_mag" not in data.files or "tss_mag" not in data.files:
+            raise ValueError("Need tpp_mag and tss_mag in npz.")
+        cond = np.stack([data["tpp_mag"], data["tss_mag"]], axis=1).astype(np.float32)  # [N,2,11,17]
 
         # RCWA 失败点会写成 NaN，这里直接丢掉无效样本，避免污染标准化统计。
         valid_mask = np.isfinite(cond).all(axis=(1, 2, 3))

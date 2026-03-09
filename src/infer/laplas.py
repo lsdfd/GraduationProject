@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""构造 1250nm 中心的二阶微分目标，并调用扩散模型采样。"""
+"""构造 1250nm 中心二阶微分目标，按 [tpp_mag, tss_mag] 条件做扩散采样。"""
 
 import argparse
 import json
@@ -36,11 +36,14 @@ def build_target(cond_ch):
     amp_theta = (np.abs(kx) ** 2) * (1.0 - np.exp(-(np.abs(thetas) / 8.0) ** 2))
     edge = 1.0 - 0.10 * np.clip((np.abs(thetas) - 30.0) / 10.0, 0.0, 1.0)
     profile = (0.08 + 0.72 * amp_theta * edge).astype(np.float32)
-    real = np.full((len(lambdas), len(thetas)), 0.08, dtype=np.float32)
-    real[np.argmin(np.abs(lambdas - 1250.0))] = profile
-    imag = np.zeros_like(real)
-    mag = np.sqrt(real ** 2 + imag ** 2)
-    target = np.stack([real, imag], axis=0) if cond_ch == 2 else mag[None]
+    tpp = np.full((len(lambdas), len(thetas)), 0.08, dtype=np.float32)
+    tpp[np.argmin(np.abs(lambdas - 1250.0))] = profile
+    if cond_ch == 2:
+        # channel 0: tpp_mag target, channel 1: tss_mag target (low baseline)
+        tss = np.full_like(tpp, 0.02, dtype=np.float32)
+        target = np.stack([tpp, tss], axis=0)
+    else:
+        target = tpp[None]
     return target.astype(np.float32), lambdas, thetas
 
 
@@ -67,20 +70,20 @@ def rcwa_eval(structure, target_raw, cond_ch, device):
     if torcwa_simulation is None:
         return None
     layer = structure.squeeze().to(device)
-    real = np.full((17,), np.nan, np.float32)
-    imag = np.full_like(real, np.nan)
+    tpp = np.full((17,), np.nan, np.float32)
+    tss = np.full_like(tpp, np.nan)
     lam = 1250.0
     for j, theta in enumerate(np.arange(-40.0, 40.1, 5.0)):
         out = torcwa_simulation({"periodicity": 500.0, "h": 500.0, "lam": lam, "tet": theta, "phi": 0.0, "angle_unit": "deg", "angle_layer": "input", "input_medium": "air", "output_medium": "SiO2", "structure": "Si", "n_input": 1.0, "n_output": 1.45, "n_structure": 3.4}, layer, rcwa_orders=7, project=False, device=device)
-        z = complex(out["tpp"].detach().cpu().item())
-        real[j], imag[j] = z.real, z.imag
+        tpp[j] = float(out["tpp_mag"].detach().cpu().item())
+        tss[j] = float(out["tss_mag"].detach().cpu().item())
     i = int(np.argmin(np.abs(np.arange(1000.0, 1500.1, 50.0) - 1250.0)))
-    pred = np.stack([real, imag], axis=0) if cond_ch == 2 else np.sqrt(real ** 2 + imag ** 2)[None]
+    pred = np.stack([tpp, tss], axis=0) if cond_ch == 2 else tpp[None]
     return float(np.mean(np.abs(pred - target_raw[:, i]))), pred
 
 
-def plot_tpp(path, cond, lambdas, thetas, title, vmax):
-    img = cond if cond.ndim == 2 else (np.sqrt(cond[0] ** 2 + cond[1] ** 2) if cond.shape[0] == 2 else cond[0])
+def plot_map(path, cond, lambdas, thetas, title, vmax, channel_idx=0):
+    img = cond if cond.ndim == 2 else cond[channel_idx]
     plt.figure(figsize=(5, 4))
     plt.imshow(img, aspect="auto", origin="lower", cmap="turbo", extent=[thetas[0], thetas[-1], lambdas[0], lambdas[-1]], vmin=0.0, vmax=vmax)
     plt.xlabel("theta (deg)")
@@ -153,15 +156,24 @@ def main():
     np.save(save_dir / "topk_samples.npy", samples[topk].cpu().numpy())
     np.save(save_dir / "topk_pred_cond.npy", pred[topk].cpu().numpy())
     np.save(save_dir / "topk_pred_cond_raw.npy", pred_raw[topk.cpu().numpy()])
-    vmax = max(float(np.sqrt((target_raw[:2] ** 2).sum(axis=0)).max() if target_raw.shape[0] == 2 else target_raw[0].max()), float(np.sqrt((pred_raw[topk[0].item(), :2] ** 2).sum(axis=0)).max() if cond_ch == 2 else pred_raw[topk[0].item(), 0].max()), 1e-6)
-    plot_tpp(save_dir / "target_tpp.png", target_raw, lambdas, thetas, "Target tpp", vmax)
-    plot_tpp(save_dir / "best_tpp.png", pred_raw[topk[0].item()], lambdas, thetas, "Best surrogate tpp", vmax)
+    vmax_tpp = max(float(target_raw[0].max()), float(pred_raw[topk[0].item(), 0].max()), 1e-6)
+    plot_map(save_dir / "target_tpp.png", target_raw, lambdas, thetas, "Target tpp_mag", vmax_tpp, channel_idx=0)
+    plot_map(save_dir / "best_tpp.png", pred_raw[topk[0].item()], lambdas, thetas, "Best surrogate tpp_mag", vmax_tpp, channel_idx=0)
+    if cond_ch == 2:
+        vmax_tss = max(float(target_raw[1].max()), float(pred_raw[topk[0].item(), 1].max()), 1e-6)
+        plot_map(save_dir / "target_tss.png", target_raw, lambdas, thetas, "Target tss_mag", vmax_tss, channel_idx=1)
+        plot_map(save_dir / "best_tss.png", pred_raw[topk[0].item()], lambdas, thetas, "Best surrogate tss_mag", vmax_tss, channel_idx=1)
     plot_structure(save_dir / "best_structure.png", best.cpu().numpy(), "Best binary structure")
     if a.rcwa_eval and "rcwa_pred" in locals():
-        row = np.zeros((1, len(thetas)), dtype=np.float32)
-        row[0] = np.sqrt((rcwa_pred[:2] ** 2).sum(axis=0)) if cond_ch == 2 else rcwa_pred[0]
-        vmax = max(vmax, float(row.max()))
-        plot_tpp(save_dir / "best_rcwa_tpp.png", row, np.array([1250.0], dtype=np.float32), thetas, "Best RCWA tpp @1250nm", vmax)
+        row_tpp = np.zeros((1, len(thetas)), dtype=np.float32)
+        row_tpp[0] = rcwa_pred[0]
+        vmax_tpp = max(vmax_tpp, float(row_tpp.max()))
+        plot_map(save_dir / "best_rcwa_tpp.png", row_tpp, np.array([1250.0], dtype=np.float32), thetas, "Best RCWA tpp_mag @1250nm", vmax_tpp)
+        if cond_ch == 2:
+            row_tss = np.zeros((1, len(thetas)), dtype=np.float32)
+            row_tss[0] = rcwa_pred[1]
+            vmax_tss = max(vmax_tss, float(row_tss.max()))
+            plot_map(save_dir / "best_rcwa_tss.png", row_tss, np.array([1250.0], dtype=np.float32), thetas, "Best RCWA tss_mag @1250nm", vmax_tss)
     with open(save_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(info, f, ensure_ascii=False, indent=2)
     print("saved_to:", save_dir)
