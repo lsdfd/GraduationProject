@@ -1,9 +1,12 @@
 __pycache__/
 *.pyc
 .DS_Store
-data/
+# Keep generated data artifacts ignored, but allow data scripts to be tracked.
+data/*
+!data/**/*.py
 checkpoints/
 samples/
+runs/
 *.npz
 *.npy
 *.pt
