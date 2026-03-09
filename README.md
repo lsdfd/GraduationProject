@@ -61,7 +61,7 @@ python src/dataset/structure/dataset_pre.py
 - `lambda = 1000, 1050, ..., 1500`，共 `11` 个点
 - `theta = -40, -35, ..., 40`，共 `17` 个点
 
-默认只取前 `100` 个结构，默认 `rcwa_orders=7`。输出到 `data/train_data.npz`，并额外写：
+默认取前 `1000` 个结构（可用 `--max_samples` 调整），默认 `rcwa_orders=7`。输出到 `data/train_data.npz`，并额外写：
 
 - `data/rcwa.log`
 - `data/train_data_failures.json`
@@ -78,14 +78,19 @@ python src/dataset/rcwa/rcwa_all.py
 python src/dataset/rcwa/rcwa_all.py --max_samples 100 --rcwa_orders 7
 ```
 
+如果要多卡并行（按结构分片）：
+
+```bash
+python src/dataset/rcwa/rcwa_all.py --devices cuda:0,cuda:1 --max_samples 1000 --rcwa_orders 7
+```
+
 ### 3. 训练数据格式
 
 `train_data.npz` 当前约定如下：
 
 - `structures`: `[N, 64, 64]`
-- `tpp_real`: `[N, 11, 17]`
-- `tpp_imag`: `[N, 11, 17]`
 - `tpp_mag`: `[N, 11, 17]`
+- `tss_mag`: `[N, 11, 17]`
 - `lambdas`: `[11]`
 - `thetas`: `[17]`
 
@@ -96,7 +101,7 @@ python src/dataset/rcwa/rcwa_all.py --max_samples 100 --rcwa_orders 7
 - `x`: `[1, 64, 64]`
 - `cond`: `[2, 11, 17]`
 
-这里 `2` 个通道分别是 `real` 和 `imag`。
+这里 `2` 个通道分别是 `tpp_mag` 和 `tss_mag`。
 
 ## 模型部分
 
