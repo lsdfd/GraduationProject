@@ -30,7 +30,7 @@ src/
 
 `src/dataset/structure/dataset_pre.py`
 
-- 默认生成 `1000` 个 `64x64` 二值结构
+- 默认生成 `100` 个 `64x64` 二值结构
 - 每个样本使用不同随机种子
 - 结构满足 `C4 + sigma_x` 对称
 - 约定 `1 = 材料`，`0 = 空气`
@@ -75,7 +75,7 @@ python src/dataset/rcwa/rcwa_all.py
 如果要修改样本数或阶数：
 
 ```bash
-python src/dataset/rcwa/rcwa_all.py --max_samples 300 --rcwa_orders 7
+python src/dataset/rcwa/rcwa_all.py --max_samples 100 --rcwa_orders 7
 ```
 
 如果要多卡并行（按结构分片）：
@@ -177,6 +177,97 @@ python src/model/sample.py
 - `topk_samples.npy`
 - `topk_pred_cond.npy`
 
+## Infer 部分
+
+### 二阶目标扩散推理
+
+`src/infer/laplas.py`
+
+- 构造 `1250 nm` 处的二阶微分目标，目标曲线与 `|sin(theta)|^2` 成正比
+- 非目标波长默认使用高透过背景
+- 自动扫 3 组目标参数：
+  - `floor_0p01_off_0p90`
+  - `floor_0p03_off_0p90`
+  - `floor_0p05_off_0p90`
+- 对每组目标生成多个候选结构
+- 用 surrogate 误差和二阶分数一起排序并保存 top 结果
+
+运行：
+
+```bash
+python src/infer/laplas.py
+```
+
+如果要一起做 `1250 nm` 的 RCWA 复核：
+
+```bash
+python src/infer/laplas.py --rcwa_eval
+```
+
+常用参数示例：
+
+```bash
+python src/infer/laplas.py --num_samples 64 --cfg_scale 3.5 --topk_second 8
+```
+
+输出目录默认在 `samples/laplas/<timestamp>/<case_name>/`，每个 case 主要包括：
+
+- `target_cond_raw.npy`
+- `all_samples.npy`
+- `all_pred_cond_raw.npy`
+- `all_errors.npy`
+- `topk_samples.npy`
+- `topk_second_samples.npy`
+- `topk_second_pred_cond_raw.npy`
+- `second_order_metrics.json`
+- `summary.json`
+- `target_tpp.png`
+- `best_tpp.png`
+- `top*_second_order.png`
+
+### 拓扑优化
+
+`src/infer/optimization.py`
+
+- 读取 `laplas.py` 生成的目标条件和初始结构
+- 默认优先使用 `topk_second_samples.npy` 作为初始化
+- 用前向代理做轻量拓扑优化
+- 当前优化目标除了主波长拟合外，还加入了较小权重的 `1250 +/- 20 nm` 带宽二阶项
+- 最终按二阶分数排序输出
+
+运行：
+
+```bash
+python src/infer/optimization.py
+```
+
+如果不做 RCWA 复核：
+
+```bash
+python src/infer/optimization.py --skip_rcwa_eval
+```
+
+常用参数示例：
+
+```bash
+python src/infer/optimization.py --steps 500 --lr 0.02 --max_inits 5
+```
+
+输出目录默认在 `samples/optimized/<timestamp>/candidate_XX/`，主要包括：
+
+- `optimized_continuous.npy`
+- `optimized_binary.npy`
+- `optimized_pred_cond_raw.npy`
+- `optimized_continuous.png`
+- `optimized_binary.png`
+- `optimized_tpp_map.png`
+- `optimized_second_order_curve.png`
+- `optimization_log.json`
+
+根目录还会汇总：
+
+- `optimization_summary.json`
+
 ## 依赖
 
 仓库目前没有完整依赖锁定文件，至少需要：
@@ -209,6 +300,8 @@ cd GraduationProject
 
 ```bash
 conda create -n metagen python=3.10 -y
+conda init bash（服务器）
+source ~/.bashrc（服务器）
 conda activate metagen
 ```
 
@@ -244,6 +337,8 @@ python src/dataset/rcwa/rcwa_all.py   ->1000个数据约4.5~5小时（单卡）
 python src/model/train_forward.py     ->几分钟
 python src/model/train_diffusion.py   ->1000个数据大概耗时60min
 python src/model/sample.py
+python src/infer/laplas.py
+python src/infer/optimization.py
 ```
 
 如果环境支持 TensorBoard，可用下面命令查看训练曲线：

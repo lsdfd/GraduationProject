@@ -10,7 +10,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_STRUCTURES = ROOT / "structures_test" / "structures.npy"
-DEFAULT_TRAIN = ROOT / "train_data_mag.npz"
+DEFAULT_TRAIN = ROOT / "train_data.npz"
 
 
 def default_structures_path() -> Path:
@@ -166,8 +166,8 @@ def plot_structure_grid(structures: np.ndarray, out_path: Path, title: str) -> N
     plt.close(fig)
 
 
-def plot_tpp_grid(
-    tpp: np.ndarray,
+def plot_spectrum_grid(
+    spec: np.ndarray,
     out_path: Path,
     title: str,
     vmin: float,
@@ -175,18 +175,18 @@ def plot_tpp_grid(
     normalize_mode: str,
     lambdas: np.ndarray,
     thetas: np.ndarray,
-    global_label: str = "tpp magnitude",
+    global_label: str = "magnitude",
 ) -> None:
-    rows, cols = grid_shape(len(tpp))
+    rows, cols = grid_shape(len(spec))
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.3, rows * 1.1), constrained_layout=True)
     axes = np.atleast_1d(axes).ravel()
 
     if normalize_mode == "per_sample":
-        images = normalize_per_sample(tpp)
+        images = normalize_per_sample(spec)
         plot_vmin, plot_vmax = 0.0, 1.0
-        cbar_label = "normalized tpp (per sample)"
+        cbar_label = f"normalized {global_label} (per sample)"
     else:
-        images = tpp
+        images = spec
         plot_vmin, plot_vmax = vmin, vmax
         cbar_label = global_label
 
@@ -238,8 +238,8 @@ def save_structure_pages(
         )
 
 
-def save_tpp_pages(
-    tpp: np.ndarray,
+def save_spectrum_pages(
+    spec: np.ndarray,
     ordered_indices: np.ndarray,
     out_dir: Path,
     prefix: str,
@@ -247,12 +247,13 @@ def save_tpp_pages(
     normalize_mode: str,
     lambdas: np.ndarray,
     thetas: np.ndarray,
+    label: str,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    finite_mask = np.isfinite(tpp)
+    finite_mask = np.isfinite(spec)
     if finite_mask.any():
-        global_vmin = float(np.nanmin(tpp))
-        global_vmax = float(np.nanmax(tpp))
+        global_vmin = float(np.nanmin(spec))
+        global_vmax = float(np.nanmax(spec))
     else:
         global_vmin, global_vmax = 0.0, 1.0
         print(f"[warn] {prefix}: all values are NaN, plotting as empty maps")
@@ -261,14 +262,14 @@ def save_tpp_pages(
         global_vmax = global_vmin + 1e-6
 
     for page_id, page_indices in enumerate(chunk_indices(ordered_indices, page_size), start=1):
-        page_tpp = np.nan_to_num(tpp[page_indices], nan=global_vmin)
+        page_spec = np.nan_to_num(spec[page_indices], nan=global_vmin)
         title = f"{prefix} page {page_id} ({len(page_indices)})"
         if normalize_mode == "global":
             title += f" | color: blue={global_vmin:.4g}, red={global_vmax:.4g}"
         else:
             title += " | color: blue=0, red=1 (per-sample)"
-        plot_tpp_grid(
-            page_tpp,
+        plot_spectrum_grid(
+            page_spec,
             out_dir / f"page_{page_id:02d}.png",
             title,
             vmin=global_vmin,
@@ -276,46 +277,17 @@ def save_tpp_pages(
             normalize_mode=normalize_mode,
             lambdas=lambdas,
             thetas=thetas,
-        )
-
-
-def save_tpp_component_pages(
-    comp: np.ndarray,
-    ordered_indices: np.ndarray,
-    out_dir: Path,
-    prefix: str,
-    page_size: int,
-    lambdas: np.ndarray,
-    thetas: np.ndarray,
-    label: str,
-) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    vabs = float(np.nanmax(np.abs(comp)))
-    vmin = -vabs
-    vmax = vabs
-    for page_id, page_indices in enumerate(chunk_indices(ordered_indices, page_size), start=1):
-        page = comp[page_indices]
-        title = f"{prefix} page {page_id} ({len(page_indices)}) | color: blue={vmin:.4g}, red={vmax:.4g}"
-        plot_tpp_grid(
-            page,
-            out_dir / f"page_{page_id:02d}.png",
-            title,
-            vmin=vmin,
-            vmax=vmax,
-            normalize_mode="global",
-            lambdas=lambdas,
-            thetas=thetas,
             global_label=label,
         )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="拼图查看 structures 和 tpp 数据集分布")
+    parser = argparse.ArgumentParser(description="拼图查看 structures / tpp / tss 数据集分布")
     parser.add_argument("--structures", type=Path, default=default_structures_path())
     parser.add_argument("--train", type=Path, default=default_train_path())
     parser.add_argument("--out_dir", type=Path, default=ROOT / "vis")
-    parser.add_argument("--num_structures", type=int, default=500)
-    parser.add_argument("--num_tpp", type=int, default=500)
+    parser.add_argument("--num_structures", type=int, default=1000)
+    parser.add_argument("--num_tpp", type=int, default=1000)
     parser.add_argument("--page_size", type=int, default=100)
     parser.add_argument("--tpp_norm", choices=["global", "per_sample"], default="global")
     args = parser.parse_args()
@@ -323,6 +295,7 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     structures_out = args.out_dir / "structures"
     tpp_out = args.out_dir / "tpp"
+    tss_out = args.out_dir / "tss"
     print(f"[input] structures: {args.structures}")
     print(f"[input] train: {args.train}")
 
@@ -359,48 +332,77 @@ def main() -> None:
 
     idx_tpp_random = select_indices(len(tpp_mag), args.num_tpp, mode="random")
     idx_tpp_energy = select_indices(len(tpp_mag), args.num_tpp, mode="energy", values=tpp_energy)
+    fill_count = min(len(fill_ratio), len(tpp_mag))
+    idx_tpp_fill = select_indices(fill_count, args.num_tpp, mode="fill", values=fill_ratio[:fill_count])
     idx_tss_random = select_indices(len(tss_mag), args.num_tpp, mode="random")
     idx_tss_energy = select_indices(len(tss_mag), args.num_tpp, mode="energy", values=tss_energy)
+    idx_tss_fill = select_indices(min(len(fill_ratio), len(tss_mag)), args.num_tpp, mode="fill", values=fill_ratio[: min(len(fill_ratio), len(tss_mag))])
 
-    save_tpp_pages(
+    save_spectrum_pages(
         tpp_mag,
         idx_tpp_random,
-        tpp_out / "mag" / "random",
+        tpp_out / "random",
         "tpp_random_sample",
         args.page_size,
         args.tpp_norm,
         lambdas,
         thetas,
+        "tpp magnitude",
     )
-    save_tpp_pages(
+    save_spectrum_pages(
         tpp_mag,
         idx_tpp_energy,
-        tpp_out / "mag" / "sorted_by_mean",
+        tpp_out / "sorted_by_mean",
         "tpp_sorted_by_mean_magnitude",
         args.page_size,
         args.tpp_norm,
         lambdas,
         thetas,
+        "tpp magnitude",
     )
-    save_tpp_pages(
+    save_spectrum_pages(
+        tpp_mag,
+        idx_tpp_fill,
+        tpp_out / "sorted_by_fill",
+        "tpp_sorted_by_structure_fill_ratio",
+        args.page_size,
+        args.tpp_norm,
+        lambdas,
+        thetas,
+        "tpp magnitude",
+    )
+    save_spectrum_pages(
         tss_mag,
         idx_tss_random,
-        tpp_out / "tss_mag" / "random",
+        tss_out / "random",
         "tss_random_sample",
         args.page_size,
         args.tpp_norm,
         lambdas,
         thetas,
+        "tss magnitude",
     )
-    save_tpp_pages(
+    save_spectrum_pages(
         tss_mag,
         idx_tss_energy,
-        tpp_out / "tss_mag" / "sorted_by_mean",
+        tss_out / "sorted_by_mean",
         "tss_sorted_by_mean_magnitude",
         args.page_size,
         args.tpp_norm,
         lambdas,
         thetas,
+        "tss magnitude",
+    )
+    save_spectrum_pages(
+        tss_mag,
+        idx_tss_fill,
+        tss_out / "sorted_by_fill",
+        "tss_sorted_by_structure_fill_ratio",
+        args.page_size,
+        args.tpp_norm,
+        lambdas,
+        thetas,
+        "tss magnitude",
     )
 
     print(f"structures file: {args.structures}")
