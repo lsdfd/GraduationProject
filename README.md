@@ -30,7 +30,7 @@ src/
 
 `src/dataset/structure/dataset_pre.py`
 
-- 默认生成 `100` 个 `64x64` 二值结构
+- 默认生成 `1000` 个 `64x64` 二值结构
 - 每个样本使用不同随机种子
 - 结构满足 `C4 + sigma_x` 对称
 - 约定 `1 = 材料`，`0 = 空气`
@@ -75,7 +75,7 @@ python src/dataset/rcwa/rcwa_all.py
 如果要修改样本数或阶数：
 
 ```bash
-python src/dataset/rcwa/rcwa_all.py --max_samples 100 --rcwa_orders 7
+python src/dataset/rcwa/rcwa_all.py --max_samples 300 --rcwa_orders 7
 ```
 
 如果要多卡并行（按结构分片）：
@@ -240,7 +240,7 @@ tensorboard --logdir runs
 
 ```bash
 python src/dataset/structure/dataset_pre.py   ->几秒钟
-python src/dataset/rcwa/rcwa_all.py   ->100个数据耗时40min
+python src/dataset/rcwa/rcwa_all.py   ->1000个数据约4.5~5小时（单卡）
 python src/model/train_forward.py     ->几分钟
 python src/model/train_diffusion.py   ->1000个数据大概耗时60min
 python src/model/sample.py
