@@ -41,7 +41,7 @@ def denormalize_with_stats(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> 
     return x * std + mean
 
 
-def build_weight(cond_ch: int, target_lambda: float = 1250.0) -> np.ndarray:
+def build_weight(cond_ch: int, target_lambda: float = 1000.0) -> np.ndarray:
     lambdas, thetas = lambda_theta_grid()
     w = np.full((len(lambdas), len(thetas)), 0.05, dtype=np.float32)
     w[np.argmin(np.abs(lambdas - target_lambda))] = 1.0
@@ -56,11 +56,26 @@ def second_order_target(thetas: np.ndarray) -> np.ndarray:
     return x.astype(np.float64)
 
 
-def second_order_score_row(y: np.ndarray, thetas: np.ndarray, w_center=0.6, w_shape=0.3, w_edge=0.1) -> dict:
+def _outer_band_pairs(thetas: np.ndarray) -> list[tuple[int, int]]:
+    thetas = np.asarray(thetas, dtype=np.float64)
+    idx30 = int(np.argmin(np.abs(np.abs(thetas) - 30.0)))
+    idx35 = int(np.argmin(np.abs(np.abs(thetas) - 35.0)))
+    idx40 = int(np.argmin(np.abs(np.abs(thetas) - 40.0)))
+    return [(idx30, idx35), (idx35, idx40)]
+
+
+def second_order_score_row(
+    y: np.ndarray,
+    thetas: np.ndarray,
+    w_center: float = 0.50,
+    w_shape: float = 0.20,
+    w_edge: float = 0.15,
+    w_outer: float = 0.15,
+) -> dict:
     y = y.astype(np.float64)
     x = second_order_target(thetas)
     if (not np.isfinite(y).all()) or float(np.max(y)) <= 0:
-        return {"score": -1.0, "center": 0.0, "shape": 0.0, "edge": 0.0, "r2": -1.0}
+        return {"score": -1.0, "center": 0.0, "shape": 0.0, "edge": 0.0, "outer": 0.0, "r2": -1.0}
 
     y_norm = y / max(float(np.max(y)), 1e-8)
     denom = max(float(np.sum(x * x)), 1e-8)
@@ -81,11 +96,17 @@ def second_order_score_row(y: np.ndarray, thetas: np.ndarray, w_center=0.6, w_sh
     center_score = float(np.clip(1.0 - center_val / max(edge_mean, 1e-8), 0.0, 1.0))
     shape_score = float(np.clip(r2, 0.0, 1.0)) if a >= 0 else 0.0
     edge_score = float(np.clip(edge_mean / max(float(np.max(y)), 1e-8), 0.0, 1.0))
+    outer_vals = np.asarray([y_norm[i] for i, _ in _outer_band_pairs(thetas)] + [y_norm[_outer_band_pairs(thetas)[-1][1]]], dtype=np.float64)
+    outer_rank_terms = []
+    for lo, hi in _outer_band_pairs(thetas):
+        outer_rank_terms.append(float(np.clip(y_norm[hi] - y_norm[lo], 0.0, 1.0)))
+    outer_score = float(np.mean(outer_rank_terms)) if outer_rank_terms else 0.0
     return {
-        "score": float(w_center * center_score + w_shape * shape_score + w_edge * edge_score),
+        "score": float(w_center * center_score + w_shape * shape_score + w_edge * edge_score + w_outer * outer_score),
         "center": float(center_score),
         "shape": float(shape_score),
         "edge": float(edge_score),
+        "outer": float(outer_score),
         "r2": float(r2),
     }
 
@@ -117,12 +138,13 @@ def second_order_score_map(
     tpp_map: np.ndarray,
     lambdas: np.ndarray,
     thetas: np.ndarray,
-    target_lambda: float = 1250.0,
+    target_lambda: float = 1000.0,
     band_offset_nm: float = 20.0,
     w_band: float = 0.15,
-    w_center: float = 0.6,
-    w_shape: float = 0.3,
-    w_edge: float = 0.1,
+    w_center: float = 0.50,
+    w_shape: float = 0.20,
+    w_edge: float = 0.15,
+    w_outer: float = 0.15,
 ) -> dict:
     main_row = interpolate_lambda_row(tpp_map, lambdas, target_lambda)
     if main_row is None:
@@ -135,10 +157,11 @@ def second_order_score_map(
             "center": 0.0,
             "shape": 0.0,
             "edge": 0.0,
+            "outer": 0.0,
             "r2": -1.0,
         }
 
-    main = second_order_score_row(main_row, thetas, w_center=w_center, w_shape=w_shape, w_edge=w_edge)
+    main = second_order_score_row(main_row, thetas, w_center=w_center, w_shape=w_shape, w_edge=w_edge, w_outer=w_outer)
     band_scores = []
     band_left = np.nan
     band_right = np.nan
@@ -146,7 +169,7 @@ def second_order_score_map(
         row = interpolate_lambda_row(tpp_map, lambdas, target_lambda + delta)
         if row is None or not np.isfinite(row).all():
             continue
-        score = second_order_score_row(row, thetas, w_center=w_center, w_shape=w_shape, w_edge=w_edge)["score"]
+        score = second_order_score_row(row, thetas, w_center=w_center, w_shape=w_shape, w_edge=w_edge, w_outer=w_outer)["score"]
         if name == "left":
             band_left = float(score)
         else:
@@ -169,6 +192,7 @@ def second_order_score_map(
         "center": float(main["center"]),
         "shape": float(main["shape"]),
         "edge": float(main["edge"]),
+        "outer": float(main["outer"]),
         "r2": float(main["r2"]),
     }
 
@@ -198,9 +222,10 @@ def interpolate_lambda_row_torch(spec_map: torch.Tensor, lambdas: np.ndarray, qu
 def second_order_score_row_torch(
     y: torch.Tensor,
     thetas: np.ndarray,
-    w_center: float = 0.6,
-    w_shape: float = 0.3,
-    w_edge: float = 0.1,
+    w_center: float = 0.50,
+    w_shape: float = 0.20,
+    w_edge: float = 0.15,
+    w_outer: float = 0.15,
 ) -> dict[str, torch.Tensor]:
     if y.ndim == 1:
         y = y.unsqueeze(0)
@@ -229,12 +254,18 @@ def second_order_score_row_torch(
     center_score = (1.0 - center_val / edge_mean.clamp_min(1e-8)).clamp(0.0, 1.0)
     shape_score = torch.where(a.squeeze(-1) >= 0.0, r2.clamp(0.0, 1.0), torch.zeros_like(r2))
     edge_score = (edge_mean / row_max.squeeze(-1)).clamp(0.0, 1.0)
-    score = w_center * center_score + w_shape * shape_score + w_edge * edge_score
+    outer_pairs = _outer_band_pairs(thetas_arr)
+    outer_terms = []
+    for lo, hi in outer_pairs:
+        outer_terms.append((y_norm[:, hi] - y_norm[:, lo]).clamp(0.0, 1.0))
+    outer_score = torch.stack(outer_terms, dim=0).mean(dim=0) if outer_terms else torch.zeros_like(center_score)
+    score = w_center * center_score + w_shape * shape_score + w_edge * edge_score + w_outer * outer_score
     return {
         "score": score,
         "center": center_score,
         "shape": shape_score,
         "edge": edge_score,
+        "outer": outer_score,
         "r2": r2,
     }
 
@@ -243,25 +274,26 @@ def second_order_band_score_torch(
     tpp_map: torch.Tensor,
     lambdas: np.ndarray,
     thetas: np.ndarray,
-    target_lambda: float = 1250.0,
+    target_lambda: float = 1000.0,
     band_offset_nm: float = 20.0,
     w_band: float = 0.15,
-    w_center: float = 0.6,
-    w_shape: float = 0.3,
-    w_edge: float = 0.1,
+    w_center: float = 0.50,
+    w_shape: float = 0.20,
+    w_edge: float = 0.15,
+    w_outer: float = 0.15,
 ) -> dict[str, torch.Tensor]:
     main_row = interpolate_lambda_row_torch(tpp_map, lambdas, target_lambda)
     if main_row is None:
         raise ValueError(f"target_lambda={target_lambda} is outside sampled lambdas")
 
-    main = second_order_score_row_torch(main_row, thetas, w_center=w_center, w_shape=w_shape, w_edge=w_edge)
+    main = second_order_score_row_torch(main_row, thetas, w_center=w_center, w_shape=w_shape, w_edge=w_edge, w_outer=w_outer)
     band_rows = []
     left_row = interpolate_lambda_row_torch(tpp_map, lambdas, target_lambda - band_offset_nm)
     right_row = interpolate_lambda_row_torch(tpp_map, lambdas, target_lambda + band_offset_nm)
     if left_row is not None:
-        band_rows.append(second_order_score_row_torch(left_row, thetas, w_center=w_center, w_shape=w_shape, w_edge=w_edge)["score"])
+        band_rows.append(second_order_score_row_torch(left_row, thetas, w_center=w_center, w_shape=w_shape, w_edge=w_edge, w_outer=w_outer)["score"])
     if right_row is not None:
-        band_rows.append(second_order_score_row_torch(right_row, thetas, w_center=w_center, w_shape=w_shape, w_edge=w_edge)["score"])
+        band_rows.append(second_order_score_row_torch(right_row, thetas, w_center=w_center, w_shape=w_shape, w_edge=w_edge, w_outer=w_outer)["score"])
 
     if band_rows:
         bandwidth_score = torch.stack(band_rows, dim=0).mean(dim=0)
@@ -277,11 +309,62 @@ def second_order_band_score_torch(
         "center": main["center"],
         "shape": main["shape"],
         "edge": main["edge"],
+        "outer": main["outer"],
         "r2": main["r2"],
     }
 
 
-def rcwa_eval_1250(structure: torch.Tensor, target_raw: np.ndarray, cond_ch: int, device: str, rcwa_orders: int = 7):
+def rcwa_eval_full_map(
+    structure: torch.Tensor,
+    cond_ch: int,
+    device: str,
+    rcwa_orders: int = 7,
+) -> np.ndarray | None:
+    if torcwa_simulation is None:
+        return None
+
+    lambdas, thetas = lambda_theta_grid()
+    layer = structure.squeeze().to(device)
+    tpp = np.full((len(lambdas), len(thetas)), np.nan, np.float32)
+    tss = np.full_like(tpp, np.nan)
+
+    for i, lam in enumerate(lambdas):
+        for j, theta in enumerate(thetas):
+            out = torcwa_simulation(
+                {
+                    "periodicity": 500.0,
+                    "h": 500.0,
+                    "lam": float(lam),
+                    "tet": float(theta),
+                    "phi": 0.0,
+                    "angle_unit": "deg",
+                    "angle_layer": "input",
+                    "input_medium": "air",
+                    "output_medium": "SiO2",
+                    "structure": "Si",
+                    "n_input": 1.0,
+                    "n_output": 1.45,
+                    "n_structure": 3.4,
+                },
+                layer,
+                rcwa_orders=rcwa_orders,
+                project=False,
+                device=device,
+            )
+            tpp[i, j] = float(out["tpp_mag"].detach().cpu().item())
+            tss[i, j] = float(out["tss_mag"].detach().cpu().item())
+
+    return np.stack([tpp, tss], axis=0) if cond_ch == 2 else tpp[None]
+
+
+def rcwa_eval_target_lambda(
+    structure: torch.Tensor,
+    target_raw: np.ndarray,
+    cond_ch: int,
+    device: str,
+    target_lambda: float = 1000.0,
+    rcwa_orders: int = 7,
+):
     if torcwa_simulation is None:
         return None
     _, thetas = lambda_theta_grid()
@@ -293,7 +376,7 @@ def rcwa_eval_1250(structure: torch.Tensor, target_raw: np.ndarray, cond_ch: int
             {
                 "periodicity": 500.0,
                 "h": 500.0,
-                "lam": 1250.0,
+                "lam": float(target_lambda),
                 "tet": float(theta),
                 "phi": 0.0,
                 "angle_unit": "deg",
@@ -313,20 +396,64 @@ def rcwa_eval_1250(structure: torch.Tensor, target_raw: np.ndarray, cond_ch: int
         tpp[j] = float(out["tpp_mag"].detach().cpu().item())
         tss[j] = float(out["tss_mag"].detach().cpu().item())
     pred = np.stack([tpp, tss], axis=0) if cond_ch == 2 else tpp[None]
-    lam_idx = int(np.argmin(np.abs(lambda_theta_grid()[0] - 1250.0)))
+    lam_idx = int(np.argmin(np.abs(lambda_theta_grid()[0] - float(target_lambda))))
     mae = float(np.mean(np.abs(pred - target_raw[:, lam_idx])))
     return mae, pred
 
 
+def rcwa_second_order_metrics_target_lambda(
+    structure: torch.Tensor,
+    target_raw: np.ndarray,
+    cond_ch: int,
+    device: str,
+    target_lambda: float = 1000.0,
+    rcwa_orders: int = 7,
+) -> dict | None:
+    out = rcwa_eval_target_lambda(
+        structure,
+        target_raw,
+        cond_ch,
+        device,
+        target_lambda=target_lambda,
+        rcwa_orders=rcwa_orders,
+    )
+    if out is None:
+        return None
+    mae, pred = out
+    _, thetas = lambda_theta_grid()
+    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
+    score = second_order_score_row(pred[0], thetas)
+    result = {
+        "rcwa_mae_raw": float(mae),
+        "rcwa_second_order_score": float(score["score"]),
+        "rcwa_center_score": float(score["center"]),
+        "rcwa_shape_score": float(score["shape"]),
+        "rcwa_edge_score": float(score["edge"]),
+        "rcwa_r2": float(score["r2"]),
+        "rcwa_tpp_at_40": float(pred[0, t40_idx]),
+        "rcwa_pred": pred,
+    }
+    if cond_ch == 2:
+        result["rcwa_tss_at_40"] = float(pred[1, t40_idx])
+    return result
+
+
 def plot_map(path: Path, cond: np.ndarray, lambdas: np.ndarray, thetas: np.ndarray, title: str, vmax: float, channel_idx: int = 0):
     img = cond if cond.ndim == 2 else cond[channel_idx]
+    if len(lambdas) == 1:
+        half_step = 5.0
+        y0 = float(lambdas[0] - half_step)
+        y1 = float(lambdas[0] + half_step)
+    else:
+        y0 = float(lambdas[0])
+        y1 = float(lambdas[-1])
     plt.figure(figsize=(5, 4))
     plt.imshow(
         img,
         aspect="auto",
         origin="lower",
         cmap="turbo",
-        extent=[thetas[0], thetas[-1], lambdas[0], lambdas[-1]],
+        extent=[float(thetas[0]), float(thetas[-1]), y0, y1],
         vmin=0.0,
         vmax=vmax,
     )
@@ -342,7 +469,7 @@ def plot_map(path: Path, cond: np.ndarray, lambdas: np.ndarray, thetas: np.ndarr
 def plot_structure(path: Path, x: np.ndarray, title: str):
     img = x.squeeze()
     plt.figure(figsize=(4, 4))
-    plt.imshow(img, cmap="gray", vmin=0.0, vmax=1.0)
+    plt.imshow(img, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
     plt.title(title)
     plt.axis("off")
     plt.tight_layout()

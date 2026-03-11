@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Light topology optimization over diffusion-generated initial structures."""
+"""Multi-start RCWA topology optimization with density filtering and continuation."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -17,23 +18,14 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from model.models import ForwardSurrogate  # noqa: E402
+from dataset.rcwa.rcwa import torcwa_simulation  # noqa: E402
 from infer.common import (  # noqa: E402
-    build_weight,
-    denormalize_with_stats,
     lambda_theta_grid,
-    load_stats,
     plot_structure,
-    rcwa_eval_1250,
-    second_order_band_score_torch,
-    second_order_score_map,
     second_order_score_row,
+    second_order_score_row_torch,
     second_order_target,
 )
-
-BAND_OFFSET_NM = 20.0
-BAND_SCORE_WEIGHT = 0.15
-BAND_LOSS_WEIGHT = 0.12
 
 
 def resolve_from_root(path_like: str | Path) -> Path:
@@ -49,15 +41,12 @@ def latest_laplas_file(name: str) -> str:
     return str(files[-1])
 
 
-def load_target(path: str, stats_path: str, device: str):
+def load_target_raw(path: str) -> np.ndarray:
     x = np.load(path).astype(np.float32)
-    x = x[0] if x.ndim == 4 else x
-    mean, std = load_stats(stats_path)
-    x = (x[None] - mean) / std
-    return torch.from_numpy(x).to(device), mean, std
+    return x[None] if x.ndim == 3 else x
 
 
-def load_inits(path: str, device: str, max_inits=5) -> torch.Tensor:
+def load_init_batch(path: str, device: str, max_inits: int) -> torch.Tensor:
     x = np.load(path).astype(np.float32)
     if x.ndim == 4:
         arr = x
@@ -68,57 +57,92 @@ def load_inits(path: str, device: str, max_inits=5) -> torch.Tensor:
     else:
         raise ValueError(f"Unsupported init shape: {x.shape}")
     arr = arr[: max(1, int(max_inits))]
-    return torch.from_numpy(arr).to(device)
+    return torch.from_numpy(arr).to(device).clamp(0.0, 1.0)
 
 
-def smooth(x, k=5):
-    return F.avg_pool2d(x, k, stride=1, padding=k // 2)
-
-
-def symmetrize(x):
+def symmetrize(x: torch.Tensor) -> torch.Tensor:
     rots = [torch.rot90(x, k, (-2, -1)) for k in range(4)]
     flips = [t.flip(-2) for t in rots]
     return sum(rots + flips) / 8.0
 
 
-def finalize_binary(x):
-    x = symmetrize(smooth(smooth(x, 9), 7))
-    return (x > 0.5).float()
+def density_filter(x: torch.Tensor, radius: int) -> torch.Tensor:
+    if radius <= 0:
+        return x
+    kernel = 2 * radius + 1
+    return F.avg_pool2d(x, kernel, stride=1, padding=radius)
 
 
-def project(x, beta=10.0):
-    x = symmetrize(smooth(smooth(x, 7), 5))
-    return torch.sigmoid(beta * (x - 0.5))
+def project_density(rho: torch.Tensor, beta: float, eta: float = 0.5) -> torch.Tensor:
+    num = torch.tanh(torch.tensor(beta * eta, device=rho.device, dtype=rho.dtype)) + torch.tanh(beta * (rho - eta))
+    den = torch.tanh(torch.tensor(beta * eta, device=rho.device, dtype=rho.dtype)) + torch.tanh(
+        torch.tensor(beta * (1.0 - eta), device=rho.device, dtype=rho.dtype)
+    )
+    return num / den.clamp_min(1e-8)
 
 
-def tv_loss(x):
+def finalize_binary(x: torch.Tensor) -> torch.Tensor:
+    return (symmetrize(x) > 0.5).float()
+
+
+def tv_loss(x: torch.Tensor) -> torch.Tensor:
     return (x[:, :, 1:] - x[:, :, :-1]).abs().mean() + (x[:, :, :, 1:] - x[:, :, :, :-1]).abs().mean()
 
 
-def min_feature_loss(x):
-    return (x - smooth(x, 9)).abs().mean()
+def theta_grid() -> np.ndarray:
+    return np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
 
 
-def plot_tpp_map(path: Path, tpp_map: np.ndarray, lambdas: np.ndarray, thetas: np.ndarray, title: str):
-    plt.figure(figsize=(5, 4))
-    plt.imshow(
-        tpp_map,
-        aspect="auto",
-        origin="lower",
-        cmap="turbo",
-        extent=[float(thetas[0]), float(thetas[-1]), float(lambdas[0]), float(lambdas[-1])],
-        interpolation="bicubic",
-    )
-    plt.xlabel("theta (deg)")
-    plt.ylabel("lambda (nm)")
-    plt.title(title)
-    plt.colorbar(label="|tpp|")
-    plt.tight_layout()
-    plt.savefig(path, dpi=180)
-    plt.close()
+def target_row_tensor(device: str) -> torch.Tensor:
+    return torch.as_tensor(second_order_target(theta_grid()), device=device, dtype=torch.float32).unsqueeze(0)
 
 
-def plot_second_order_curve(path: Path, row: np.ndarray, thetas: np.ndarray, title: str):
+def outer_monotonic_penalty(y_norm: torch.Tensor, thetas: np.ndarray) -> torch.Tensor:
+    if y_norm.ndim == 1:
+        y_norm = y_norm.unsqueeze(0)
+    abs_thetas = np.abs(np.asarray(thetas, dtype=np.float64))
+    idx30 = int(np.argmin(np.abs(abs_thetas - 30.0)))
+    idx35 = int(np.argmin(np.abs(abs_thetas - 35.0)))
+    idx40 = int(np.argmin(np.abs(abs_thetas - 40.0)))
+    p1 = F.relu(y_norm[:, idx30] - y_norm[:, idx35])
+    p2 = F.relu(y_norm[:, idx35] - y_norm[:, idx40])
+    return (p1 + p2).mean()
+
+
+def rcwa_physics_kwargs(target_lambda: float, theta: float) -> dict:
+    return {
+        "periodicity": 500.0,
+        "h": 500.0,
+        "lam": float(target_lambda),
+        "tet": float(theta),
+        "phi": 0.0,
+        "angle_unit": "deg",
+        "angle_layer": "input",
+        "input_medium": "air",
+        "output_medium": "SiO2",
+        "structure": "Si",
+    }
+
+
+def rcwa_tpp_tss_row(x: torch.Tensor, target_lambda: float, device: str, rcwa_orders: int) -> tuple[torch.Tensor, torch.Tensor]:
+    thetas = theta_grid()
+    layer = x.squeeze(0).squeeze(0)
+    tpp_vals = []
+    tss_vals = []
+    for theta in thetas:
+        out = torcwa_simulation(
+            rcwa_physics_kwargs(target_lambda, float(theta)),
+            layer,
+            rcwa_orders=rcwa_orders,
+            project=False,
+            device=device,
+        )
+        tpp_vals.append(out["tpp_mag"].real.float())
+        tss_vals.append(out["tss_mag"].real.float())
+    return torch.stack(tpp_vals, dim=0), torch.stack(tss_vals, dim=0)
+
+
+def plot_tpp_row(path: Path, row: np.ndarray, thetas: np.ndarray, title: str) -> None:
     target = second_order_target(thetas)
     y = row.astype(np.float64)
     yn = y / max(float(np.max(y)), 1e-8)
@@ -136,157 +160,233 @@ def plot_second_order_curve(path: Path, row: np.ndarray, thetas: np.ndarray, tit
     plt.close()
 
 
-def optimize_one(init, target, weight, surrogate, steps, lr, target_mae, mean_t, std_t, lambdas, thetas):
-    logits = torch.logit(init.clamp(1e-4, 1 - 1e-4), eps=1e-4).requires_grad_(True)
-    opt = torch.optim.Adam([logits], lr=lr)
-    hist, best = [], (1e9, None, None)
-    for step in range(steps):
-        x = project(torch.sigmoid(logits), beta=min(4.0 + step / 20.0, 20.0))
-        pred = surrogate(x)
-        pred_raw = pred * std_t + mean_t
-        loss_fit = ((pred - target).abs() * weight).sum() / weight.sum()
-        loss_bg = (((pred - target).abs() * (1.0 - weight / weight.max()))).mean()
-        band_pack = second_order_band_score_torch(
-            pred_raw[:, 0],
-            lambdas,
-            thetas,
-            target_lambda=1250.0,
-            band_offset_nm=BAND_OFFSET_NM,
-            w_band=BAND_SCORE_WEIGHT,
-        )
-        loss_band = 1.0 - band_pack["bandwidth_score"].mean()
-        loss_bin = (x * (1 - x)).mean()
-        loss_sym = (x - symmetrize(x)).abs().mean()
-        loss_tv = tv_loss(x)
-        loss_feat = min_feature_loss(x)
-        loss = (
-            loss_fit
-            + 0.20 * loss_bg
-            + BAND_LOSS_WEIGHT * loss_band
-            + 0.15 * loss_bin
-            + 0.08 * loss_sym
-            + 0.05 * loss_tv
-            + 0.08 * loss_feat
-        )
+def evaluate_binary_candidate(x_cont: torch.Tensor, args) -> tuple[torch.Tensor, dict]:
+    thetas = theta_grid()
+    x_bin = finalize_binary(x_cont)
+    tpp_row, tss_row = rcwa_tpp_tss_row(x_bin, args.target_lambda, args.device, args.rcwa_orders)
+    tpp_np = tpp_row.detach().cpu().numpy()
+    tss_np = tss_row.detach().cpu().numpy()
+    score = second_order_score_row(tpp_np, thetas)
+    return x_bin, {
+        "tpp_row": tpp_np,
+        "tss_row": tss_np,
+        "score": float(score["score"]),
+        "center": float(score["center"]),
+        "shape": float(score["shape"]),
+        "edge": float(score["edge"]),
+        "outer": float(score["outer"]),
+        "r2": float(score["r2"]),
+    }
+
+
+def beta_for_step(step: int, total_steps: int, beta_start: float, beta_end: float) -> float:
+    if total_steps <= 1:
+        return beta_end
+    alpha = step / float(total_steps - 1)
+    return float(beta_start + alpha * (beta_end - beta_start))
+
+
+def optimize_one(init: torch.Tensor, args, candidate_idx: int) -> tuple[torch.Tensor, torch.Tensor, dict, dict, list[dict], float]:
+    thetas = theta_grid()
+    target_row = target_row_tensor(args.device)
+    rho_param = init.clone().detach().requires_grad_(True)
+    opt = torch.optim.Adam([rho_param], lr=args.lr)
+    hist: list[dict] = []
+    best_loss = float("inf")
+    best_cont_state: tuple[torch.Tensor, dict] | None = None
+    best_bin_score = -float("inf")
+    best_bin_state: tuple[torch.Tensor, torch.Tensor, dict] | None = None
+    t_start = time.perf_counter()
+
+    raw_init_bin, raw_init_metrics = evaluate_binary_candidate(init.detach(), args)
+    best_bin_score = raw_init_metrics["score"]
+    best_bin_state = (init.detach().clone(), raw_init_bin.detach().clone(), raw_init_metrics)
+    hist.append(
+        {
+            "step": -1,
+            "raw_init_score": float(raw_init_metrics["score"]),
+            "raw_init_center": float(raw_init_metrics["center"]),
+            "raw_init_shape": float(raw_init_metrics["shape"]),
+            "raw_init_edge": float(raw_init_metrics["edge"]),
+            "raw_init_outer": float(raw_init_metrics["outer"]),
+        }
+    )
+    print(
+        f"[opt {candidate_idx:02d}] raw_init binchk={raw_init_metrics['score']:.4f} "
+        f"center={raw_init_metrics['center']:.4f} shape={raw_init_metrics['shape']:.4f} "
+        f"edge={raw_init_metrics['edge']:.4f} outer={raw_init_metrics['outer']:.4f}",
+        flush=True,
+    )
+
+    for step in range(args.steps):
+        beta = beta_for_step(step, args.steps, args.beta_start, args.beta_end)
+        rho = symmetrize(rho_param).clamp(0.0, 1.0)
+        rho_f = density_filter(rho, args.filter_radius)
+        x = project_density(rho_f, beta=beta, eta=args.proj_eta)
+
+        tpp_row, tss_row = rcwa_tpp_tss_row(x, args.target_lambda, args.device, args.rcwa_orders)
+        main_pack = second_order_score_row_torch(tpp_row, thetas)
+        row_max = tpp_row.amax(dim=-1, keepdim=True).clamp_min(1e-8)
+        y_norm = tpp_row / row_max
+        loss_fit = 1.0 - main_pack["score"].mean()
+        loss_row = (y_norm - target_row).abs().mean()
+        loss_outer = outer_monotonic_penalty(y_norm, thetas)
+        loss_bin = (x * (1.0 - x)).mean()
+        loss_tv = tv_loss(rho_f)
+        loss = loss_fit + 0.10 * loss_row + 0.10 * loss_outer + 0.06 * loss_bin + 0.02 * loss_tv
+
         opt.zero_grad()
         loss.backward()
         opt.step()
+        with torch.no_grad():
+            rho_param.clamp_(0.0, 1.0)
 
         item = {
             "step": step,
+            "beta": beta,
             "loss": float(loss.item()),
             "fit": float(loss_fit.item()),
-            "bg": float(loss_bg.item()),
-            "band": float(loss_band.item()),
+            "center": float(main_pack["center"].mean().item()),
+            "shape": float(main_pack["shape"].mean().item()),
+            "edge": float(main_pack["edge"].mean().item()),
+            "outer": float(main_pack["outer"].mean().item()),
+            "row": float(loss_row.item()),
+            "mono": float(loss_outer.item()),
             "bin": float(loss_bin.item()),
-            "sym": float(loss_sym.item()),
             "tv": float(loss_tv.item()),
-            "feat": float(loss_feat.item()),
         }
         hist.append(item)
-        if item["loss"] < best[0]:
-            best = (item["loss"], x.detach().clone(), pred.detach().clone())
-        if step % 20 == 0 or step + 1 == steps:
-            print(
-                f"[opt] step={step:03d} loss={item['loss']:.4f} fit={item['fit']:.4f} "
-                f"bg={item['bg']:.4f} band={item['band']:.4f} bin={item['bin']:.4f} sym={item['sym']:.4f}"
+
+        if item["loss"] < best_loss:
+            best_loss = item["loss"]
+            best_cont_state = (
+                x.detach().clone(),
+                {
+                    "tpp_row": tpp_row.detach().cpu().numpy(),
+                    "tss_row": tss_row.detach().cpu().numpy(),
+                    "score": float(main_pack["score"].mean().item()),
+                    "center": float(main_pack["center"].mean().item()),
+                    "shape": float(main_pack["shape"].mean().item()),
+                    "edge": float(main_pack["edge"].mean().item()),
+                    "outer": float(main_pack["outer"].mean().item()),
+                    "r2": float(main_pack["r2"].mean().item()),
+                },
             )
-        if item["fit"] <= target_mae:
-            print(f"[opt] early stop at step={step:03d}, fit={item['fit']:.4f} <= target_mae={target_mae:.4f}")
-            break
-    return best[1], best[2], hist
+
+        should_eval_bin = step == 0 or (step + 1) % args.binary_eval_every == 0 or step + 1 == args.steps
+        if should_eval_bin:
+            x_bin, bin_metrics = evaluate_binary_candidate(x.detach(), args)
+            item["bin_eval_score"] = float(bin_metrics["score"])
+            item["bin_eval_center"] = float(bin_metrics["center"])
+            item["bin_eval_shape"] = float(bin_metrics["shape"])
+            item["bin_eval_edge"] = float(bin_metrics["edge"])
+            item["bin_eval_outer"] = float(bin_metrics["outer"])
+            if bin_metrics["score"] > best_bin_score:
+                best_bin_score = bin_metrics["score"]
+                best_bin_state = (x.detach().clone(), x_bin.detach().clone(), bin_metrics)
+
+        if step % args.log_every == 0 or step + 1 == args.steps:
+            elapsed = time.perf_counter() - t_start
+            step_time = elapsed / max(step + 1, 1)
+            eta = max(args.steps - step - 1, 0) * step_time
+            extra = ""
+            if "bin_eval_score" in item:
+                extra = f" binchk={item['bin_eval_score']:.4f}"
+            print(
+                f"[opt {candidate_idx:02d}] step={step:03d} beta={beta:.1f} loss={item['loss']:.4f} fit={item['fit']:.4f} "
+                f"center={item['center']:.4f} shape={item['shape']:.4f} edge={item['edge']:.4f} outer={item['outer']:.4f} "
+                f"row={item['row']:.4f} mono={item['mono']:.4f} bin={item['bin']:.4f} tv={item['tv']:.4f}"
+                f"{extra} elapsed={elapsed:.1f}s eta={eta:.1f}s",
+                flush=True,
+            )
+
+    if best_cont_state is None or best_bin_state is None:
+        raise RuntimeError("Optimization did not produce any valid state.")
+
+    return best_cont_state[0], best_bin_state[1], best_cont_state[1], best_bin_state[2], hist, time.perf_counter() - t_start
 
 
-def run_candidate(idx: int, init: torch.Tensor, target: torch.Tensor, target_raw: np.ndarray, weight: torch.Tensor, surrogate: torch.nn.Module, args, mean: np.ndarray, std: np.ndarray, save_dir: Path) -> dict:
-    lambdas, thetas = lambda_theta_grid()
-    lam_idx = int(np.argmin(np.abs(lambdas - 1250.0)))
+def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, save_dir: Path) -> dict:
+    thetas = theta_grid()
     t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
     cand_dir = save_dir / f"candidate_{idx:02d}"
     cand_dir.mkdir(parents=True, exist_ok=True)
 
-    mean_t = torch.from_numpy(mean).to(args.device)
-    std_t = torch.from_numpy(std).to(args.device)
-    best_x, best_pred, hist = optimize_one(
-        init,
-        target,
-        weight,
-        surrogate,
-        args.steps,
-        args.lr,
-        args.target_mae,
-        mean_t,
-        std_t,
-        lambdas,
-        thetas,
-    )
-    best_bin = finalize_binary(best_x)
-    pred_raw = denormalize_with_stats(best_pred.cpu().numpy(), mean, std)
-    tpp_map = pred_raw[0, 0]
-    second = second_order_score_map(
-        tpp_map,
-        lambdas,
-        thetas,
-        target_lambda=1250.0,
-        band_offset_nm=BAND_OFFSET_NM,
-        w_band=BAND_SCORE_WEIGHT,
-    )
-    out = {
-        "surrogate_mae_norm": float((((best_pred - target).abs() * weight).sum() / weight.sum()).item()),
-        "surrogate_mae_raw": float(np.mean(np.abs(pred_raw - target_raw))),
-        "second_order_score": float(second["score"]),
-        "main_second_order_score": float(second["main_score"]),
-        "bandwidth_second_order_score": float(second["bandwidth_score"]),
-        "band_left_score": float(second["band_left_score"]),
-        "band_right_score": float(second["band_right_score"]),
-        "center_score": float(second["center"]),
-        "shape_score": float(second["shape"]),
-        "edge_score": float(second["edge"]),
-        "r2": float(second["r2"]),
-        "tpp_at_40": float(tpp_map[lam_idx, t40_idx]),
-    }
-    if not args.skip_rcwa_eval:
-        rcwa = rcwa_eval_1250(best_bin, target_raw[0], int(target.shape[1]), args.device)
-        if rcwa is not None:
-            rcwa_mae, rcwa_pred = rcwa
-            out["rcwa_mae_raw"] = float(rcwa_mae)
-            out["rcwa_tpp_at_40"] = float(rcwa_pred[0, t40_idx])
-            np.save(cand_dir / "best_rcwa_pred.npy", rcwa_pred)
+    best_x_cont, best_bin, best_rcwa_cont, best_rcwa_bin, hist, opt_elapsed = optimize_one(init, args, idx)
+    bin_tpp_np = best_rcwa_bin["tpp_row"]
+    bin_tss_np = best_rcwa_bin["tss_row"]
 
-    np.save(cand_dir / "optimized_continuous.npy", best_x.cpu().numpy())
+    lambdas, _ = lambda_theta_grid()
+    lam_idx = int(np.argmin(np.abs(lambdas - float(args.target_lambda))))
+    target_row = target_raw[0, 0, lam_idx]
+    out = {
+        "candidate_idx": idx,
+        "target_lambda_nm": float(args.target_lambda),
+        "optimization_time_sec": float(opt_elapsed),
+        "rcwa_second_order_score": float(best_rcwa_bin["score"]),
+        "rcwa_center_score": float(best_rcwa_bin["center"]),
+        "rcwa_shape_score": float(best_rcwa_bin["shape"]),
+        "rcwa_edge_score": float(best_rcwa_bin["edge"]),
+        "rcwa_outer_score": float(best_rcwa_bin["outer"]),
+        "rcwa_r2": float(best_rcwa_bin["r2"]),
+        "rcwa_tpp_at_40": float(bin_tpp_np[t40_idx]),
+        "target_tpp_at_40": float(target_row[t40_idx]),
+        "best_continuous_score": float(best_rcwa_cont["score"]),
+        "best_continuous_center": float(best_rcwa_cont["center"]),
+        "best_continuous_shape": float(best_rcwa_cont["shape"]),
+        "best_continuous_edge": float(best_rcwa_cont["edge"]),
+        "best_continuous_outer": float(best_rcwa_cont["outer"]),
+    }
+
+    np.save(cand_dir / "optimized_continuous.npy", best_x_cont.cpu().numpy())
     np.save(cand_dir / "optimized_binary.npy", best_bin.cpu().numpy())
-    np.save(cand_dir / "optimized_pred_cond.npy", best_pred.cpu().numpy())
-    np.save(cand_dir / "optimized_pred_cond_raw.npy", pred_raw)
-    np.save(cand_dir / "target_cond.npy", target.cpu().numpy())
-    plot_structure(cand_dir / "optimized_continuous.png", best_x.cpu().numpy(), "Optimized continuous")
-    plot_structure(cand_dir / "optimized_binary.png", best_bin.cpu().numpy(), "Optimized binary")
-    plot_tpp_map(cand_dir / "optimized_tpp_map.png", tpp_map, lambdas, thetas, "Optimized tpp_mag")
-    plot_second_order_curve(cand_dir / "optimized_second_order_curve.png", tpp_map[lam_idx], thetas, "1250nm second-order fit")
+    np.save(cand_dir / "optimized_rcwa_tpp_row.npy", bin_tpp_np)
+    np.save(cand_dir / "optimized_rcwa_tss_row.npy", bin_tss_np)
+    np.save(cand_dir / "optimized_rcwa_continuous_tpp_row.npy", best_rcwa_cont["tpp_row"])
+    np.save(cand_dir / "optimized_rcwa_continuous_tss_row.npy", best_rcwa_cont["tss_row"])
+    np.save(cand_dir / "target_cond_raw.npy", target_raw)
+    plot_structure(cand_dir / "optimized_continuous.png", best_x_cont.cpu().numpy(), f"Optimized continuous {idx:02d}")
+    plot_structure(cand_dir / "optimized_binary.png", best_bin.cpu().numpy(), f"Optimized binary {idx:02d}")
+    plot_tpp_row(cand_dir / "optimized_second_order_curve.png", bin_tpp_np, thetas, f"{args.target_lambda:.0f}nm fit {idx:02d}")
     with (cand_dir / "optimization_log.json").open("w", encoding="utf-8") as f:
-        json.dump({"target": args.target, "init": args.init, "candidate_idx": idx, "metrics": out, "history_tail": hist[-20:]}, f, ensure_ascii=False, indent=2)
-    return {"candidate_idx": idx, **out}
+        json.dump(
+            {
+                "target": args.target,
+                "init": args.init,
+                "candidate_idx": idx,
+                "metrics": out,
+                "history_tail": hist[-40:],
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    return out
 
 
 def main():
-    p = argparse.ArgumentParser(description="Optimize one or multiple initial structures with surrogate guidance.")
+    p = argparse.ArgumentParser(description="Multi-start RCWA topology optimization from laplas top-k samples.")
     p.add_argument("--target")
     p.add_argument("--init")
-    p.add_argument("--stats", default=str(ROOT / "checkpoints" / "cond_stats.npz"))
-    p.add_argument("--forward_ckpt", default=str(ROOT / "checkpoints" / "forward_best.pt"))
-    p.add_argument("--steps", type=int, default=500)
-    p.add_argument("--lr", type=float, default=0.02)
-    p.add_argument("--target_mae", type=float, default=0.01)
+    p.add_argument("--steps", type=int, default=100)
+    p.add_argument("--lr", type=float, default=0.005)
     p.add_argument("--save_dir", default=str(ROOT / "samples" / "optimized"))
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--skip_rcwa_eval", action="store_true")
+    p.add_argument("--target_lambda", type=float, default=1000.0)
+    p.add_argument("--rcwa_orders", type=int, default=7)
+    p.add_argument("--binary_eval_every", type=int, default=10)
     p.add_argument("--max_inits", type=int, default=5)
+    p.add_argument("--filter_radius", type=int, default=1)
+    p.add_argument("--proj_eta", type=float, default=0.5)
+    p.add_argument("--beta_start", type=float, default=4.0)
+    p.add_argument("--beta_end", type=float, default=16.0)
+    p.add_argument("--log_every", type=int, default=10)
     args = p.parse_args()
 
     if args.target:
         args.target = str(resolve_from_root(args.target))
     if args.init:
         args.init = str(resolve_from_root(args.init))
-    args.stats = str(resolve_from_root(args.stats))
-    args.forward_ckpt = str(resolve_from_root(args.forward_ckpt))
     args.save_dir = str(resolve_from_root(args.save_dir))
 
     save_dir = Path(args.save_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -298,32 +398,34 @@ def main():
         default_init = latest_laplas_file("topk_samples.npy")
     args.init = args.init or default_init
 
-    target, mean, std = load_target(args.target, args.stats, args.device)
-    target_raw = np.load(args.target).astype(np.float32)
-    target_raw = target_raw[None] if target_raw.ndim == 3 else target_raw
-    inits = load_inits(args.init, args.device, max_inits=args.max_inits).clamp(0, 1)
-
-    cond_ch = int(target.shape[1])
-    weight = torch.from_numpy(build_weight(cond_ch)[None]).to(args.device)
-    surrogate = ForwardSurrogate(cond_ch).to(args.device)
-    surrogate.load_state_dict(torch.load(args.forward_ckpt, map_location=args.device)["model"])
-    surrogate.eval()
-    for p_ in surrogate.parameters():
-        p_.requires_grad = False
+    target_raw = load_target_raw(args.target)
+    init_batch = load_init_batch(args.init, args.device, args.max_inits)
 
     rows = []
-    for i in range(inits.shape[0]):
-        print(f"[opt] candidate {i + 1}/{inits.shape[0]}")
-        rows.append(run_candidate(i, inits[i:i + 1], target, target_raw, weight, surrogate, args, mean, std, save_dir))
+    total_start = time.perf_counter()
+    for idx in range(init_batch.shape[0]):
+        print(f"[opt] candidate {idx + 1}/{init_batch.shape[0]}", flush=True)
+        rows.append(run_candidate(idx, init_batch[idx: idx + 1], target_raw, args, save_dir))
 
-    rows = sorted(rows, key=lambda d: d["second_order_score"], reverse=True)
+    rows = sorted(rows, key=lambda x: x["rcwa_second_order_score"], reverse=True)
     with (save_dir / "optimization_summary.json").open("w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
 
     print("saved_to:", save_dir)
     print("target_from:", args.target)
     print("init_from:", args.init)
-    print("ranking_by_second_order:", [{"candidate_idx": r["candidate_idx"], "second_order_score": r["second_order_score"], "tpp_at_40": r["tpp_at_40"]} for r in rows])
+    print(f"total_time_sec: {time.perf_counter() - total_start:.2f}")
+    print(
+        "ranking:",
+        [
+            {
+                "candidate_idx": r["candidate_idx"],
+                "score": r["rcwa_second_order_score"],
+                "tpp_at_40": r["rcwa_tpp_at_40"],
+            }
+            for r in rows
+        ],
+    )
 
 
 if __name__ == "__main__":
