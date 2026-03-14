@@ -8,6 +8,12 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def resolve_from_root(path_like: Path) -> Path:
+    return path_like if path_like.is_absolute() else ROOT / path_like
+
 
 def load_bundle(npz_path: Path, field: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if not npz_path.exists():
@@ -300,9 +306,9 @@ def plot_overview(
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Per-lambda second-order scoring (higher is better)")
-    p.add_argument("--in_npz", type=Path, default=Path("data/train_data_mag.npz"))
+    p.add_argument("--in_npz", type=Path, default=ROOT / "data" / "train_data.npz")
     p.add_argument("--field", default="tpp_mag")
-    p.add_argument("--out_dir", type=Path, default=Path("data/second_order_scores"))
+    p.add_argument("--out_dir", type=Path, default=ROOT / "data" / "second_order_scores")
     p.add_argument("--topk", type=int, default=20)
     p.add_argument("--w_center", type=float, default=0.6)
     p.add_argument("--w_shape", type=float, default=0.3)
@@ -310,6 +316,9 @@ def main() -> None:
     p.add_argument("--plot_topk", type=int, default=5)
     p.add_argument("--theta_ref", type=float, default=40.0)
     args = p.parse_args()
+
+    args.in_npz = resolve_from_root(args.in_npz)
+    args.out_dir = resolve_from_root(args.out_dir)
 
     structures, spec, lambdas, thetas = load_bundle(args.in_npz, args.field)
     pack = score_spectra(spec, thetas, args.w_center, args.w_shape, args.w_edge)
@@ -340,4 +349,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

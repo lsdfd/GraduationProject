@@ -11,3 +11,6 @@ runs/
 *.npy
 *.pt
 *.log
+!data/train_data.npz
+!data/structures_test/
+!data/structures_test/**

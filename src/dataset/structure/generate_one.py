@@ -10,13 +10,17 @@ from scipy.ndimage import zoom, gaussian_filter, binary_opening, binary_closing
 # ============================================================
 
 RNG_SEED = None          # None 表示每次随机；改成整数可复现，例如 0
-N_COARSE = 16            # 粗网格尺寸
+N_COARSE = 16            # 比原来的 24/32 更粗，但不要粗到大量样本被清空
 N_FINE = 64              # 最终细网格尺寸
 
-SIGMA1 = 1.6             # 第一次高斯滤波：控制大轮廓是否碎
-SIGMA2 = 1.0             # 第二次高斯滤波：控制边界是否圆滑
-TARGET_FILL = 0.4     # 目标占空比（材料面积比例），0~1
-MIN_FEATURE_PX = 5      # 最小特征尺寸（像素级近似控制），越大越不碎
+# 默认参数改成更偏“制造友好”的展示版：
+# - 周期 500 nm、64 像素时，1 px 约 7.8 nm
+# - MIN_FEATURE_PX=10 对应约 78 nm，明显比之前 23~39 nm 更现实
+# - 更大的 SIGMA 和更小的 N_COARSE 会抑制迷宫状碎结构
+SIGMA1 = 1.9             # 第一次高斯滤波：抑制碎裂，但不过度抹平
+SIGMA2 = 1.1             # 第二次高斯滤波：边界圆滑
+TARGET_FILL = 0.45       # 稍高于 0.4，避免低填充率下被形态学清理后直接“没了”
+MIN_FEATURE_PX = 7       # 约 55 nm，先做温和版制造约束，避免一上来就清空
 
 SAVE_FIG = True          # 是否保存流程图
 SAVE_NPY = True          # 是否保存最终64x64数组
@@ -99,12 +103,31 @@ def clean_binary(b, min_feature_px):
     if k <= 1:
         return symmetrize_binary(b)
 
-    structure = np.ones((k, k), dtype=bool)
-    x = b.astype(bool)
-    x = binary_opening(x, structure=structure)
-    x = binary_closing(x, structure=structure)
+    x0 = b.astype(bool)
+    fill0 = float(x0.mean())
+    tried = []
+
+    # 先从目标尺寸做开闭运算；如果清理过头，再自动退一步。
+    for kk in (k, max(1, k - 2), max(1, k // 2)):
+        structure = np.ones((kk, kk), dtype=bool)
+        x = binary_opening(x0, structure=structure)
+        x = binary_closing(x, structure=structure)
+        x = symmetrize_binary(x.astype(np.uint8)).astype(bool)
+        fill = float(x.mean())
+        tried.append((kk, fill))
+        if fill >= max(0.16, 0.45 * fill0):
+            return x.astype(np.uint8)
+
+    # 如果 opening 仍然太狠，就退化成更保守的 closing-only，优先保留大块区域。
+    kk = max(1, k // 2)
+    structure = np.ones((kk, kk), dtype=bool)
+    x = binary_closing(x0, structure=structure)
     x = symmetrize_binary(x.astype(np.uint8)).astype(bool)
-    return x.astype(np.uint8)
+    if float(x.mean()) > 0:
+        return x.astype(np.uint8)
+
+    # 极端情况下直接返回原二值图，至少不让样本“凭空消失”。
+    return symmetrize_binary(b)
 
 
 def check_symmetry(b):
@@ -255,10 +278,12 @@ if __name__ == "__main__":
     print(f"C4 对称: {data['c4_ok']}")
     print(f"sigma_x 对称: {data['sx_ok']}")
     print("调参建议：")
-    print("- 结构太碎：增大 SIGMA1 / SIGMA2 / MIN_FEATURE_PX，或减小 N_COARSE")
+    print("- 结构太碎：继续增大 SIGMA1 / SIGMA2 / MIN_FEATURE_PX，或继续减小 N_COARSE")
     print("- 结构太胖：减小 TARGET_FILL")
     print("- 结构太瘦：增大 TARGET_FILL")
     print("- 想更细节：增大 N_COARSE；想更大块：减小 N_COARSE")
+    print("- 当前默认值是温和制造约束版；如果还是太碎，可把 MIN_FEATURE_PX 提到 8~10")
+    print("- 如果出现“二值化后几乎没了”，先把 TARGET_FILL 调高或把 MIN_FEATURE_PX 降低")
 
     save_final_array(final)
     plot_results(data)
