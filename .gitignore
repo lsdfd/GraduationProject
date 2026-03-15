@@ -1,9 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
-# Keep generated data artifacts ignored, but allow data scripts to be tracked.
-data/*
-!data/**/*.py
+# Generated artifacts
 checkpoints/
 samples/
 runs/
@@ -11,6 +9,7 @@ runs/
 *.npy
 *.pt
 *.log
-!data/train_data.npz
-!data/structures_test/
-!data/structures_test/**
+
+# Keep data scripts tracked, but ignore generated data outputs.
+data/*
+!data/**/*.py
