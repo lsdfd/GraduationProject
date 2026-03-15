@@ -83,7 +83,7 @@ def build_dataset(num_samples, out_dir):
 def main():
     root = Path(__file__).resolve().parents[3]
     p = argparse.ArgumentParser(description="批量生成 64x64 超表面结构")
-    p.add_argument("num_samples", nargs="?", type=int, default=1000, help="默认 1000")
+    p.add_argument("num_samples", nargs="?", type=int, default=5000, help="默认 5000")
     p.add_argument("--num_samples", dest="num_samples_flag", type=int, default=None, help="样本数；优先级高于位置参数")
     p.add_argument("--out_dir", default=str(root / "data" / "structures"), help="默认 data/structures")
     a = p.parse_args()

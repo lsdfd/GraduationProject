@@ -152,7 +152,7 @@ def main():
     p.add_argument("--structures")
     p.add_argument("--out")
     p.add_argument("--log")
-    p.add_argument("--max_samples", type=int, default=10000, help="最多仿真的样本数；默认取前 10000 个结构")
+    p.add_argument("--max_samples", type=int, default=5000, help="最多仿真的样本数；默认取前 5000 个结构")
     p.add_argument("--rcwa_orders", type=int, default=7)
     p.add_argument("--save_every", type=int, default=10)
     p.add_argument("--device", default=None, help="单设备模式；默认自动使用全部可见 GPU，无 GPU 时回退到 cpu")
