@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_STRUCTURES = ROOT / "data" / "structures" / "structures.npy"
 DEFAULT_OUT = ROOT / "data" / "train_data.npz"
 DEFAULT_LOG = ROOT / "data" / "rcwa.log"
-LAMBDAS = np.arange(1000.0, 1500.1, 50.0, dtype=np.float32)
+LAMBDAS = np.arange(800.0, 1300.1, 50.0, dtype=np.float32)
 THETAS = np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
 
 
@@ -89,7 +89,13 @@ def parse_devices(devices_arg, device_arg):
         if not devices:
             raise ValueError("--devices 为空，请传入类似 cuda:0,cuda:1")
         return devices
-    return [device_arg]
+    if device_arg:
+        return [device_arg]
+    if torch.cuda.is_available():
+        count = torch.cuda.device_count()
+        if count > 0:
+            return [f"cuda:{i}" for i in range(count)]
+    return ["cpu"]
 
 
 def _run_indices(structures, indices, device, orders):
@@ -146,10 +152,10 @@ def main():
     p.add_argument("--structures")
     p.add_argument("--out")
     p.add_argument("--log")
-    p.add_argument("--max_samples", type=int, default=1000)
+    p.add_argument("--max_samples", type=int, default=10000, help="最多仿真的样本数；默认取前 10000 个结构")
     p.add_argument("--rcwa_orders", type=int, default=7)
     p.add_argument("--save_every", type=int, default=10)
-    p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--device", default=None, help="单设备模式；默认自动使用全部可见 GPU，无 GPU 时回退到 cpu")
     p.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
     a = p.parse_args()
 
@@ -157,7 +163,8 @@ def main():
     out_path = Path(a.out) if a.out else DEFAULT_OUT
     log_path = Path(a.log) if a.log else DEFAULT_LOG
     structures = np.load(structures_path).astype(np.uint8)
-    structures = structures[: max(1, a.max_samples)]
+    if a.max_samples is not None:
+        structures = structures[: max(1, a.max_samples)]
 
     if structures.ndim != 3 or structures.shape[1:] != (64, 64):
         raise ValueError(f"structures.npy 应为 [N, 64, 64]，实际得到 {structures.shape}")

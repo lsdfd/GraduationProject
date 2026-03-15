@@ -16,7 +16,7 @@ except Exception:
 
 
 def lambda_theta_grid() -> tuple[np.ndarray, np.ndarray]:
-    lambdas = np.arange(1000.0, 1500.1, 50.0, dtype=np.float32)
+    lambdas = np.arange(800.0, 1300.1, 50.0, dtype=np.float32)
     thetas = np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
     return lambdas, thetas
 

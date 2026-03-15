@@ -97,7 +97,7 @@ def load_lambda_theta(path: Path, tpp_shape: tuple[int, int]) -> tuple[np.ndarra
 
     lambda_count, theta_count = tpp_shape
     if (lambda_count, theta_count) == (11, 17):
-        lambdas = np.arange(1000.0, 1500.1, 50.0, dtype=np.float32)
+        lambdas = np.arange(800.0, 1300.1, 50.0, dtype=np.float32)
         thetas = np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
         return lambdas, thetas
 
@@ -286,8 +286,8 @@ def main() -> None:
     parser.add_argument("--structures", type=Path, default=default_structures_path())
     parser.add_argument("--train", type=Path, default=default_train_path())
     parser.add_argument("--out_dir", type=Path, default=ROOT / "vis")
-    parser.add_argument("--num_structures", type=int, default=1000)
-    parser.add_argument("--num_tpp", type=int, default=1000)
+    parser.add_argument("--num_structures", type=int, default=-1, help="结构可视化数量；<=0 表示全部")
+    parser.add_argument("--num_tpp", type=int, default=-1, help="tpp/tss 可视化数量；<=0 表示全部")
     parser.add_argument("--page_size", type=int, default=100)
     parser.add_argument("--tpp_norm", choices=["global", "per_sample"], default="global")
     args = parser.parse_args()

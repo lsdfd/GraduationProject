@@ -10,7 +10,7 @@ from scipy.ndimage import zoom, gaussian_filter, binary_opening, binary_closing
 # ============================================================
 
 RNG_SEED = None          # None 表示每次随机；改成整数可复现，例如 0
-N_COARSE = 16            # 比原来的 24/32 更粗，但不要粗到大量样本被清空
+N_COARSE = 8            # 比原来的 24/32 更粗，但不要粗到大量样本被清空
 N_FINE = 64              # 最终细网格尺寸
 
 # 默认参数改成更偏“制造友好”的展示版：
@@ -19,7 +19,7 @@ N_FINE = 64              # 最终细网格尺寸
 # - 更大的 SIGMA 和更小的 N_COARSE 会抑制迷宫状碎结构
 SIGMA1 = 1.9             # 第一次高斯滤波：抑制碎裂，但不过度抹平
 SIGMA2 = 1.1             # 第二次高斯滤波：边界圆滑
-TARGET_FILL = 0.45       # 稍高于 0.4，避免低填充率下被形态学清理后直接“没了”
+TARGET_FILL = 0.7       # 稍高于 0.4，避免低填充率下被形态学清理后直接“没了”
 MIN_FEATURE_PX = 7       # 约 55 nm，先做温和版制造约束，避免一上来就清空
 
 SAVE_FIG = True          # 是否保存流程图

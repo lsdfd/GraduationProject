@@ -30,16 +30,29 @@ src/
 
 `src/dataset/structure/dataset_pre.py`
 
-- 默认生成 `100` 个 `64x64` 二值结构
+- 默认生成 `1000` 个 `64x64` 二值结构，也可通过参数传入任意样本数
 - 每个样本使用不同随机种子
 - 结构满足 `C4 + sigma_x` 对称
 - 约定 `1 = 材料`，`0 = 空气`
+- 批量生成时固定使用 `generate_one.py` 当前参数：
+  - `N_COARSE = 8`
+  - `N_FINE = 64`
+  - `SIGMA1 = 1.9`
+  - `SIGMA2 = 1.1`
+  - `MIN_FEATURE_PX = 7`
+- `TARGET_FILL` 在 `0.5 / 0.6 / 0.7` 三档之间按样本数尽量平均分配
 - 输出到 `data/structures/structures.npy`
 
 运行：
 
 ```bash
 python src/dataset/structure/dataset_pre.py
+```
+
+如果要指定样本数：
+
+```bash
+python src/dataset/structure/dataset_pre.py --num_samples 3000
 ```
 
 ### 2. RCWA 批量仿真
@@ -58,10 +71,10 @@ python src/dataset/structure/dataset_pre.py
 
 采样网格：
 
-- `lambda = 1000, 1050, ..., 1500`，共 `11` 个点
+- `lambda = 800, 850, ..., 1300`，共 `11` 个点
 - `theta = -40, -35, ..., 40`，共 `17` 个点
 
-默认取前 `1000` 个结构（可用 `--max_samples` 调整），默认 `rcwa_orders=7`。输出到 `data/train_data.npz`，并额外写：
+默认取前 `10000` 个结构；如果显式传 `--max_samples` 会按传入值截断。默认 `rcwa_orders=7`。输出到 `data/train_data.npz`，并额外写：
 
 - `data/rcwa.log`
 - `data/train_data_failures.json`
@@ -81,7 +94,7 @@ python src/dataset/rcwa/rcwa_all.py --max_samples 100 --rcwa_orders 7
 如果要多卡并行（按结构分片）：
 
 ```bash
-python src/dataset/rcwa/rcwa_all.py --devices cuda:0,cuda:1 --max_samples 1000 --rcwa_orders 7
+python src/dataset/rcwa/rcwa_all.py --devices cuda:0,cuda:1 --max_samples 3000 --rcwa_orders 7
 ```
 
 ### 3. 训练数据格式
@@ -332,10 +345,10 @@ tensorboard --logdir runs
 ## 建议运行顺序
 
 ```bash
-python src/dataset/structure/dataset_pre.py   ->几秒钟
-python src/dataset/rcwa/rcwa_all.py   ->1000个数据约4.5~5小时（单卡）
+python src/dataset/structure/dataset_pre.py --num_samples 3000
+python src/dataset/rcwa/rcwa_all.py   ->耗时随结构数、RCWA 阶数和 GPU 数量变化
 python src/model/train_forward.py     ->几分钟
-python src/model/train_diffusion.py   ->1000个数据大概耗时60min
+python src/model/train_diffusion.py   ->耗时随数据量和训练配置变化
 python src/model/sample.py
 python src/infer/laplas.py
 python src/infer/optimization.py
