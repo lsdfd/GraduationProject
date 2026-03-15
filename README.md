@@ -40,7 +40,7 @@ src/
   - `SIGMA1 = 1.9`
   - `SIGMA2 = 1.1`
   - `MIN_FEATURE_PX = 7`
-- `TARGET_FILL` 在 `0.5 / 0.6 / 0.7` 三档之间按样本数尽量平均分配
+- `TARGET_FILL` 在 `0.6 / 0.7 / 0.8` 三档之间按样本数尽量平均分配
 - 输出到 `data/structures/structures.npy`
 
 运行：
@@ -196,14 +196,12 @@ python src/model/sample.py
 
 `src/infer/laplas.py`
 
-- 构造 `1250 nm` 处的二阶微分目标，目标曲线与 `|sin(theta)|^2` 成正比
-- 非目标波长默认使用高透过背景
-- 自动扫 3 组目标参数：
-  - `floor_0p01_off_0p90`
-  - `floor_0p03_off_0p90`
-  - `floor_0p05_off_0p90`
-- 对每组目标生成多个候选结构
-- 用 surrogate 误差和二阶分数一起排序并保存 top 结果
+- 当前默认在 `1000 nm` 构造二阶目标，目标曲线与 `|sin(theta)|^2` 成正比
+- 非目标波长会沿波长方向平滑过渡到背景/模板谱
+- 当前默认只扫 1 组目标参数：
+  - `floor_0p00_off_0p90`
+- 对该目标生成多个候选结构
+- 当前会直接调用 RCWA 复核全部候选，再按二阶分数排序保存 top 结果
 
 运行：
 
@@ -211,16 +209,10 @@ python src/model/sample.py
 python src/infer/laplas.py
 ```
 
-如果要一起做 `1250 nm` 的 RCWA 复核：
-
-```bash
-python src/infer/laplas.py --rcwa_eval
-```
-
 常用参数示例：
 
 ```bash
-python src/infer/laplas.py --num_samples 64 --cfg_scale 3.5 --topk_second 8
+python src/infer/laplas.py --num_samples 64 --cfg_scale 3.5 --topk_second 8 --target_lambda 1000
 ```
 
 输出目录默认在 `samples/laplas/<timestamp>/<case_name>/`，每个 case 主要包括：
@@ -244,8 +236,8 @@ python src/infer/laplas.py --num_samples 64 --cfg_scale 3.5 --topk_second 8
 
 - 读取 `laplas.py` 生成的目标条件和初始结构
 - 默认优先使用 `topk_second_samples.npy` 作为初始化
-- 用前向代理做轻量拓扑优化
-- 当前优化目标除了主波长拟合外，还加入了较小权重的 `1250 +/- 20 nm` 带宽二阶项
+- 直接基于 RCWA 做多起点拓扑优化
+- 当前优化目标以目标波长处的二阶角响应为主，同时加入外侧单调性、二值化和 TV 正则
 - 最终按二阶分数排序输出
 
 运行：
@@ -254,26 +246,22 @@ python src/infer/laplas.py --num_samples 64 --cfg_scale 3.5 --topk_second 8
 python src/infer/optimization.py
 ```
 
-如果不做 RCWA 复核：
-
-```bash
-python src/infer/optimization.py --skip_rcwa_eval
-```
-
 常用参数示例：
 
 ```bash
-python src/infer/optimization.py --steps 500 --lr 0.02 --max_inits 5
+python src/infer/optimization.py --steps 500 --lr 0.02 --max_inits 5 --target_lambda 1000
 ```
 
 输出目录默认在 `samples/optimized/<timestamp>/candidate_XX/`，主要包括：
 
 - `optimized_continuous.npy`
 - `optimized_binary.npy`
-- `optimized_pred_cond_raw.npy`
+- `optimized_rcwa_tpp_row.npy`
+- `optimized_rcwa_tss_row.npy`
+- `optimized_rcwa_continuous_tpp_row.npy`
+- `optimized_rcwa_continuous_tss_row.npy`
 - `optimized_continuous.png`
 - `optimized_binary.png`
-- `optimized_tpp_map.png`
 - `optimized_second_order_curve.png`
 - `optimization_log.json`
 
@@ -305,9 +293,34 @@ python src/infer/optimization.py --steps 500 --lr 0.02 --max_inits 5
 ### 1. 拉取项目
 
 ```bash
-git clone https://github.com/lsdfd/GraduationProject.git
+git clone -b v3 https://github.com/lsdfd/GraduationProject.git
 cd GraduationProject
 ```
+
+如果你在星宇智算上直接访问 GitHub 较慢，可以给原始 GitHub 链接加一个加速前缀再克隆。常见写法是把：
+
+```text
+https://github.com/lsdfd/GraduationProject.git
+```
+
+改成：
+
+```text
+https://ghfast.top/https://github.com/lsdfd/GraduationProject.git
+```
+
+对应命令：
+
+```bash
+git clone -b v3 https://ghfast.top/https://github.com/lsdfd/GraduationProject.git
+cd GraduationProject
+```
+
+说明：
+
+- 这里的 `ghfast.top/` 只是 GitHub 访问加速前缀，不是仓库地址本身。
+- 实际执行时，就是把原来的 GitHub URL 整体接在 `https://ghfast.top/` 后面。
+- 如果你已经在服务器上有仓库目录，就不需要重新 clone，直接在仓库里执行 `git checkout v3 && git pull origin v3`。
 
 ### 2. 创建 conda 环境
 
@@ -353,6 +366,44 @@ python src/model/sample.py
 python src/infer/laplas.py
 python src/infer/optimization.py
 ```
+
+常用可视化命令：
+
+```bash
+# 只想快速查看结构分布（建议先限制数量）
+python data/visualize_dataset.py --num_structures 200 --num_tpp 0
+
+# 已经有 train_data.npz 时，同时查看 structures / tpp / tss
+python data/visualize_dataset.py --num_structures 200 --num_tpp 200
+
+# 如果想导出全部分页图，也可以直接不限制数量
+python data/visualize_dataset.py
+```
+
+说明：
+
+- `--num_structures <= 0` 表示查看全部结构。
+- `--num_tpp <= 0` 表示查看全部 `tpp/tss` 响应图。
+- 如果当前还没有 `train_data.npz`，就不要运行包含 `tpp/tss` 可视化的命令。
+
+常用二阶打分命令：
+
+```bash
+# 对 train_data.npz 里的 tpp_mag 做逐波长二阶打分
+python data/score_second_order.py
+
+# 指定输入文件、输出目录和每个波长保留的 top-k
+python data/score_second_order.py --in_npz data/train_data.npz --field tpp_mag --out_dir data/second_order_scores --topk 20 --plot_topk 5
+
+# 如果想对 tss_mag 也做同样的打分
+python data/score_second_order.py --field tss_mag --out_dir data/second_order_scores_tss
+```
+
+说明：
+
+- `data/score_second_order.py` 默认对输入 `npz` 中的全部样本打分，没有写死 `1000` 或其他样本数上限。
+- 样本数越多，运行时间越长，输出的 `csv/json/png` 也会更大。
+- 主要输出包括 `*_scores.npz`、`*_scores.csv`、`*_summary.json`、`*_top{k}_per_lambda.csv` 以及对应的 top-k 图。
 
 如果环境支持 TensorBoard，可用下面命令查看训练曲线：
 

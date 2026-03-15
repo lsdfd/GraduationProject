@@ -9,7 +9,7 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_STRUCTURES = ROOT / "structures_test" / "structures.npy"
+DEFAULT_STRUCTURES = ROOT / "structures" / "structures.npy"
 DEFAULT_TRAIN = ROOT / "train_data.npz"
 
 
@@ -19,6 +19,12 @@ def default_structures_path() -> Path:
 
 def default_train_path() -> Path:
     return DEFAULT_TRAIN
+
+
+def resolve_existing_train_path(path: Path | None) -> Path | None:
+    if path is not None and path.exists():
+        return path
+    return DEFAULT_TRAIN if DEFAULT_TRAIN.exists() else None
 
 
 def load_structures(path: Path) -> np.ndarray:
@@ -284,7 +290,7 @@ def save_spectrum_pages(
 def main() -> None:
     parser = argparse.ArgumentParser(description="拼图查看 structures / tpp / tss 数据集分布")
     parser.add_argument("--structures", type=Path, default=default_structures_path())
-    parser.add_argument("--train", type=Path, default=default_train_path())
+    parser.add_argument("--train", type=Path, default=None)
     parser.add_argument("--out_dir", type=Path, default=ROOT / "vis")
     parser.add_argument("--num_structures", type=int, default=-1, help="结构可视化数量；<=0 表示全部")
     parser.add_argument("--num_tpp", type=int, default=-1, help="tpp/tss 可视化数量；<=0 表示全部")
@@ -296,6 +302,7 @@ def main() -> None:
     structures_out = args.out_dir / "structures"
     tpp_out = args.out_dir / "tpp"
     tss_out = args.out_dir / "tss"
+    args.train = resolve_existing_train_path(args.train)
     print(f"[input] structures: {args.structures}")
     print(f"[input] train: {args.train}")
 
@@ -319,6 +326,13 @@ def main() -> None:
         "structures_sorted_by_fill_ratio",
         args.page_size,
     )
+
+    if args.num_tpp == 0:
+        print("[info] --num_tpp=0，仅输出结构拼图，不读取 train_data.npz")
+        return
+    if args.train is None:
+        print("[info] 未找到 train_data.npz，仅输出结构拼图")
+        return
 
     tpp_mag = load_required_spectrum(args.train, "tpp_mag")
     tss_mag = load_required_spectrum(args.train, "tss_mag")

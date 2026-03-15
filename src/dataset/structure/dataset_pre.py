@@ -10,7 +10,7 @@ import numpy as np
 from generate_one import N_COARSE, N_FINE, SIGMA1, SIGMA2, MIN_FEATURE_PX, generate_structure
 
 
-FILL_LEVELS = (0.5, 0.6, 0.7)
+FILL_LEVELS = (0.4, 0.5, 0.6, 0.7, 0.8)
 
 
 def log(path, msg):
@@ -28,22 +28,33 @@ def build_fill_schedule(num_samples, rng):
     return fills
 
 
+def sample_params(rng):
+    return {
+        "N_COARSE": int(rng.choice([8, 10, 12], p=[0.40, 0.35, 0.25])),
+        "N_FINE": N_FINE,
+        "SIGMA1": float(rng.uniform(SIGMA1 - 0.2, SIGMA1 + 0.25)),
+        "SIGMA2": float(rng.uniform(SIGMA2 - 0.1, SIGMA2 + 0.2)),
+        "MIN_FEATURE_PX": int(rng.choice([5, 6, 7, 8], p=[0.18, 0.24, 0.34, 0.24])),
+    }
+
+
 def sample(rng, fill):
+    params = sample_params(rng)
     result = generate_structure(
         RNG_SEED=int(rng.integers(0, 10**9)),
-        N_COARSE=N_COARSE,
-        N_FINE=N_FINE,
-        SIGMA1=SIGMA1,
-        SIGMA2=SIGMA2,
+        N_COARSE=params["N_COARSE"],
+        N_FINE=params["N_FINE"],
+        SIGMA1=params["SIGMA1"],
+        SIGMA2=params["SIGMA2"],
         TARGET_FILL=float(fill),
-        MIN_FEATURE_PX=MIN_FEATURE_PX,
+        MIN_FEATURE_PX=params["MIN_FEATURE_PX"],
         SAVE_FIG=False,
         SAVE_NPY=False,
     )
     arr = np.asarray(result["final"], dtype=np.uint8)
     if arr.shape != (64, 64):
         raise ValueError(f"生成结果尺寸错误，应为 (64, 64)，实际得到 {arr.shape}")
-    return arr, result["fill_ratio"]
+    return arr, result["fill_ratio"], params
 
 
 def build_dataset(num_samples, out_dir):
@@ -54,12 +65,16 @@ def build_dataset(num_samples, out_dir):
     structures = np.empty((num_samples, 64, 64), dtype=np.uint8)
     fill_schedule = build_fill_schedule(num_samples, rng)
     log(log_path, f"开始生成结构，样本数={num_samples}")
-    log(log_path, f"固定参数: N_COARSE={N_COARSE}, N_FINE={N_FINE}, SIGMA1={SIGMA1}, SIGMA2={SIGMA2}, MIN_FEATURE_PX={MIN_FEATURE_PX}")
+    log(log_path, f"基准参数: N_COARSE={N_COARSE}, N_FINE={N_FINE}, SIGMA1={SIGMA1}, SIGMA2={SIGMA2}, MIN_FEATURE_PX={MIN_FEATURE_PX}")
+    log(log_path, f"扰动范围: N_COARSE in {{8, 10, 12}}, SIGMA1 in [{SIGMA1 - 0.2:.2f}, {SIGMA1 + 0.25:.2f}], SIGMA2 in [{SIGMA2 - 0.1:.2f}, {SIGMA2 + 0.2:.2f}], MIN_FEATURE_PX in {{5, 6, 7, 8}}")
     log(log_path, f"TARGET_FILL 档位: {FILL_LEVELS}，按样本数尽量平均分配")
     for i in range(num_samples):
-        structures[i], fill = sample(rng, float(fill_schedule[i]))
+        structures[i], fill, params = sample(rng, float(fill_schedule[i]))
         if (i + 1) % 50 == 0 or i + 1 == num_samples:
-            log(log_path, f"进度 {i + 1}/{num_samples}，fill={fill:.4f}")
+            log(
+                log_path,
+                f"进度 {i + 1}/{num_samples}，fill={fill:.4f}，N_COARSE={params['N_COARSE']}，SIGMA1={params['SIGMA1']:.2f}，SIGMA2={params['SIGMA2']:.2f}，MIN_FEATURE_PX={params['MIN_FEATURE_PX']}",
+            )
     np.save(save_path, structures)
     log(log_path, f"结构保存完成: {save_path}")
     log(log_path, f"数组形状: {structures.shape}，约定 1=材料，0=空气")
