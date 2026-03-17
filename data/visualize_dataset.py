@@ -267,8 +267,16 @@ def save_spectrum_pages(
     if global_vmax <= global_vmin:
         global_vmax = global_vmin + 1e-6
 
+    # For transmission-magnitude visualization, keep the color scale in the
+    # usual [0, 1] range and saturate rare outliers above 1.0.
+    global_vmin = max(global_vmin, 0.0)
+    global_vmax = min(global_vmax, 1.0)
+    if global_vmax <= global_vmin:
+        global_vmax = global_vmin + 1e-6
+
     for page_id, page_indices in enumerate(chunk_indices(ordered_indices, page_size), start=1):
         page_spec = np.nan_to_num(spec[page_indices], nan=global_vmin)
+        page_spec = np.clip(page_spec, global_vmin, global_vmax)
         title = f"{prefix} page {page_id} ({len(page_indices)})"
         if normalize_mode == "global":
             title += f" | color: blue={global_vmin:.4g}, red={global_vmax:.4g}"
@@ -292,8 +300,8 @@ def main() -> None:
     parser.add_argument("--structures", type=Path, default=default_structures_path())
     parser.add_argument("--train", type=Path, default=None)
     parser.add_argument("--out_dir", type=Path, default=ROOT / "vis")
-    parser.add_argument("--num_structures", type=int, default=-1, help="结构可视化数量；<=0 表示全部")
-    parser.add_argument("--num_tpp", type=int, default=-1, help="tpp/tss 可视化数量；<=0 表示全部")
+    parser.add_argument("--num_structures", type=int, default=1000, help="结构可视化数量；<=0 表示全部")
+    parser.add_argument("--num_tpp", type=int, default=1000, help="tpp/tss 可视化数量；<=0 表示全部")
     parser.add_argument("--page_size", type=int, default=100)
     parser.add_argument("--tpp_norm", choices=["global", "per_sample"], default="global")
     args = parser.parse_args()

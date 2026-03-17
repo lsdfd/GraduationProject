@@ -212,65 +212,83 @@ class Upsample(nn.Module):
         return self.op(x)
 
 
+class UNetUpBlock(nn.Module):
+    def __init__(self, in_ch, skip_ch, out_ch):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_ch, out_ch, 4, stride=2, padding=1)
+        self.fuse = nn.Sequential(
+            ResidualConvBlock(out_ch + skip_ch, out_ch),
+            ResidualConvBlock(out_ch, out_ch),
+        )
+
+    def forward(self, x, skip):
+        x = self.up(x)
+        if x.shape[-2:] != skip.shape[-2:]:
+            x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
+        return self.fuse(torch.cat([x, skip], dim=1))
+
+
 class ForwardSurrogate(nn.Module):
     """
     输入:  [B,1,64,64]，值域 0~1
     输出:  [B,C,11,17]
+
+    纯 encoder 结构，去掉 decoder，直接池化到目标分辨率。
+    参数量约 4-6M，适合 5000 个样本规模。
     """
 
     def __init__(self, out_ch):
         super().__init__()
+        base_ch = 32
         self.stem = nn.Sequential(
-            ConvNormAct(1 + 2, 32, 3),
-            ResidualConvBlock(32, 32),
+            ConvNormAct(1 + 2, base_ch, 3),
+            ResidualConvBlock(base_ch, base_ch),
         )
-        self.enc1 = ResidualConvBlock(32, 64, stride=2)
-        self.enc2 = ResidualConvBlock(64, 128, stride=2)
-        self.enc3 = ResidualConvBlock(128, 256, stride=2)
-        self.latent = nn.Sequential(
-            ResidualConvBlock(256, 256),
-            ResidualConvBlock(256, 256),
+        self.enc1 = nn.Sequential(
+            ResidualConvBlock(base_ch, base_ch * 2, stride=2),    # 32x32
+            ResidualConvBlock(base_ch * 2, base_ch * 2),
         )
-        self.global_mlp = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(256, 256),
-            nn.SiLU(),
-            nn.Linear(256, 128),
+        self.enc2 = nn.Sequential(
+            ResidualConvBlock(base_ch * 2, base_ch * 4, stride=2), # 16x16
+            ResidualConvBlock(base_ch * 4, base_ch * 4),
         )
-        self.fuse = nn.Sequential(
-            ConvNormAct(32 + 64 + 128 + 256 + 128 + 2, 192, 3),
-            ResidualConvBlock(192, 192),
-            ResidualConvBlock(192, 128),
+        self.enc3 = nn.Sequential(
+            ResidualConvBlock(base_ch * 4, base_ch * 8, stride=2), # 8x8
+            ResidualConvBlock(base_ch * 8, base_ch * 8),
         )
-        self.head = nn.Sequential(
-            ConvNormAct(128, 128, 3),
-            nn.Conv2d(128, out_ch, 1),
+        self.enc4 = nn.Sequential(
+            ResidualConvBlock(base_ch * 8, base_ch * 8, stride=2), # 4x4
+            ResidualConvBlock(base_ch * 8, base_ch * 8),
+        )
+        self.bottleneck = nn.Sequential(
+            ResidualConvBlock(base_ch * 8, base_ch * 8),
+            AttentionBlock(base_ch * 8),
+            ResidualConvBlock(base_ch * 8, base_ch * 8),
+        )
+        # 直接池化到目标光谱分辨率，不需要 decoder
+        self.spectral_head = nn.Sequential(
+            ConvNormAct(base_ch * 8 + 2, base_ch * 8, 3),
+            nn.Dropout2d(p=0.2),
+            ResidualConvBlock(base_ch * 8, base_ch * 4),
+            nn.Dropout2d(p=0.2),
+            nn.Conv2d(base_ch * 4, out_ch, 1),
         )
         self.register_buffer("coord_64", _coord_grid(64, 64), persistent=False)
         self.register_buffer("coord_spec", _coord_grid(11, 17), persistent=False)
 
     def forward(self, x):
         coord = self.coord_64[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
-        x0 = self.stem(torch.cat([x, coord], dim=1))
-        x1 = self.enc1(x0)
-        x2 = self.enc2(x1)
-        x3 = self.latent(self.enc3(x2))
+        e = self.stem(torch.cat([x, coord], dim=1))  # 64x64
+        e = self.enc1(e)                              # 32x32
+        e = self.enc2(e)                              # 16x16
+        e = self.enc3(e)                              # 8x8
+        e = self.enc4(e)                              # 4x4
+        e = self.bottleneck(e)                        # 4x4
 
-        target_size = (11, 17)
-        global_feat = self.global_mlp(x3)[:, :, None, None].expand(-1, -1, *target_size)
-        feat = torch.cat(
-            [
-                F.interpolate(x0, size=target_size, mode="bilinear", align_corners=False),
-                F.interpolate(x1, size=target_size, mode="bilinear", align_corners=False),
-                F.interpolate(x2, size=target_size, mode="bilinear", align_corners=False),
-                F.interpolate(x3, size=target_size, mode="bilinear", align_corners=False),
-                global_feat,
-                self.coord_spec[None].to(x.dtype).expand(x.shape[0], -1, -1, -1),
-            ],
-            dim=1,
-        )
-        return self.head(self.fuse(feat))
+        # 直接池化到 11x17，不经过 decoder
+        spec_feat = F.adaptive_avg_pool2d(e, output_size=(11, 17))
+        spec_coord = self.coord_spec[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
+        return self.spectral_head(torch.cat([spec_feat, spec_coord], dim=1))
 
 
 class ConditionalUNet(nn.Module):

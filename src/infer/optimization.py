@@ -8,7 +8,9 @@ import json
 import sys
 import time
 from datetime import datetime
+from multiprocessing import get_context
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,6 +28,21 @@ from infer.common import (  # noqa: E402
     second_order_score_row_torch,
     second_order_target,
 )
+
+
+def parse_devices(devices_arg: str | None, device_arg: str | None) -> list[str]:
+    if devices_arg:
+        devices = [d.strip() for d in devices_arg.split(",") if d.strip()]
+        if not devices:
+            raise ValueError("--devices 为空，请传入类似 cuda:0,cuda:1")
+        return devices
+    if device_arg:
+        return [device_arg]
+    if torch.cuda.is_available():
+        count = torch.cuda.device_count()
+        if count > 0:
+            return [f"cuda:{i}" for i in range(count)]
+    return ["cpu"]
 
 
 def resolve_from_root(path_like: str | Path) -> Path:
@@ -142,22 +159,55 @@ def rcwa_tpp_tss_row(x: torch.Tensor, target_lambda: float, device: str, rcwa_or
     return torch.stack(tpp_vals, dim=0), torch.stack(tss_vals, dim=0)
 
 
-def plot_tpp_row(path: Path, row: np.ndarray, thetas: np.ndarray, title: str) -> None:
+def plot_candidate_summary(
+    path: Path,
+    x_bin: np.ndarray,
+    tpp_row: np.ndarray,
+    thetas: np.ndarray,
+    title: str,
+    score: float,
+    tpp_at_40: float,
+) -> None:
+    """合并结构图和 tpp 曲线到一张图，并标注 tpp@40° 值"""
     target = second_order_target(thetas)
-    y = row.astype(np.float64)
+    y = tpp_row.astype(np.float64)
     yn = y / max(float(np.max(y)), 1e-8)
-    plt.figure(figsize=(5, 3.6))
-    plt.plot(thetas, target, "k--", lw=1.7, label="target ~ |sin(theta)|^2")
-    plt.plot(thetas, yn, lw=1.9, color="#1f77b4", label="candidate (normalized)")
-    plt.xlabel("theta (deg)")
-    plt.ylabel("normalized |tpp|")
-    plt.ylim(-0.05, 1.05)
-    plt.grid(alpha=0.25)
-    plt.legend(fontsize=8, loc="lower right")
-    plt.title(title)
-    plt.tight_layout()
-    plt.savefig(path, dpi=180)
-    plt.close()
+    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
+
+    fig, (ax_struct, ax_curve) = plt.subplots(1, 2, figsize=(10, 4))
+
+    # 左：二值化结构
+    ax_struct.imshow(x_bin.squeeze(), cmap="gray_r", vmin=0, vmax=1, interpolation="nearest")
+    ax_struct.set_title("Binary structure", fontsize=10)
+    ax_struct.axis("off")
+
+    # 右：tpp 曲线
+    ax_curve.plot(thetas, target, "k--", lw=1.7, label="ideal ~ |sin(θ)|²")
+    ax_curve.plot(thetas, yn, lw=1.9, color="#1f77b4", label="optimized (normalized)")
+
+    # 标注 tpp@40°
+    ax_curve.axvline(x=float(thetas[t40_idx]), color="r", ls=":", lw=1.2, alpha=0.6)
+    ax_curve.annotate(
+        f"|tpp|@40°={tpp_at_40:.3f}",
+        xy=(float(thetas[t40_idx]), float(yn[t40_idx])),
+        xytext=(float(thetas[t40_idx]) - 12, float(yn[t40_idx]) + 0.15),
+        fontsize=9,
+        color="red",
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "red", "alpha": 0.8},
+        arrowprops={"arrowstyle": "->", "color": "red", "lw": 1.0},
+    )
+
+    ax_curve.set_xlabel("theta (deg)", fontsize=9)
+    ax_curve.set_ylabel("normalized |tpp|", fontsize=9)
+    ax_curve.set_ylim(-0.05, 1.15)
+    ax_curve.grid(alpha=0.25)
+    ax_curve.legend(fontsize=8, loc="lower right")
+    ax_curve.set_title(f"2nd-order score={score:.3f}", fontsize=10)
+
+    fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
 
 
 def evaluate_binary_candidate(x_cont: torch.Tensor, args) -> tuple[torch.Tensor, dict]:
@@ -345,9 +395,15 @@ def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, sa
     np.save(cand_dir / "optimized_rcwa_continuous_tpp_row.npy", best_rcwa_cont["tpp_row"])
     np.save(cand_dir / "optimized_rcwa_continuous_tss_row.npy", best_rcwa_cont["tss_row"])
     np.save(cand_dir / "target_cond_raw.npy", target_raw)
-    plot_structure(cand_dir / "optimized_continuous.png", best_x_cont.cpu().numpy(), f"Optimized continuous {idx:02d}")
-    plot_structure(cand_dir / "optimized_binary.png", best_bin.cpu().numpy(), f"Optimized binary {idx:02d}")
-    plot_tpp_row(cand_dir / "optimized_second_order_curve.png", bin_tpp_np, thetas, f"{args.target_lambda:.0f}nm fit {idx:02d}")
+    plot_candidate_summary(
+        cand_dir / "optimized_summary.png",
+        best_bin.cpu().numpy(),
+        bin_tpp_np,
+        thetas,
+        f"Candidate {idx:02d} @ {args.target_lambda:.0f}nm",
+        float(best_rcwa_bin["score"]),
+        float(bin_tpp_np[t40_idx]),
+    )
     with (cand_dir / "optimization_log.json").open("w", encoding="utf-8") as f:
         json.dump(
             {
@@ -364,6 +420,24 @@ def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, sa
     return out
 
 
+def _optimization_worker(indices, init_np, target_raw, args_dict, save_dir_str, device, queue):
+    try:
+        if str(device).startswith("cuda"):
+            torch.cuda.set_device(device)
+        torch.set_num_threads(1)
+        args = SimpleNamespace(**args_dict)
+        args.device = device
+        save_dir = Path(save_dir_str)
+        rows = []
+        for idx in indices:
+            print(f"[opt {device}] candidate {idx + 1}/{len(init_np)}", flush=True)
+            init_t = torch.from_numpy(init_np[idx: idx + 1]).to(device)
+            rows.append(run_candidate(idx, init_t, target_raw, args, save_dir))
+        queue.put({"ok": True, "device": device, "rows": rows})
+    except Exception as exc:
+        queue.put({"ok": False, "device": device, "error": str(exc)})
+
+
 def main():
     p = argparse.ArgumentParser(description="Multi-start RCWA topology optimization from laplas top-k samples.")
     p.add_argument("--target")
@@ -371,7 +445,8 @@ def main():
     p.add_argument("--steps", type=int, default=100)
     p.add_argument("--lr", type=float, default=0.005)
     p.add_argument("--save_dir", default=str(ROOT / "samples" / "optimized"))
-    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--device", default=None, help="单设备模式；默认自动使用全部可见 GPU")
+    p.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
     p.add_argument("--target_lambda", type=float, default=1000.0)
     p.add_argument("--rcwa_orders", type=int, default=7)
     p.add_argument("--binary_eval_every", type=int, default=10)
@@ -388,6 +463,8 @@ def main():
     if args.init:
         args.init = str(resolve_from_root(args.init))
     args.save_dir = str(resolve_from_root(args.save_dir))
+    devices = parse_devices(args.devices, args.device)
+    args.device = devices[0]
 
     save_dir = Path(args.save_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -399,13 +476,47 @@ def main():
     args.init = args.init or default_init
 
     target_raw = load_target_raw(args.target)
-    init_batch = load_init_batch(args.init, args.device, args.max_inits)
+    init_batch = load_init_batch(args.init, "cpu", args.max_inits)
 
     rows = []
     total_start = time.perf_counter()
-    for idx in range(init_batch.shape[0]):
-        print(f"[opt] candidate {idx + 1}/{init_batch.shape[0]}", flush=True)
-        rows.append(run_candidate(idx, init_batch[idx: idx + 1], target_raw, args, save_dir))
+    if len(devices) == 1:
+        init_batch = init_batch.to(args.device)
+        for idx in range(init_batch.shape[0]):
+            print(f"[opt] candidate {idx + 1}/{init_batch.shape[0]}", flush=True)
+            rows.append(run_candidate(idx, init_batch[idx: idx + 1], target_raw, args, save_dir))
+    else:
+        all_indices = np.arange(init_batch.shape[0], dtype=np.int64)
+        split_indices = [chunk.tolist() for chunk in np.array_split(all_indices, len(devices)) if len(chunk) > 0]
+        active_devices = devices[: len(split_indices)]
+        ctx = get_context("spawn")
+        queue = ctx.Queue()
+        procs = []
+        args_dict = vars(args).copy()
+        init_np = init_batch.cpu().numpy().astype(np.float32)
+        for dev, idxs in zip(active_devices, split_indices):
+            proc = ctx.Process(
+                target=_optimization_worker,
+                args=(idxs, init_np, target_raw, args_dict, str(save_dir), dev, queue),
+            )
+            proc.start()
+            procs.append(proc)
+
+        received = 0
+        while received < len(procs):
+            msg = queue.get()
+            received += 1
+            if not msg.get("ok", False):
+                for proc in procs:
+                    if proc.is_alive():
+                        proc.terminate()
+                raise RuntimeError(f"optimization worker {msg.get('device')} 失败: {msg.get('error')}")
+            rows.extend(msg["rows"])
+
+        for proc in procs:
+            proc.join()
+            if proc.exitcode != 0:
+                raise RuntimeError(f"optimization worker 异常退出，exitcode={proc.exitcode}")
 
     rows = sorted(rows, key=lambda x: x["rcwa_second_order_score"], reverse=True)
     with (save_dir / "optimization_summary.json").open("w", encoding="utf-8") as f:

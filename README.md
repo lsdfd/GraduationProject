@@ -146,7 +146,10 @@ python src/model/train_forward.py
 `src/model/train_diffusion.py`
 
 - 用条件图反推结构
-- 同时使用前向代理提供的 physics loss
+- 训练损失由三项加权组成：
+  - `loss_diff`（权重 0.645）：v-prediction MSE，主损失
+  - `loss_phys`（权重 0.323）：前向代理物理一致性损失，采用 **Straight-Through Estimator（STE）二值化**，前向传给代理模型的是真实 `{0,1}` 二值结构（保证预测准确），反向梯度则直接穿过阈值不断（保证梯度有效传回 UNet）
+  - `loss_bin`（权重 0.032）：二值正则，推动预测像素值向 0/1 两极收拢
 - 输入结构训练时会从 `[0, 1]` 映射到 `[-1, 1]`
 - 当前 U-Net 比最初版本更深，并在低分辨率层加入轻量 attention
 - 训练日志与预览样本也由 `src/model/train_utils.py` 统一管理
@@ -197,11 +200,16 @@ python src/model/sample.py
 `src/infer/laplas.py`
 
 - 当前默认在 `1000 nm` 构造二阶目标，目标曲线与 `|sin(theta)|^2` 成正比
+- `tpp` 目标会以数据集 top-1 模板为底图，与理想二阶目标做温和混合；`tss` 默认读取同一模板样本的原始 `tss_mag`
 - 非目标波长会沿波长方向平滑过渡到背景/模板谱
 - 当前默认只扫 1 组目标参数：
   - `floor_0p00_off_0p90`
-- 对该目标生成多个候选结构
+- 默认生成 `128` 个候选结构
 - 当前会直接调用 RCWA 复核全部候选，再按二阶分数排序保存 top 结果
+- **物理引导采样（DPS 风格）**：在去噪的低噪声阶段（`t < guide_start_t`），每步额外用前向代理模型计算物理误差梯度，并把采样轨迹向满足目标频谱的方向修正：
+  - `guidance_scale`：引导强度，默认 `0.1`，建议从 `0.05` 开始试；设为 `0` 可禁用
+  - `guide_start_t`：只在 `t < guide_start_t` 时引导，默认 `300`
+  - `guide_every`：每隔几步引导一次，默认 `1`（每步），设为 `5` 可降低计算量
 
 运行：
 
@@ -212,7 +220,31 @@ python src/infer/laplas.py
 常用参数示例：
 
 ```bash
-python src/infer/laplas.py --num_samples 64 --cfg_scale 3.5 --topk_second 8 --target_lambda 1000
+# 基础运行（默认启用物理引导，guidance_scale=0.1）
+python src/infer/laplas.py --num_samples 128 --cfg_scale 3.0 --topk_second 5 --target_lambda 1000
+
+# 调整引导强度（从弱到强试）
+python src/infer/laplas.py --guidance_scale 0.05
+python src/infer/laplas.py --guidance_scale 0.1
+python src/infer/laplas.py --guidance_scale 0.2
+
+# 每5步引导一次，降低计算量
+python src/infer/laplas.py --guidance_scale 0.1 --guide_every 5
+
+# 禁用物理引导（退回纯 CFG 采样）
+python src/infer/laplas.py --guidance_scale 0
+
+# 指定前向代理模型路径
+python src/infer/laplas.py --forward_ckpt checkpoints/forward_best.pt
+```
+
+多卡说明：
+
+- 默认会自动检测全部可见 GPU，并用首张卡做扩散采样、其余 GPU 一起做 RCWA 复核。
+- 如果要手动指定设备，可传：
+
+```bash
+python src/infer/laplas.py --devices cuda:0,cuda:1,cuda:2,cuda:3
 ```
 
 输出目录默认在 `samples/laplas/<timestamp>/<case_name>/`，每个 case 主要包括：
@@ -250,6 +282,15 @@ python src/infer/optimization.py
 
 ```bash
 python src/infer/optimization.py --steps 500 --lr 0.02 --max_inits 5 --target_lambda 1000
+```
+
+多卡说明：
+
+- 默认会自动检测全部可见 GPU，并把不同初始化 candidate 分配到多张卡并行优化。
+- 如果要手动指定设备，可传：
+
+```bash
+python src/infer/optimization.py --devices cuda:0,cuda:1,cuda:2,cuda:3
 ```
 
 输出目录默认在 `samples/optimized/<timestamp>/candidate_XX/`，主要包括：
@@ -376,8 +417,11 @@ python data/visualize_dataset.py --num_structures 200 --num_tpp 0
 # 已经有 train_data.npz 时，同时查看 structures / tpp / tss
 python data/visualize_dataset.py --num_structures 200 --num_tpp 200
 
-# 如果想导出全部分页图，也可以直接不限制数量
+# 默认会随机/排序采样 1000 个结构与 1000 个频谱做可视化
 python data/visualize_dataset.py
+
+# 如果想导出全部分页图，也可以显式取消限制
+python data/visualize_dataset.py --num_structures 0 --num_tpp 0
 ```
 
 说明：

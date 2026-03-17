@@ -8,24 +8,55 @@ from diffusion import GaussianDiffusion
 from train_utils import TrainLogger
 
 
+def load_state_dict_flexible(model, state_dict):
+    try:
+        model.load_state_dict(state_dict)
+        return
+    except RuntimeError:
+        pass
+
+    stripped = {}
+    for key, value in state_dict.items():
+        if key.startswith("module."):
+            stripped[key[len("module."):]] = value
+        else:
+            stripped[key] = value
+    model.load_state_dict(stripped)
+
+
 def main():
     cfg = {
         "data_path": "data/train_data.npz",
         "forward_ckpt": "checkpoints/forward_best.pt",
         "batch_size": 32,
-        "epochs": 300,
+        "epochs": 100,
         "lr": 2e-4,
-        "weight_decay": 1e-4,
+        "weight_decay": 2e-4,
         "save_dir": "checkpoints",
         "train_ratio": 0.7,
         "num_workers": 4,
         "timesteps": 1000,
-        "lambda_phys": 0.5,
-        "lambda_bin": 0.05,
-        "cond_drop_prob": 0.1,
+        "lambda_diff": 0.6451612903,
+        "lambda_phys": 0.3225806452,
+        "lambda_bin": 0.0322580645,
+        "cond_drop_prob": 0.10,
         "preview_every": 20,
+        "split_seed": 20260315,
+        "grad_clip": 1.0,
+        "lr_patience": 6,
+        "lr_factor": 0.5,
+        "min_lr": 1e-6,
+        "early_stop_patience": 15,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
     }
+
+    use_cuda = cfg["device"].startswith("cuda")
+    if use_cuda:
+        device_name = cfg["device"]
+        if device_name == "cuda":
+            device_name = "cuda:0"
+            cfg["device"] = device_name
+        torch.cuda.set_device(device_name)
 
     os.makedirs(cfg["save_dir"], exist_ok=True)
     logger = TrainLogger("diffusion", cfg["save_dir"], ["epoch", "train_loss", "val_loss", "train_diff", "train_phys", "train_bin"])
@@ -35,20 +66,21 @@ def main():
 
     n_train = int(len(dataset) * cfg["train_ratio"])
     n_val = len(dataset) - n_train
-    train_set, val_set = random_split(dataset, [n_train, n_val])
+    split_gen = torch.Generator().manual_seed(cfg["split_seed"])
+    train_set, val_set = random_split(dataset, [n_train, n_val], generator=split_gen)
 
     train_loader = DataLoader(
         train_set, batch_size=cfg["batch_size"], shuffle=True,
-        num_workers=cfg["num_workers"], pin_memory=True
+        num_workers=cfg["num_workers"], pin_memory=use_cuda
     )
     val_loader = DataLoader(
         val_set, batch_size=cfg["batch_size"], shuffle=False,
-        num_workers=cfg["num_workers"], pin_memory=True
+        num_workers=cfg["num_workers"], pin_memory=use_cuda
     )
 
     surrogate = ForwardSurrogate(out_ch=cond_channels).to(cfg["device"])
     forward_ckpt = torch.load(cfg["forward_ckpt"], map_location=cfg["device"])
-    surrogate.load_state_dict(forward_ckpt["model"])
+    load_state_dict_flexible(surrogate, forward_ckpt["model"])
     surrogate.eval()
     for p in surrogate.parameters():
         p.requires_grad = False
@@ -57,8 +89,18 @@ def main():
     diffusion = GaussianDiffusion(unet, timesteps=cfg["timesteps"], image_size=64).to(cfg["device"])
 
     opt = torch.optim.AdamW(unet.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt,
+        mode="min",
+        factor=cfg["lr_factor"],
+        patience=cfg["lr_patience"],
+        min_lr=cfg["min_lr"],
+    )
 
     best_val = 1e9
+    best_epoch = -1
+    stale_epochs = 0
+    print(f"[Diffusion] train device={cfg['device']} epochs={cfg['epochs']} batch_size={cfg['batch_size']}")
 
     for epoch in range(cfg["epochs"]):
         diffusion.train()
@@ -76,6 +118,7 @@ def main():
                 x0=x0,
                 cond=cond,
                 surrogate=surrogate,
+                lambda_diff=cfg["lambda_diff"],
                 lambda_phys=cfg["lambda_phys"],
                 lambda_bin=cfg["lambda_bin"],
                 cond_drop_prob=cfg["cond_drop_prob"],
@@ -83,6 +126,7 @@ def main():
 
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(unet.parameters(), cfg["grad_clip"])
             opt.step()
 
             train_loss += loss.item() * x01.size(0)
@@ -107,6 +151,7 @@ def main():
                     x0=x0,
                     cond=cond,
                     surrogate=surrogate,
+                    lambda_diff=cfg["lambda_diff"],
                     lambda_phys=cfg["lambda_phys"],
                     lambda_bin=cfg["lambda_bin"],
                     cond_drop_prob=0.0,
@@ -114,8 +159,10 @@ def main():
                 val_loss += loss.item() * x01.size(0)
 
         val_loss /= len(val_loader.dataset)
+        scheduler.step(val_loss)
+        current_lr = opt.param_groups[0]["lr"]
 
-        print(f"[Diffusion] epoch={epoch:03d} train={train_loss:.6f} val={val_loss:.6f}")
+        print(f"[Diffusion] epoch={epoch:03d} train={train_loss:.6f} val={val_loss:.6f} lr={current_lr:.2e}")
         logger.log_scalars(
             epoch,
             [epoch, train_loss, val_loss, train_diff, train_phys, train_bin],
@@ -125,12 +172,16 @@ def main():
                 "loss_diff/train": train_diff,
                 "loss_phys/train": train_phys,
                 "loss_bin/train": train_bin,
+                "lr": current_lr,
             },
         )
 
         ckpt = {
             "diffusion": diffusion.state_dict(),
             "cond_channels": cond_channels,
+            "epoch": epoch,
+            "best_val": best_val,
+            "cfg": cfg,
         }
         torch.save(ckpt, os.path.join(cfg["save_dir"], "diffusion_last.pt"))
 
@@ -141,7 +192,16 @@ def main():
 
         if val_loss < best_val:
             best_val = val_loss
+            best_epoch = epoch
+            stale_epochs = 0
+            ckpt["best_val"] = best_val
             torch.save(ckpt, os.path.join(cfg["save_dir"], "diffusion_best.pt"))
+        else:
+            stale_epochs += 1
+
+        if stale_epochs >= cfg["early_stop_patience"]:
+            print(f"[Diffusion] early stop at epoch={epoch:03d}, best_epoch={best_epoch:03d}, best_val={best_val:.6f}")
+            break
 
     logger.close()
 

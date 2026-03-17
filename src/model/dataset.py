@@ -25,8 +25,10 @@ class RCWADataset(Dataset):
             raise ValueError("No valid samples remain after filtering NaN/Inf conditions.")
 
         if cond_mean is None or cond_std is None:
-            cond_mean = cond.mean(axis=(0, 2, 3), keepdims=True)
-            cond_std = cond.std(axis=(0, 2, 3), keepdims=True) + 1e-6
+            # 按 (channel, lambda, theta) 每个位置独立归一化，而不是全局归一化
+            # 这样不同波长/角度的分布差异不会被平均掉
+            cond_mean = cond.mean(axis=0, keepdims=True)  # [1, 2, 11, 17]
+            cond_std = cond.std(axis=0, keepdims=True) + 1e-6  # [1, 2, 11, 17]
 
         self.structures = structures
         self.cond_mean = cond_mean.astype(np.float32)
