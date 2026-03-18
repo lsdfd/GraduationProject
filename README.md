@@ -89,6 +89,20 @@ python src/dataset/augment_dataset.py --skip_generate --topk 2000 --num_random 1
 python src/dataset/rcwa/rcwa_all.py --structures data/structures/structures_augmented.npy
 ```
 
+完整增强 + 重训流程：
+
+```bash
+# 第一步：生成 10w + 代理筛选（~30min 生成 + 几分钟推理）
+python src/dataset/augment_dataset.py --num_pool 100000 --topk 2000 --num_random 1000
+
+# 第二步：只对筛出的 3000 个结构跑 RCWA
+python src/dataset/rcwa/rcwa_all.py --structures data/structures/structures_augmented.npy
+
+# 第三步：重训两个模型
+python src/model/train_forward.py
+python src/model/train_diffusion.py
+```
+
 ### 2. RCWA 批量仿真
 
 `src/dataset/rcwa/rcwa_all.py`
