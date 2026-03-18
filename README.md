@@ -55,6 +55,40 @@ python src/dataset/structure/dataset_pre.py
 python src/dataset/structure/dataset_pre.py --num_samples 5000
 ```
 
+### 1.5 数据增强（可选）
+
+`src/dataset/augment_dataset.py`
+
+用代理模型（ForwardSurrogate）对大批量结构快速打分，筛出高质量子集，再做 RCWA，可以显著提升训练数据中高二阶分数样本的比例，改善代理模型和扩散模型的泛化能力。
+
+**策略（方案 B）**：top-K 高分 + num_random 随机样本混合，既保证质量又保留分布覆盖。
+
+前置条件：需要已训练好的 `checkpoints/forward_best.pt` 和 `checkpoints/cond_stats.npz`。
+
+运行（全流程：生成 10w + 筛选 top2000 + 随机 1000）：
+
+```bash
+python src/dataset/augment_dataset.py --num_pool 100000 --topk 2000 --num_random 1000
+```
+
+跳过生成（已有结构池时直接筛选）：
+
+```bash
+python src/dataset/augment_dataset.py --skip_generate --topk 2000 --num_random 1000
+```
+
+输出：
+
+- `data/structures/structures_pool.npy`：生成的结构池
+- `data/structures/structures_augmented.npy`：筛选后的训练子集
+- `data/structures/augmented_scores.npy`：全量打分结果
+
+然后对筛出的结构跑 RCWA：
+
+```bash
+python src/dataset/rcwa/rcwa_all.py --structures data/structures/structures_augmented.npy
+```
+
 ### 2. RCWA 批量仿真
 
 `src/dataset/rcwa/rcwa_all.py`
