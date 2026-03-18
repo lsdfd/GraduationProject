@@ -192,8 +192,11 @@ class GaussianDiffusion(nn.Module):
                 pred_cond  = surrogate(x01_ste)
                 loss_g     = F.l1_loss(pred_cond, target_norm.expand_as(pred_cond))
                 grad       = torch.autograd.grad(loss_g, x_in)[0]
-            # 沿减小物理误差的方向修正均值
-            model_mean = model_mean - guidance_scale * grad.detach()
+            # 梯度归一化：消除不同时间步梯度量级差异，让 guidance_scale 可解释
+            # 参考 arXiv:2601.15210 (Enhanced Posterior Sampling for Metasurfaces, 2026)
+            grad_norm = grad.norm(dim=[1, 2, 3], keepdim=True).clamp(min=1e-8)
+            grad_normalized = grad / grad_norm
+            model_mean = model_mean - guidance_scale * grad_normalized
 
         if t_scalar == 0:
             return model_mean
