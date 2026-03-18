@@ -151,8 +151,69 @@ python src/model/train_forward.py
   - `loss_phys`（权重 0.323）：前向代理物理一致性损失，采用 **Straight-Through Estimator（STE）二值化**，前向传给代理模型的是真实 `{0,1}` 二值结构（保证预测准确），反向梯度则直接穿过阈值不断（保证梯度有效传回 UNet）
   - `loss_bin`（权重 0.032）：二值正则，推动预测像素值向 0/1 两极收拢
 - 输入结构训练时会从 `[0, 1]` 映射到 `[-1, 1]`
-- 当前 U-Net 比最初版本更深，并在低分辨率层加入轻量 attention
 - 训练日志与预览样本也由 `src/model/train_utils.py` 统一管理
+
+#### UNet 架构（v3 改进版）
+
+条件注入采用三层机制，按信息保留量从低到高排列：
+
+**① AdaGN（Adaptive Group Normalization）**
+
+每个 ResBlock 将全局条件向量 `c_emb [B, 256]` 通过仿射变换注入特征：
+
+```
+scale, shift = Linear(time_dim + cond_dim → out_ch*2)(cat[t_emb, c_emb])
+h = h * (1 + scale) + shift
+```
+
+这是扩散模型的标准条件注入方式（v-prediction + AdaGN = Imagen/SD2.x 标准范式）。
+
+**② ConditionEncoderTokens（Token 化光谱编码器，v3 新增）**
+
+旧版 `ConditionEncoder2D` 用 CNN 下采样（11→6→3，17→9→5）+ AvgPool，信息损失严重：
+
+- 下采样后只剩 3×5=15 个 token 供 cross-attention 使用
+- AvgPool 丢失所有位置信息，模型不知道 λ=1000nm 和 θ=±40° 的位置
+
+新版 `ConditionEncoderTokens` 把 `[B, 2, 11, 17]` 光谱**展开成 187 个 token**（每个格点一个）：
+
+```
+[B, 2, 11, 17]
+    ↓ flatten → [B, 187, 2]
+    ↓ Linear(2→256)
+    ↓ + 物理位置编码（λ轴 Embedding(11,128) + θ轴 Embedding(17,128)）
+    ↓ 3层 Pre-LN Transformer（全局自注意力）
+    ↓
+CLS token → c_emb   [B, 256]     → AdaGN
+其余 token → tokens [B, 187, 256] → cross-attention
+```
+
+| | 旧版 | v3 新版 |
+|--|------|--------|
+| cross-attn token 数 | 15 | **187**（多12×） |
+| 知道 λ=1000nm 位置 | 否 | **是**（可学习 PE） |
+| 知道 θ=±40° 位置 | 否 | **是**（可学习 PE） |
+| 空间插值注入 | 频谱图→64×64（语义错位） | **已删除** |
+
+**③ SpectrumCrossAttention（跨注意力）**
+
+UNet 的结构特征图对 187 个光谱 token 做 multi-head cross-attention，每个空间位置可以"查询"最相关的 (λ, θ) 格点：
+
+```
+Q: UNet 特征图像素     [B, h*w, 128]
+K,V: 光谱 token       [B, 187, 128]
+→ 每个像素位置选择性关注对它最相关的频谱信息
+```
+
+v3 在解码器 32×32 层新增了 `up_cross2`，补齐了此前的 cross-attention 空白：
+
+```
+编码器：cross3（16×16）+ cross4（8×8）
+Bottleneck：mid_cross（8×8）
+解码器：up_cross1（16×16）+ up_cross2（32×32，新增）
+```
+
+**参数量**：~15.8M（旧版 ~22M，删去了无效的空间注入 Conv2d，更适合 5000 样本规模）
 
 运行：
 
@@ -206,7 +267,44 @@ python src/model/sample.py
   - `floor_0p00_off_0p90`
 - 默认生成 `128` 个候选结构
 - 当前会直接调用 RCWA 复核全部候选，再按二阶分数排序保存 top 结果
-- **物理引导采样（DPS 风格）**：在去噪的低噪声阶段（`t < guide_start_t`），每步额外用前向代理模型计算物理误差梯度，并把采样轨迹向满足目标频谱的方向修正：
+
+#### 物理引导采样（DPS 风格）
+
+去噪过程分为两条互补路径：
+
+**路径 A：`sample()`** — 标准 CFG，无实时物理反馈
+
+```
+高斯噪声 xT
+  ↓ 每步：CFG v-pred → DDPM 反向一步
+x0 → 阈值化 → 二值结构
+```
+
+物理信息仅来自训练时的 `loss_phys`（烘焙在模型权重中）。
+
+**路径 B：`sample_guided()`** — CFG + 实时物理引导（laplas 默认启用）
+
+```
+高斯噪声 xT
+  ↓ 每步 p_sample_guided：
+    ① 标准 CFG 去噪 → model_mean      (no_grad)
+    ② 物理引导（仅 t < guide_start_t）：
+       x_t →(有梯度)→ UNet → x0_hat
+           → STE 二值化 → surrogate → pred_cond
+           → L1(pred_cond, target_norm) = loss_g
+           → grad = ∂loss_g / ∂x_t
+           → grad_norm = ‖grad‖（逐样本归一化）
+       model_mean -= guidance_scale × (grad / grad_norm)
+x0 → 阈值化 → 二值结构
+```
+
+梯度归一化（`grad / ‖grad‖`）消除了不同时间步梯度量级的差异，使 `guidance_scale` 在全程可解释，参考 arXiv:2601.15210（Enhanced Posterior Sampling for Metasurfaces, 2026）。
+
+两层物理信息：
+- **训练层**（`loss_phys`）：把物理知识烘焙进模型权重，模型整体知道频谱→结构的映射
+- **推理层**（DPS 引导）：对每个具体样本实时校正，把采样轨迹拉向目标频谱
+
+参数说明：
   - `guidance_scale`：引导强度，默认 `0.1`，建议从 `0.05` 开始试；设为 `0` 可禁用
   - `guide_start_t`：只在 `t < guide_start_t` 时引导，默认 `300`
   - `guide_every`：每隔几步引导一次，默认 `1`（每步），设为 `5` 可降低计算量
@@ -385,6 +483,17 @@ pip install -r requirements.txt
 ```bash
 tensorboard --logdir runs
 ```
+
+## 架构设计参考
+
+本项目的核心设计决策参考了以下工作：
+
+- **v-prediction + cosine schedule**：Salimans & Ho, "Progressive Distillation for Fast Sampling" (2022)
+- **Classifier-Free Guidance (CFG)**：Ho & Salimans, "Classifier-Free Diffusion Guidance" (2022)
+- **DPS 物理引导采样**：Chung et al., "Diffusion Posterior Sampling for General Noisy Inverse Problems" (ICLR 2023)
+- **引导梯度归一化**：arXiv:2601.15210, "Enhanced Posterior Sampling via Diffusion Models for Efficient Metasurfaces Inverse Design" (2026)
+- **STE 二值梯度**：Bengio et al., "Estimating or Propagating Gradients Through Stochastic Neurons" (2013)；Chen et al., "Binary Latent Diffusion" (CVPR 2023)
+- **Pre-LN Transformer**：Xiong et al., "On Layer Normalization in the Transformer Architecture" (ICML 2020)
 
 ## 当前已知问题
 
