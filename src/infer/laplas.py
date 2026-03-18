@@ -463,7 +463,7 @@ def main():
     p.add_argument("--stats", default=str(ROOT / "checkpoints" / "cond_stats.npz"))
     p.add_argument("--diffusion_ckpt", default=str(ROOT / "checkpoints" / "diffusion_best.pt"))
     p.add_argument("--forward_ckpt", default=str(ROOT / "checkpoints" / "forward_best.pt"))
-    p.add_argument("--num_samples", type=int, default=128)
+    p.add_argument("--num_samples", type=int, default=32)
     p.add_argument("--cfg_scale", type=float, default=3.0)
     p.add_argument("--save_dir", default=str(ROOT / "samples" / "laplas"))
     p.add_argument("--device", default=None, help="主设备；默认自动使用全部可见 GPU，并以首张卡做扩散采样")

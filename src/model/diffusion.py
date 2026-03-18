@@ -158,10 +158,12 @@ class GaussianDiffusion(nn.Module):
         t = torch.full((b,), t_scalar, device=device, dtype=torch.long)
 
         # ── ① 标准 CFG 去噪（不需要梯度）──────────────────────────────
+        v_uncond_saved = None
         with torch.no_grad():
             if cfg_scale != 1.0:
                 v_cond   = self.model(x, t, cond=cond, force_uncond=False)
                 v_uncond = self.model(x, t, cond=None,  force_uncond=True)
+                v_uncond_saved = v_uncond
                 v = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
                 v = self.model(x, t, cond=cond)
@@ -184,7 +186,12 @@ class GaussianDiffusion(nn.Module):
         if do_guide:
             x_in = x.detach().requires_grad_(True)
             with torch.enable_grad():
-                v_g    = self.model(x_in, t, cond=cond, force_uncond=False)
+                # 用完整 CFG v 估计 x0_hat，和 block ① 的去噪方向一致
+                v_g_cond = self.model(x_in, t, cond=cond, force_uncond=False)
+                if cfg_scale != 1.0 and v_uncond_saved is not None:
+                    v_g = v_uncond_saved.detach() + cfg_scale * (v_g_cond - v_uncond_saved.detach())
+                else:
+                    v_g = v_g_cond
                 x0_hat = self.predict_x0_from_v(x_in, t, v_g).clamp(-1.0, 1.0)
                 x01    = (x0_hat + 1.0) / 2.0
                 # STE：前向传 {0,1}，反向梯度不断
@@ -194,7 +201,7 @@ class GaussianDiffusion(nn.Module):
                 grad       = torch.autograd.grad(loss_g, x_in)[0]
             # 梯度归一化：消除不同时间步梯度量级差异，让 guidance_scale 可解释
             # 参考 arXiv:2601.15210 (Enhanced Posterior Sampling for Metasurfaces, 2026)
-            grad_norm = grad.norm(dim=[1, 2, 3], keepdim=True).clamp(min=1e-8)
+            grad_norm = grad.reshape(b, -1).norm(dim=1).reshape(b, 1, 1, 1).clamp(min=1e-8)
             grad_normalized = grad / grad_norm
             model_mean = model_mean - guidance_scale * grad_normalized
 
