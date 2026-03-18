@@ -1,0 +1,29 @@
+[2026-03-15 14:55:33] 开始 RCWA 多卡并行，样本数=5000，devices=['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3', 'cuda:4', 'cuda:5', 'cuda:6', 'cuda:7']，orders=7
+[2026-03-15 14:55:33] 分配 cuda:0: 625 个样本（index 0..624）
+[2026-03-15 14:55:35] 分配 cuda:1: 625 个样本（index 625..1249）
+[2026-03-15 14:55:36] 分配 cuda:2: 625 个样本（index 1250..1874）
+[2026-03-15 14:55:38] 分配 cuda:3: 625 个样本（index 1875..2499）
+[2026-03-15 14:55:40] 分配 cuda:4: 625 个样本（index 2500..3124）
+[2026-03-15 14:55:42] 分配 cuda:5: 625 个样本（index 3125..3749）
+[2026-03-15 14:55:44] 分配 cuda:6: 625 个样本（index 3750..4374）
+[2026-03-15 14:55:47] 分配 cuda:7: 625 个样本（index 4375..4999）
+[2026-03-15 18:01:44] worker cuda:7 完成，回收 625 个样本
+[2026-03-15 18:01:44] 已保存中间结果: /data/GraduationProject/data/train_data.npz
+[2026-03-15 18:03:32] worker cuda:6 完成，回收 625 个样本
+[2026-03-15 18:03:32] 已保存中间结果: /data/GraduationProject/data/train_data.npz
+[2026-03-15 18:04:36] worker cuda:4 完成，回收 625 个样本
+[2026-03-15 18:04:36] 已保存中间结果: /data/GraduationProject/data/train_data.npz
+[2026-03-15 18:05:35] worker cuda:2 完成，回收 625 个样本
+[2026-03-15 18:05:35] 已保存中间结果: /data/GraduationProject/data/train_data.npz
+[2026-03-15 18:06:15] worker cuda:5 完成，回收 625 个样本
+[2026-03-15 18:06:15] 已保存中间结果: /data/GraduationProject/data/train_data.npz
+[2026-03-15 18:06:16] worker cuda:0 完成，回收 625 个样本
+[2026-03-15 18:06:16] 已保存中间结果: /data/GraduationProject/data/train_data.npz
+[2026-03-15 18:06:44] worker cuda:3 完成，回收 625 个样本
+[2026-03-15 18:06:44] 已保存中间结果: /data/GraduationProject/data/train_data.npz
+[2026-03-15 18:08:44] worker cuda:1 完成，回收 625 个样本
+[2026-03-15 18:08:44] 已保存中间结果: /data/GraduationProject/data/train_data.npz
+[2026-03-18 15:30:09] 开始 RCWA 批量仿真，样本数=3000，device=cuda:0，orders=7
+[2026-03-18 15:30:29] 样本 1/3000 完成，用时=20.67s
+[2026-03-18 15:30:49] 样本 2/3000 完成，用时=19.09s
+[2026-03-18 15:31:08] 样本 3/3000 完成，用时=19.01s

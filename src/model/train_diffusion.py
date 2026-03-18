@@ -39,7 +39,7 @@ def main():
         "lambda_diff": 0.6451612903,
         "lambda_phys": 0.3225806452,
         "lambda_bin": 0.0322580645,
-        "cond_drop_prob": 0.10,
+        "cond_drop_prob": 0.15,
         "preview_every": 20,
         "split_seed": 20260315,
         "grad_clip": 1.0,

@@ -1,0 +1,12 @@
+{
+  "sweep_case": "floor_0p00_off_0p90",
+  "center_floor": 0.0,
+  "off_target": 0.9,
+  "edge_target": 1.0,
+  "target_lambda_nm": 1000.0,
+  "template_sample_idx": 2002,
+  "best_rcwa_mae_raw": 0.3192441761493683,
+  "best_second_order_sample_idx": 3,
+  "best_second_order_score": 0.19487022868841883,
+  "best_second_order_tpp_at_40": 0.9134857654571533
+}
