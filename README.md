@@ -22,6 +22,33 @@ src/
 │   ├── train_forward.py
 │   ├── train_diffusion.py
 │   └── sample.py
+├── infer/
+│   ├── common.py                  # 公共工具：打分 / RCWA / 可视化
+│   ├── laplas.py                  # 推理核心逻辑（支持任意 --target_lambda）
+│   ├── laplas2.py                 # 推理简化变体
+│   ├── optimization.py            # 拓扑优化核心逻辑
+│   ├── validate_surrogate_top.py  # 代理模型验证
+│   ├── imag_process/              # 傅里叶光学成像仿真（通用版，支持任意 --lambda_nm）
+│   │   ├── image_processing.py
+│   │   └── scan_kspace.py
+│   ├── band_900nm/                # 900 nm 波段入口（默认参数已设为 900nm）
+│   │   ├── laplas.py
+│   │   ├── optimization.py
+│   │   └── imag_process/
+│   │       ├── image_processing.py
+│   │       └── scan_kspace.py
+│   ├── band_1000nm/               # 1000 nm 波段入口
+│   │   ├── laplas.py
+│   │   ├── optimization.py
+│   │   └── imag_process/
+│   │       ├── image_processing.py
+│   │       └── scan_kspace.py
+│   └── band_1100nm/               # 1100 nm 波段入口
+│       ├── laplas.py
+│       ├── optimization.py
+│       └── imag_process/
+│           ├── image_processing.py
+│           └── scan_kspace.py
 └── baselines/
     ├── model/
     │   ├── cvae.py     # CVAE 架构
@@ -388,13 +415,38 @@ python src/baselines/eval/plot_results.py \
 
 `src/infer/laplas.py`
 
-- 当前默认在 `1000 nm` 构造二阶目标，目标曲线与 `|sin(theta)|^2` 成正比
-- `tpp` 目标会以数据集 top-1 模板为底图，与理想二阶目标做温和混合；`tss` 默认读取同一模板样本的原始 `tss_mag`
-- 非目标波长会沿波长方向平滑过渡到背景/模板谱
-- 当前默认只扫 1 组目标参数：
-  - `floor_0p00_off_0p90`
-- 默认生成 `32` 个候选结构
-- 当前会直接调用 RCWA 复核全部候选，再按二阶分数排序保存 top 结果
+- 支持任意目标波长，通过 `--target_lambda` 指定（默认 `1000 nm`，可选 `900 / 1000 / 1100` 等 RCWA 网格内任意值）
+- 目标曲线与 `|sin(theta)|^2` 成正比；`tpp` 目标以数据集 top-1 模板为底图；非目标波长平滑过渡到背景谱
+- 默认生成 `32` 个候选结构，调用 RCWA 复核后按二阶分数排序保存 top 结果
+
+#### 多波段入口（推荐）
+
+为方便按波段组织实验，`src/infer/` 下提供了三个波段的专用入口目录，每个目录的脚本只修改了默认参数（`target_lambda` 和 `save_dir`），完整逻辑复用顶层脚本：
+
+| 目录 | 目标波长 | 输出目录 |
+|------|---------|---------|
+| `band_900nm/` | 900 nm | `samples/laplas_900nm/` |
+| `band_1000nm/` | 1000 nm | `samples/laplas_1000nm/` |
+| `band_1100nm/` | 1100 nm | `samples/laplas_1100nm/` |
+
+```bash
+# 900 nm 推理（直接运行，无需传 --target_lambda）
+python src/infer/band_900nm/laplas.py
+
+# 1000 nm 推理
+python src/infer/band_1000nm/laplas.py
+
+# 1100 nm 推理
+python src/infer/band_1100nm/laplas.py
+```
+
+也可以直接调用顶层脚本并手动传入波长：
+
+```bash
+python src/infer/laplas.py --target_lambda 900
+python src/infer/laplas.py --target_lambda 1000
+python src/infer/laplas.py --target_lambda 1100
+```
 
 #### 物理引导采样（DPS 风格）
 
@@ -487,6 +539,61 @@ python src/infer/laplas.py --devices cuda:0,cuda:1,cuda:2,cuda:3
 - `target_tpp.png`
 - `best_tpp.png`
 - `top*_second_order.png`
+
+### 光学成像仿真
+
+`src/infer/imag_process/`
+
+基于角谱法（Fourier optics）验证超表面设计的成像效果，包含两个脚本：
+
+#### `image_processing.py` — 成像仿真主脚本
+
+将目标传递函数作用于输入图像（默认中心小方块），输出像平面强度分布。
+
+适配参数：λ = 1000 nm，θ_max = 40° → NA ≈ 0.6428，入射偏振推荐 `x`（p 偏振）。
+
+传递函数来源（精度递增）：
+
+| 模式 | 说明 |
+|------|------|
+| `--ideal` | 理想 `T=(k_rho/k_max)²`，验证仿真流程 |
+| `--sample N` / `--from_infer` | 从 `train_data.npz` 或推理结果读 1D 角度数据，各向同性插值 |
+| `--from_kspace` | 从 `scan_kspace.py` 输出的精确 2D 传递函数插值 |
+
+```bash
+# 理想二阶传递函数（推荐先跑这个验证流程）
+python src/infer/imag_process/image_processing.py --ideal --pol x
+
+# 用训练数据第 0 个样本
+python src/infer/imag_process/image_processing.py --sample 0 --pol x
+
+# 用推理结果最优样本
+python src/infer/imag_process/image_processing.py --from_infer --pol x
+
+# 用精确 2D 传递函数（需先运行 scan_kspace.py）
+python src/infer/imag_process/image_processing.py --from_kspace --pol x
+```
+
+输出：`imaging_result.png`（输入图 / 输出强度 / 传递函数截面）
+
+#### `scan_kspace.py` — 2D k 空间传递函数图
+
+利用 C4 + σx 对称性，只需 phi=0°（已有）和 phi=45°（可选新跑）两条扫描线，插值重建完整 k 空间圆盘，生成文献标准图（横纵坐标 kx/k0、ky/k0，颜色代表 |t|，圆外 mask）。
+
+```bash
+# 各向同性近似（仅用 phi=0 已有数据，秒出）
+python src/infer/imag_process/scan_kspace.py --sample 0
+
+# 精确版（额外跑 phi=45° RCWA，17 次仿真，需 torcwa）
+python src/infer/imag_process/scan_kspace.py --sample 0 --run_phi45 --device cuda:0
+
+# 从推理结果加载
+python src/infer/imag_process/scan_kspace.py --from_infer
+```
+
+输出：`kspace_tpp.png` / `kspace_tss.png`（文献圆形 k 空间图）+ `kspace_result.npz`
+
+---
 
 ### 拓扑优化
 
@@ -691,3 +798,23 @@ python data/score_second_order.py --field tss_mag --out_dir data/second_order_sc
 ```bash
 tensorboard --logdir runs
 ```
+
+## 后续工作方向
+
+### 数据
+
+- 新算法尝试 + 聚类分析，改善结构分布覆盖
+- 扩充数据规模到 2w 样本
+- 重新定义 score（当前二阶打分函数可优化）
+- 扫描到 60° 入射角后重新训练，对标 SOTA
+
+### 模型
+
+- 尝试单波长条件输入（简化条件空间）
+- CVAE / cGAN / 拓扑优化 + 各项指标完整对比
+
+### 推理与应用
+
+- 尝试多个目标波长同时优化
+- 成像仿真定量指标分析（对比理想 Laplacian 的 PSNR / SSIM）
+- 偏振复用、高阶微分、时空微分等扩展场景

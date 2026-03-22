@@ -438,26 +438,12 @@ def _optimization_worker(indices, init_np, target_raw, args_dict, save_dir_str, 
         queue.put({"ok": False, "device": device, "error": str(exc)})
 
 
-def main():
-    p = argparse.ArgumentParser(description="Multi-start RCWA topology optimization from laplas top-k samples.")
-    p.add_argument("--target")
-    p.add_argument("--init")
-    p.add_argument("--steps", type=int, default=100)
-    p.add_argument("--lr", type=float, default=0.005)
-    p.add_argument("--save_dir", default=str(ROOT / "samples" / "optimized"))
-    p.add_argument("--device", default=None, help="单设备模式；默认自动使用全部可见 GPU")
-    p.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
-    p.add_argument("--target_lambda", type=float, default=1000.0)
-    p.add_argument("--rcwa_orders", type=int, default=7)
-    p.add_argument("--binary_eval_every", type=int, default=10)
-    p.add_argument("--max_inits", type=int, default=5)
-    p.add_argument("--filter_radius", type=int, default=1)
-    p.add_argument("--proj_eta", type=float, default=0.5)
-    p.add_argument("--beta_start", type=float, default=4.0)
-    p.add_argument("--beta_end", type=float, default=16.0)
-    p.add_argument("--log_every", type=int, default=10)
-    args = p.parse_args()
+def _run_with_args(args) -> None:
+    """Core execution logic; accepts a pre-parsed args namespace.
 
+    Called both by main() (direct execution) and by band-specific wrapper
+    scripts (e.g. band_900nm/optimization.py) that only override default values.
+    """
     if args.target:
         args.target = str(resolve_from_root(args.target))
     if args.init:
@@ -537,6 +523,28 @@ def main():
             for r in rows
         ],
     )
+
+
+def main():
+    p = argparse.ArgumentParser(description="Multi-start RCWA topology optimization from laplas top-k samples.")
+    p.add_argument("--target")
+    p.add_argument("--init")
+    p.add_argument("--steps", type=int, default=100)
+    p.add_argument("--lr", type=float, default=0.005)
+    p.add_argument("--save_dir", default=str(ROOT / "samples" / "optimized"))
+    p.add_argument("--device", default=None, help="单设备模式；默认自动使用全部可见 GPU")
+    p.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
+    p.add_argument("--target_lambda", type=float, default=1000.0)
+    p.add_argument("--rcwa_orders", type=int, default=7)
+    p.add_argument("--binary_eval_every", type=int, default=10)
+    p.add_argument("--max_inits", type=int, default=5)
+    p.add_argument("--filter_radius", type=int, default=1)
+    p.add_argument("--proj_eta", type=float, default=0.5)
+    p.add_argument("--beta_start", type=float, default=4.0)
+    p.add_argument("--beta_end", type=float, default=16.0)
+    p.add_argument("--log_every", type=int, default=10)
+    args = p.parse_args()
+    _run_with_args(args)
 
 
 if __name__ == "__main__":

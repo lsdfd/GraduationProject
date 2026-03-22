@@ -69,12 +69,41 @@ def target_profile(thetas_deg: np.ndarray) -> np.ndarray:
     return x.astype(np.float32)
 
 
+def _row_3term_score(
+    y: np.ndarray,
+    x: np.ndarray,
+    denom: float,
+    center_idx: int,
+    edge_mask: np.ndarray,
+    global_scale: float,
+    w_center: float,
+    w_shape: float,
+    w_edge: float,
+) -> tuple[float, float, float, float, float, float]:
+    """Compute 3-term score for a single lambda row. Returns (score, c, s, e, a, r2)."""
+    if not np.isfinite(y).all():
+        return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
+    y_norm = y / max(float(np.max(y)), 1e-8)
+    a = float(np.sum(x * y_norm) / denom)
+    y_fit = a * x
+    ss_res = float(np.sum((y_norm - y_fit) ** 2))
+    ss_tot = float(np.sum((y_norm - np.mean(y_norm)) ** 2))
+    this_r2 = 1.0 - ss_res / max(ss_tot, 1e-8)
+    edge_mean = float(np.mean(y[edge_mask]))
+    center_val = float(y[center_idx])
+    c = float(np.clip(1.0 - center_val / max(edge_mean, 1e-8), 0.0, 1.0))
+    s = float(np.clip(this_r2, 0.0, 1.0)) if a >= 0 else 0.0
+    e = float(np.clip(edge_mean / global_scale, 0.0, 1.0))
+    return w_center * c + w_shape * s + w_edge * e, c, s, e, a, this_r2
+
+
 def score_spectra(
     spec: np.ndarray,
     thetas_deg: np.ndarray,
     w_center: float,
     w_shape: float,
     w_edge: float,
+    w_bandwidth: float = 0.2,
 ) -> dict[str, np.ndarray]:
     n, l, _ = spec.shape
     x = target_profile(thetas_deg).astype(np.float64)
@@ -89,38 +118,43 @@ def score_spectra(
     center_s = np.full_like(score, np.nan)
     shape_s = np.full_like(score, np.nan)
     edge_s = np.full_like(score, np.nan)
+    bandwidth_s = np.full_like(score, np.nan)
     coef_a = np.full_like(score, np.nan)
     fit_mse = np.full_like(score, np.nan)
     r2 = np.full_like(score, np.nan)
 
     denom = max(float(np.sum(x * x)), 1e-8)
+    w3 = 1.0 - w_bandwidth
+
     for i in range(n):
         for j in range(l):
             y = spec[i, j].astype(np.float64)
-            if not np.isfinite(y).all():
+            main, c, s, e, a, this_r2 = _row_3term_score(
+                y, x, denom, center_idx, edge_mask, global_scale, w_center, w_shape, w_edge
+            )
+            if np.isnan(main):
                 continue
 
-            y_norm = y / max(float(np.max(y)), 1e-8)
-            a = float(np.sum(x * y_norm) / denom)  # y ~ a*|kx|^2
-            y_fit = a * x
+            # bandwidth: average 3-term score of neighboring lambda rows (±1 step ≈ ±50nm)
+            bw_scores = []
+            for dj in (-1, 1):
+                jj = j + dj
+                if 0 <= jj < l:
+                    yy = spec[i, jj].astype(np.float64)
+                    nb, *_ = _row_3term_score(
+                        yy, x, denom, center_idx, edge_mask, global_scale, w_center, w_shape, w_edge
+                    )
+                    if np.isfinite(nb):
+                        bw_scores.append(nb)
+            bw = float(np.mean(bw_scores)) if bw_scores else main
 
-            mse = float(np.mean((y_norm - y_fit) ** 2))
-            ss_res = float(np.sum((y_norm - y_fit) ** 2))
-            ss_tot = float(np.sum((y_norm - np.mean(y_norm)) ** 2))
-            this_r2 = 1.0 - ss_res / max(ss_tot, 1e-8)
-
-            edge_mean = float(np.mean(y[edge_mask]))
-            center_val = float(y[center_idx])
-            c_score = float(np.clip(1.0 - center_val / max(edge_mean, 1e-8), 0.0, 1.0))
-            s_score = float(np.clip(this_r2, 0.0, 1.0)) if a >= 0 else 0.0
-            e_score = float(np.clip(edge_mean / global_scale, 0.0, 1.0))
-
-            score[i, j] = w_center * c_score + w_shape * s_score + w_edge * e_score
-            center_s[i, j] = c_score
-            shape_s[i, j] = s_score
-            edge_s[i, j] = e_score
+            score[i, j] = w3 * main + w_bandwidth * bw
+            center_s[i, j] = c
+            shape_s[i, j] = s
+            edge_s[i, j] = e
+            bandwidth_s[i, j] = bw
             coef_a[i, j] = a
-            fit_mse[i, j] = mse
+            fit_mse[i, j] = float(np.mean((y / max(float(np.max(y)), 1e-8) - a * x) ** 2))
             r2[i, j] = this_r2
 
     return {
@@ -128,6 +162,7 @@ def score_spectra(
         "center_score": center_s,
         "shape_score": shape_s,
         "edge_score": edge_s,
+        "bandwidth_score": bandwidth_s,
         "coef_a": coef_a,
         "fit_mse": fit_mse,
         "r2": r2,
@@ -152,7 +187,7 @@ def topk_per_lambda(score: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 def save_scores_csv(path: Path, lambdas: np.ndarray, pack: dict[str, np.ndarray]) -> None:
-    keys = ["score", "center_score", "shape_score", "edge_score", "coef_a", "fit_mse", "r2"]
+    keys = ["score", "center_score", "shape_score", "edge_score", "bandwidth_score", "coef_a", "fit_mse", "r2"]
     n, l = pack["score"].shape
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -382,6 +417,7 @@ def main() -> None:
     p.add_argument("--w_center", type=float, default=0.6)
     p.add_argument("--w_shape", type=float, default=0.3)
     p.add_argument("--w_edge", type=float, default=0.1)
+    p.add_argument("--w_bandwidth", type=float, default=0.2)
     p.add_argument("--plot_topk", type=int, default=5)
     p.add_argument("--theta_ref", type=float, default=40.0)
     args = p.parse_args()
@@ -391,7 +427,7 @@ def main() -> None:
 
     structures, spec, lambdas, thetas = load_bundle(args.in_npz, args.field)
     companion_spec, companion_label = load_companion_spec(args.in_npz, args.field)
-    pack = score_spectra(spec, thetas, args.w_center, args.w_shape, args.w_edge)
+    pack = score_spectra(spec, thetas, args.w_center, args.w_shape, args.w_edge, args.w_bandwidth)
     top_idx, top_score = topk_per_lambda(pack["score"], args.topk)
     summary = summary_json(lambdas, pack["score"], top_idx, top_score)
 
@@ -425,7 +461,7 @@ def main() -> None:
     print(f"input: {args.in_npz}")
     print(f"field: {args.field}")
     print(f"samples: {spec.shape[0]}, lambdas: {spec.shape[1]}, thetas: {spec.shape[2]}")
-    print(f"weights: center={args.w_center}, shape={args.w_shape}, edge={args.w_edge}")
+    print(f"weights: center={args.w_center}, shape={args.w_shape}, edge={args.w_edge}, bandwidth={args.w_bandwidth} (3-term scaled by {1-args.w_bandwidth:.1f})")
     print("score direction: higher is better")
     print(f"plot_topk: {args.plot_topk}, theta_ref: {args.theta_ref} deg")
     print(f"saved: {args.out_dir}")

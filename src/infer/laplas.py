@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Construct 1000nm second-order targets and run diffusion inference."""
+"""Construct second-order targets at configurable wavelength and run diffusion inference."""
 
 from __future__ import annotations
 
@@ -458,24 +458,12 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
 
 
 @torch.no_grad()
-def main():
-    p = argparse.ArgumentParser(description="Run diffusion inference with swept second-order targets at 1000nm.")
-    p.add_argument("--stats", default=str(ROOT / "checkpoints" / "cond_stats.npz"))
-    p.add_argument("--diffusion_ckpt", default=str(ROOT / "checkpoints" / "diffusion_best.pt"))
-    p.add_argument("--forward_ckpt", default=str(ROOT / "checkpoints" / "forward_best.pt"))
-    p.add_argument("--num_samples", type=int, default=32)
-    p.add_argument("--cfg_scale", type=float, default=3.0)
-    p.add_argument("--save_dir", default=str(ROOT / "samples" / "laplas"))
-    p.add_argument("--device", default=None, help="主设备；默认自动使用全部可见 GPU，并以首张卡做扩散采样")
-    p.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
-    p.add_argument("--target_lambda", type=float, default=1000.0)
-    p.add_argument("--rcwa_orders", type=int, default=7)
-    p.add_argument("--topk_second", type=int, default=5)
-    p.add_argument("--guidance_scale", type=float, default=0.1, help="物理引导强度，0 表示禁用")
-    p.add_argument("--guide_start_t", type=int, default=300, help="开始物理引导的时间步阈值（t < 此值才引导）")
-    p.add_argument("--guide_every", type=int, default=1, help="每隔几步做一次物理引导（1=每步，5=每5步）")
-    args = p.parse_args()
+def _run_with_args(args) -> None:
+    """Core execution logic; accepts a pre-parsed args namespace.
 
+    Called both by main() (direct execution) and by band-specific wrapper
+    scripts (e.g. band_900nm/laplas.py) that only override default values.
+    """
     args.stats = str(resolve_from_root(args.stats))
     args.diffusion_ckpt = str(resolve_from_root(args.diffusion_ckpt))
     args.forward_ckpt = str(resolve_from_root(args.forward_ckpt))
@@ -512,6 +500,26 @@ def main():
 
     for case in TARGET_SWEEP:
         run_case(case, args, mean, std, cond_ch, weight, diffusion, root_save_dir, devices, surrogate=surrogate)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Run diffusion inference with swept second-order targets at 1000nm.")
+    p.add_argument("--stats", default=str(ROOT / "checkpoints" / "cond_stats.npz"))
+    p.add_argument("--diffusion_ckpt", default=str(ROOT / "checkpoints" / "diffusion_best.pt"))
+    p.add_argument("--forward_ckpt", default=str(ROOT / "checkpoints" / "forward_best.pt"))
+    p.add_argument("--num_samples", type=int, default=32)
+    p.add_argument("--cfg_scale", type=float, default=3.0)
+    p.add_argument("--save_dir", default=str(ROOT / "samples" / "laplas"))
+    p.add_argument("--device", default=None, help="主设备；默认自动使用全部可见 GPU，并以首张卡做扩散采样")
+    p.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
+    p.add_argument("--target_lambda", type=float, default=1000.0)
+    p.add_argument("--rcwa_orders", type=int, default=7)
+    p.add_argument("--topk_second", type=int, default=5)
+    p.add_argument("--guidance_scale", type=float, default=0.1, help="物理引导强度，0 表示禁用")
+    p.add_argument("--guide_start_t", type=int, default=300, help="开始物理引导的时间步阈值（t < 此值才引导）")
+    p.add_argument("--guide_every", type=int, default=1, help="每隔几步做一次物理引导（1=每步，5=每5步）")
+    args = p.parse_args()
+    _run_with_args(args)
 
 
 if __name__ == "__main__":

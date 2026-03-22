@@ -95,7 +95,7 @@ def second_order_score_row(
     center_val = float(y[center_idx])
     center_score = float(np.clip(1.0 - center_val / max(edge_mean, 1e-8), 0.0, 1.0))
     shape_score = float(np.clip(r2, 0.0, 1.0)) if a >= 0 else 0.0
-    edge_score = float(np.clip(edge_mean / max(float(np.max(y)), 1e-8), 0.0, 1.0))
+    edge_score = float(np.clip(edge_mean, 0.0, 1.0))
     outer_vals = np.asarray([y_norm[i] for i, _ in _outer_band_pairs(thetas)] + [y_norm[_outer_band_pairs(thetas)[-1][1]]], dtype=np.float64)
     outer_rank_terms = []
     for lo, hi in _outer_band_pairs(thetas):
@@ -139,7 +139,7 @@ def second_order_score_map(
     lambdas: np.ndarray,
     thetas: np.ndarray,
     target_lambda: float = 1000.0,
-    band_offset_nm: float = 20.0,
+    band_offset_nm: float = 50.0,
     w_band: float = 0.15,
     w_center: float = 0.50,
     w_shape: float = 0.20,
@@ -253,7 +253,7 @@ def second_order_score_row_torch(
     center_val = y[:, center_idx]
     center_score = (1.0 - center_val / edge_mean.clamp_min(1e-8)).clamp(0.0, 1.0)
     shape_score = torch.where(a.squeeze(-1) >= 0.0, r2.clamp(0.0, 1.0), torch.zeros_like(r2))
-    edge_score = (edge_mean / row_max.squeeze(-1)).clamp(0.0, 1.0)
+    edge_score = edge_mean.clamp(0.0, 1.0)
     outer_pairs = _outer_band_pairs(thetas_arr)
     outer_terms = []
     for lo, hi in outer_pairs:
@@ -275,7 +275,7 @@ def second_order_band_score_torch(
     lambdas: np.ndarray,
     thetas: np.ndarray,
     target_lambda: float = 1000.0,
-    band_offset_nm: float = 20.0,
+    band_offset_nm: float = 50.0,
     w_band: float = 0.15,
     w_center: float = 0.50,
     w_shape: float = 0.20,

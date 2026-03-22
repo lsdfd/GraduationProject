@@ -1,4 +1,4 @@
-"""Validate whether the forward surrogate preserves deep 1000nm dips on top-ranked samples."""
+"""Validate whether the forward surrogate preserves second-order structure on top-ranked samples."""
 
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ def plot_sample_compare(
 
 @torch.no_grad()
 def main() -> None:
-    p = argparse.ArgumentParser(description="Validate surrogate predictions on top 1000nm second-order samples.")
+    p = argparse.ArgumentParser(description="Validate surrogate predictions on top-ranked second-order samples at a given wavelength.")
     p.add_argument("--train_npz", default=str(ROOT / "data" / "train_data.npz"))
     p.add_argument("--topk_csv", default=str(ROOT / "data" / "second_order_scores" / "tpp_mag_top5_per_lambda.csv"))
     p.add_argument("--stats", default=str(ROOT / "checkpoints" / "cond_stats.npz"))

@@ -28,6 +28,7 @@ from infer.common import (  # noqa: E402
     plot_structure,
     rcwa_eval_full_map,
     second_order_score_map,
+    second_order_target,
 )
 
 
@@ -83,6 +84,39 @@ def load_raw_top_condition(
     lambdas = np.asarray(data["lambdas"], dtype=np.float32)
     thetas = np.asarray(data["thetas"], dtype=np.float32)
     return target_raw, lambdas, thetas, sample_idx
+
+
+def build_physics_target(
+    target_raw: np.ndarray,
+    lambdas: np.ndarray,
+    thetas: np.ndarray,
+    target_lambda: float = 1000.0,
+    band_sigma_nm: float = 25.0,
+) -> np.ndarray:
+    """
+    物理约束目标构建：
+    - 保留模板在每个波长 ±40° 的边界透过率值
+    - 将角度分布修正为理想 sin²θ 形状（用边界值缩放）
+    - 以高斯权重从 target_lambda 向两侧衰减，远处保持原始谱
+    - tss 直接复制修正后的 tpp（C4 对称性 tpp≈tss）
+    """
+    ideal = second_order_target(thetas).astype(np.float64)  # sin²θ / sin²(40°)
+    lam_dist = lambdas.astype(np.float64) - float(target_lambda)
+    gauss_w = np.exp(-0.5 * (lam_dist / max(float(band_sigma_nm), 1e-6)) ** 2)
+
+    tpp = target_raw[0].copy().astype(np.float64)
+    for li in range(len(lambdas)):
+        w = float(gauss_w[li])
+        if w < 1e-6:
+            continue
+        row = tpp[li]
+        edge_val = (float(row[0]) + float(row[-1])) / 2.0
+        ideal_row = ideal * edge_val
+        tpp[li] = np.clip((1.0 - w) * row + w * ideal_row, 0.0, 1.0)
+
+    tpp = tpp.astype(np.float32)
+    tss = tpp.copy()  # C4 对称：tss = tpp
+    return np.stack([tpp, tss], axis=0)
 
 
 def compute_second_order_metrics(
@@ -212,6 +246,7 @@ def main() -> None:
     p.add_argument("--target_lambda", type=float, default=1000.0)
     p.add_argument("--target_rank", type=int, default=1)
     p.add_argument("--rcwa_orders", type=int, default=7)
+    p.add_argument("--band_sigma_nm", type=float, default=25.0, help="高斯扩散宽度(nm)，控制理想形状向周围波长的扩散范围")
     args = p.parse_args()
 
     args.train_npz = str(resolve_from_root(args.train_npz))
@@ -230,6 +265,11 @@ def main() -> None:
         Path(args.topk_csv),
         args.target_lambda,
         args.target_rank,
+    )
+    target_raw = build_physics_target(
+        target_raw, lambdas, thetas,
+        target_lambda=args.target_lambda,
+        band_sigma_nm=args.band_sigma_nm,
     )
     mean, std = load_stats(args.stats)
     cond_ch = int(mean.shape[1])
