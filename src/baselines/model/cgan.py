@@ -45,6 +45,7 @@ class Generator(nn.Module):
     """
     def __init__(self, latent_dim: int = 128, cond_dim: int = 256, base_ch: int = 32):
         super().__init__()
+        self.latent_dim = latent_dim
         self.cond_embed = CondEmbed(cond_dim=cond_dim)
         self.base_ch = base_ch
 
@@ -82,10 +83,7 @@ class Generator(nn.Module):
         """
         device = next(self.parameters()).device
         cond_rep = cond.expand(n_samples, -1, -1, -1).to(device)
-        z = torch.randn(n_samples, self.fc[0].in_features - 256, device=device)
-        # 动态获取 latent_dim
-        latent_dim = self.fc[0].in_features - 256  # fc 输入 = latent_dim + cond_dim(256)
-        z = torch.randn(n_samples, latent_dim, device=device)
+        z = torch.randn(n_samples, self.latent_dim, device=device)
         out = self.forward(z, cond_rep)
         return (out > 0.5).float()
 

@@ -21,8 +21,8 @@ def _try_import_rcwa_score():
     if infer_dir not in sys.path:
         sys.path.insert(0, infer_dir)
     try:
-        from common import second_order_score
-        return second_order_score
+        from common import second_order_score_map
+        return second_order_score_map
     except ImportError:
         return None
 

@@ -14,14 +14,26 @@ src/
 │   ├── materials/      # 材料折射率数据与插值
 │   ├── rcwa/           # TORCWA 仿真与批量数据生成
 │   └── structure/      # 64x64 自由形态结构生成
-└── model/
-    ├── dataset.py      # 训练数据读取
-    ├── models.py       # 前向代理 + 条件 UNet
-    ├── diffusion.py    # 扩散过程
-    ├── train_utils.py  # 训练日志与可视化工具
-    ├── train_forward.py
-    ├── train_diffusion.py
-    └── sample.py
+├── model/
+│   ├── dataset.py      # 训练数据读取
+│   ├── models.py       # 前向代理 + 条件 UNet
+│   ├── diffusion.py    # 扩散过程
+│   ├── train_utils.py  # 训练日志与可视化工具
+│   ├── train_forward.py
+│   ├── train_diffusion.py
+│   └── sample.py
+└── baselines/
+    ├── model/
+    │   ├── cvae.py     # CVAE 架构
+    │   └── cgan.py     # cGAN 架构（Hinge loss + projection discriminator）
+    ├── train/
+    │   ├── train_cvae.py
+    │   └── train_cgan.py
+    └── eval/
+        ├── metrics.py   # best_score / success_rate / spectrum_mae / diversity
+        ├── infer_all.py # 统一生成接口（random / CVAE / cGAN / diffusion）
+        ├── run_eval.py  # 跑完整对比实验 → results.json
+        └── plot_results.py  # 绘制 4 张对比图
 ```
 
 ## 数据流程
@@ -302,7 +314,72 @@ python src/model/sample.py
 - `topk_samples.npy`
 - `topk_pred_cond.npy`
 
-## Infer 部分
+## 对比实验（Baseline Comparison）
+
+`src/baselines/` 包含三种基线方法（CVAE、cGAN、随机+拓扑）与扩散模型的对比实验框架。
+
+### 训练基线模型
+
+```bash
+# CVAE（约 200 epochs，有 early stop）
+python src/baselines/train/train_cvae.py \
+    --data_path data/train_data.npz \
+    --save_dir  checkpoints/cvae
+
+# cGAN（200 epochs，n_critic=2）
+python src/baselines/train/train_cgan.py \
+    --data_path data/train_data.npz \
+    --save_dir  checkpoints/cgan
+```
+
+两个命令可在两个 tmux 窗口并行运行，互不依赖。
+
+### 运行评估
+
+```bash
+python src/baselines/eval/run_eval.py \
+    --data_path      data/train_data.npz \
+    --cvae_ckpt      checkpoints/cvae/cvae_best.pt \
+    --cgan_ckpt      checkpoints/cgan/cgan_best.pt \
+    --diffusion_ckpt checkpoints/diffusion_best.pt \
+    --n_test         15 \
+    --n_samples      16 \
+    --target_lambda  1000.0 \
+    --save_dir       samples/eval_compare
+```
+
+输出：`samples/eval_compare/results.json`，同时打印汇总表格。
+
+> 若某个 checkpoint 不存在，该方法会被自动跳过，不影响其余方法。
+
+### 绘制对比图
+
+```bash
+python src/baselines/eval/plot_results.py \
+    --results  samples/eval_compare/results.json \
+    --save_dir samples/eval_compare/figures
+```
+
+输出四张图：
+
+| 文件 | 内容 |
+|------|------|
+| `fig1_main_metrics.png` | 三大指标分组柱状图（best_score / success_rate / spectrum_mae） |
+| `fig2_score_boxplot.png` | best_score 箱线图（展示跨 case 稳定性） |
+| `fig3_time_vs_quality.png` | 推理时间 vs 质量散点图 |
+| `fig4_diversity.png` | 结构多样性对比柱状图 |
+
+### 评估指标说明
+
+| 指标 | 含义 | 越高越好 |
+|------|------|----------|
+| `best_score` | N 个候选中最优的二阶打分（0~1） | ✓ |
+| `top1_success_rate` | score > 0.5 的候选占比 | ✓ |
+| `spectrum_mae` | 最优候选预测光谱与目标的 L1 误差 | ✗ |
+| `diversity` | N 个候选之间的平均归一化汉明距离 | ✓ |
+| `inference_time_s` | 生成 N 个候选的总耗时（秒） | ✗ |
+
+
 
 ### 二阶目标扩散推理
 

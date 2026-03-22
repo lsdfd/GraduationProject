@@ -179,7 +179,7 @@ def main():
                 res = {"method": method_name, "error": str(e)}
 
             all_results[method_name].append(res)
-            score = res.get("best_score", "?")
+            score = res.get("best_score", float("nan"))
             time_ = res.get("inference_time_s", 0)
             print(f"best_score={score:.4f}  time={time_:.1f}s")
 
