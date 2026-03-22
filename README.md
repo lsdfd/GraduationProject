@@ -339,14 +339,15 @@ python src/baselines/train/train_cgan.py \
 ```bash
 python src/baselines/eval/run_eval.py \
     --data_path      data/train_data.npz \
+    --topk_csv       data/second_order_scores/tpp_mag_top5_per_lambda.csv \
     --forward_ckpt   checkpoints/forward_best.pt \
     --stats_path     checkpoints/cond_stats.npz \
     --cvae_ckpt      checkpoints/cvae/cvae_best.pt \
     --cgan_ckpt      checkpoints/cgan/cgan_best.pt \
     --diffusion_ckpt checkpoints/diffusion_best.pt \
-    --n_test         15 \
-    --n_samples      16 \
+    --n_samples      32 \
     --target_lambda  1000.0 \
+    --target_rank    1 \
     --save_dir       samples/eval_compare
 ```
 
