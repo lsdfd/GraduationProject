@@ -169,6 +169,11 @@ def main():
         diffusion_ckpt = args.diffusion_ckpt,
         device         = device,
     )
+    # ── 为 diffusion+guide 注入代理和目标 ────────────────────────────
+    if "diffusion+guide" in all_models:
+        all_models["diffusion+guide"]["surrogate"]   = surrogate
+        all_models["diffusion+guide"]["target_norm"] = cond_norm.to(device)
+
     print(f"[run_eval] methods: {list(all_models.keys())}")
 
     # ── 归一化目标条件 ────────────────────────────────────────────────

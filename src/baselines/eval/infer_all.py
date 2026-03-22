@@ -119,11 +119,34 @@ def load_diffusion(ckpt_path: str, device: str):
 
 def generate_diffusion(cond_norm, n_samples: int = 16, device: str = "cpu",
                        model=None, cfg_scale: float = 3.0, **kwargs) -> np.ndarray:
+    """纯 CFG 扩散，无物理引导（baseline：diffusion w/o guidance）。"""
     if isinstance(cond_norm, np.ndarray):
         cond_norm = torch.from_numpy(cond_norm).float()
     cond_rep = cond_norm.expand(n_samples, -1, -1, -1).to(device)
     with torch.no_grad():
         out = model.sample(cond_rep, cfg_scale=cfg_scale)  # [N,1,64,64]
+    return out.squeeze(1).cpu().numpy()
+
+
+def generate_diffusion_guided(cond_norm, n_samples: int = 16, device: str = "cpu",
+                               model=None, cfg_scale: float = 3.0,
+                               surrogate=None, target_norm=None,
+                               guidance_scale: float = 0.1,
+                               guide_start_t: int = 300,
+                               guide_every: int = 1,
+                               **kwargs) -> np.ndarray:
+    """CFG + DPS 物理引导扩散（Ours）。"""
+    if isinstance(cond_norm, np.ndarray):
+        cond_norm = torch.from_numpy(cond_norm).float()
+    cond_rep   = cond_norm.expand(n_samples, -1, -1, -1).to(device)
+    target_rep = target_norm.to(device) if target_norm is not None else None
+    out = model.sample_guided(
+        cond_rep, cfg_scale=cfg_scale,
+        surrogate=surrogate, target_norm=target_rep,
+        guidance_scale=guidance_scale,
+        guide_start_t=guide_start_t,
+        guide_every=guide_every,
+    )   # [N,1,64,64]
     return out.squeeze(1).cpu().numpy()
 
 
@@ -162,10 +185,12 @@ def load_all_models(
     else:
         print(f"[infer_all] cGAN checkpoint not found: {cgan_ckpt}")
 
-    # 扩散模型
+    # 扩散模型（纯 CFG）
     if os.path.exists(diffusion_ckpt):
         m, _, _ = load_diffusion(diffusion_ckpt, device)
-        models["diffusion"] = {"model": m, "fn": generate_diffusion}
+        models["diffusion"]       = {"model": m, "fn": generate_diffusion}
+        models["diffusion+guide"] = {"model": m, "fn": generate_diffusion_guided}
+        # surrogate / target_norm 由 run_eval.py 在注册后填入 method_info
     else:
         print(f"[infer_all] Diffusion checkpoint not found: {diffusion_ckpt}")
 
@@ -179,14 +204,17 @@ def load_all_models(
 def timed_generate(method_info: dict, cond_norm, n_samples: int,
                    device: str) -> tuple[np.ndarray, float]:
     """
-    调用对应方法生成结构，返回 (structures [N,64,64], elapsed_sec)
+    调用对应方法生成结构，返回 (structures [N,64,64], elapsed_sec)。
+    method_info 里除 "fn"/"model" 外的所有键都作为 kwargs 透传给生成函数
+    （供 diffusion+guide 传 surrogate / target_norm 等）。
     """
+    extra = {k: v for k, v in method_info.items() if k not in ("fn", "model")}
     t0 = time.time()
     structs = method_info["fn"](
         cond_norm,
         n_samples=n_samples,
         device=device,
         model=method_info["model"],
+        **extra,
     )
-    elapsed = time.time() - t0
-    return structs, elapsed
+    return structs, time.time() - t0

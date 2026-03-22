@@ -3,8 +3,10 @@
 
 指标：
   - best_score         最优候选的 second_order_score
+  - mean_score         全部候选的平均 score（衡量整体生成质量）
+  - top3_score         top-3 候选的平均 score（衡量稳定性）
   - top1_success_rate  score > 0.5 的比例
-  - spectrum_mae       tpp/tss 与目标的 L1 误差（物理空间）
+  - spectrum_mae       最优候选预测光谱 vs 目标的 L1 误差（物理空间）
   - binary_rate        结构的二值化程度（均值距0.5的距离）
   - diversity          N个候选之间的平均汉明距离（归一化到[0,1]）
   - inference_time     单次推理耗时（秒）
@@ -56,6 +58,18 @@ def best_score(scores: list) -> float:
     return float(np.max(scores))
 
 
+def mean_score(scores: list) -> float:
+    """全部 N 个候选的平均 score，衡量整体生成质量（不只是偶然命中最优）。"""
+    return float(np.mean(scores))
+
+
+def top3_score(scores: list) -> float:
+    """top-3 候选的平均 score，介于 best 和 mean 之间，衡量一致性。"""
+    arr = np.array(scores)
+    k = min(3, len(arr))
+    return float(np.mean(np.sort(arr)[::-1][:k]))
+
+
 def top1_success_rate(scores: list, threshold: float = 0.5) -> float:
     """score > threshold 的候选占比。"""
     arr = np.array(scores)
@@ -87,16 +101,14 @@ def diversity(structures: np.ndarray) -> float:
     计算 N 个结构两两之间的平均归一化汉明距离。
     汉明距离 = 不同像素数 / 总像素数，范围 [0,1]
     """
-    N, H, W = structures.shape
+    N = structures.shape[0]
     if N <= 1:
         return 0.0
     flat = structures.reshape(N, -1).astype(np.float32)
-    total_pixels = float(H * W)
     dists = []
     for i in range(N):
         for j in range(i + 1, N):
-            d = np.mean(np.abs(flat[i] - flat[j]))
-            dists.append(d)
+            dists.append(float(np.mean(np.abs(flat[i] - flat[j]))))
     return float(np.mean(dists))
 
 
@@ -113,6 +125,8 @@ def summarize(
     """返回所有指标的字典。"""
     return {
         "best_score"        : best_score(scores),
+        "mean_score"        : mean_score(scores),
+        "top3_score"        : top3_score(scores),
         "top1_success_rate" : top1_success_rate(scores, threshold),
         "spectrum_mae"      : spectrum_mae(best_pred_cond, target_cond),
         "binary_rate"       : binary_rate(candidates),
