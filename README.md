@@ -339,6 +339,8 @@ python src/baselines/train/train_cgan.py \
 ```bash
 python src/baselines/eval/run_eval.py \
     --data_path      data/train_data.npz \
+    --forward_ckpt   checkpoints/forward_best.pt \
+    --stats_path     checkpoints/cond_stats.npz \
     --cvae_ckpt      checkpoints/cvae/cvae_best.pt \
     --cgan_ckpt      checkpoints/cgan/cgan_best.pt \
     --diffusion_ckpt checkpoints/diffusion_best.pt \
