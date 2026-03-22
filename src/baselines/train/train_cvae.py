@@ -34,7 +34,8 @@ def main():
     parser.add_argument("--latent_dim", type=int,   default=128)
     parser.add_argument("--beta",       type=float, default=1.0,
                         help="KL 权重，beta-VAE")
-    parser.add_argument("--train_ratio",type=float, default=0.9)
+    parser.add_argument("--train_ratio",type=float, default=0.7,
+                        help="与 run_eval.py 保持一致，确保测试集无泄漏")
     parser.add_argument("--seed",       type=int,   default=20260315)
     args = parser.parse_args()
 

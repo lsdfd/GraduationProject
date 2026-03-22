@@ -35,7 +35,8 @@ def main():
     parser.add_argument("--lambda_l1",   type=float, default=10.0)
     parser.add_argument("--n_critic",    type=int,   default=2,
                         help="每训练 1 次 G，训练 D 的次数")
-    parser.add_argument("--train_ratio", type=float, default=0.9)
+    parser.add_argument("--train_ratio", type=float, default=0.7,
+                        help="与 run_eval.py 保持一致，确保测试集无泄漏")
     parser.add_argument("--seed",        type=int,   default=20260315)
     args = parser.parse_args()
 
