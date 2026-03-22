@@ -31,9 +31,88 @@ from cvae import CVAE
 from cgan import Generator
 from generate_one import generate_structure
 
+# 拓扑优化复用 optimization.py 的核心函数
+sys.path.insert(0, os.path.join(_ROOT, "src", "infer"))
+from optimization import (
+    symmetrize, density_filter, project_density, finalize_binary,
+    rcwa_tpp_tss_row, second_order_score_row_torch, theta_grid,
+    target_row_tensor, outer_monotonic_penalty, tv_loss,
+)
+
 
 # ══════════════════════════════════════════════════════════════════════
-# 1. 随机初始化结构（不需要模型）
+# 1. 拓扑优化（multistart，每个起点随机初始化）
+# ══════════════════════════════════════════════════════════════════════
+
+def generate_topo_opt(cond_norm, n_samples: int = 16, device: str = "cpu",
+                      target_lambda: float = 1000.0,
+                      steps: int = 200, lr: float = 0.02,
+                      filter_radius: int = 1,
+                      beta_start: float = 1.0, beta_end: float = 8.0,
+                      proj_eta: float = 0.5,
+                      rcwa_orders: int = 7,
+                      **kwargs) -> np.ndarray:
+    """
+    多起点拓扑优化：每次从随机初始化出发独立优化，取最优二值结构。
+    不使用任何学习模型，纯 RCWA 梯度驱动。
+    返回 [n_samples, 64, 64] 二值结构。
+    """
+    thetas   = theta_grid()
+    target_t = target_row_tensor(device)
+    results  = []
+
+    for i in range(n_samples):
+        s    = generate_structure(RNG_SEED=None, N_COARSE=8, N_FINE=64,
+                                  SAVE_FIG=False, SAVE_NPY=False)
+        init = torch.from_numpy(s["final"].astype(np.float32)
+                               ).unsqueeze(0).unsqueeze(0).to(device)
+
+        rho_param      = init.clone().detach().requires_grad_(True)
+        opt            = torch.optim.Adam([rho_param], lr=lr)
+        best_bin       = finalize_binary(init.detach())
+        best_score_val = -1.0
+
+        for step in range(steps):
+            beta  = beta_start + step / max(steps - 1, 1) * (beta_end - beta_start)
+            rho   = symmetrize(rho_param).clamp(0.0, 1.0)
+            rho_f = density_filter(rho, filter_radius)
+            x     = project_density(rho_f, beta=beta, eta=proj_eta)
+
+            tpp_row, _ = rcwa_tpp_tss_row(x, target_lambda, device, rcwa_orders)
+            pack       = second_order_score_row_torch(tpp_row, thetas)
+            row_max    = tpp_row.amax(dim=-1, keepdim=True).clamp_min(1e-8)
+            y_norm     = tpp_row / row_max
+
+            loss = ((1.0 - pack["score"].mean())
+                    + 0.10 * (y_norm - target_t).abs().mean()
+                    + 0.10 * outer_monotonic_penalty(y_norm, thetas)
+                    + 0.06 * (x * (1.0 - x)).mean()
+                    + 0.02 * tv_loss(rho_f))
+
+            opt.zero_grad(); loss.backward()
+            opt.step()
+            with torch.no_grad():
+                rho_param.clamp_(0.0, 1.0)
+
+            if (step + 1) % 50 == 0 or step + 1 == steps:
+                try:
+                    xb       = finalize_binary(x.detach())
+                    tpp_b, _ = rcwa_tpp_tss_row(xb, target_lambda, device, rcwa_orders)
+                    sc       = float(second_order_score_row_torch(tpp_b, thetas)["score"].mean())
+                    if sc > best_score_val:
+                        best_score_val = sc
+                        best_bin = xb.detach().clone()
+                except Exception:
+                    pass
+
+        results.append(best_bin.squeeze().cpu().numpy().astype(np.float32))
+        print(f"[topo_opt {i+1}/{n_samples}] score={best_score_val:.4f}", flush=True)
+
+    return np.stack(results, axis=0)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 2（原1）. 随机初始化结构（保留供调试，不进入 load_all_models）
 # ══════════════════════════════════════════════════════════════════════
 
 def generate_random(cond_norm, n_samples: int = 16, device: str = "cpu",
@@ -166,8 +245,8 @@ def load_all_models(
     """
     models = {}
 
-    # 随机方法：无需模型
-    models["random"] = {"model": None, "fn": generate_random}
+    # 拓扑优化：无需模型，target_lambda 由 run_eval.py 填入
+    models["topo_opt"] = {"model": None, "fn": generate_topo_opt}
 
     # CVAE
     if os.path.exists(cvae_ckpt):

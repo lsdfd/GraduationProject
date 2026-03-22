@@ -169,16 +169,19 @@ def main():
         diffusion_ckpt = args.diffusion_ckpt,
         device         = device,
     )
-    # ── 为 diffusion+guide 注入代理和目标 ────────────────────────────
+
+    # ── 归一化目标条件 ────────────────────────────────────────────────
+    cond_norm_np = (cond_raw - cond_mean.squeeze(0)) / cond_std.squeeze(0)
+    cond_norm    = torch.from_numpy(cond_norm_np).unsqueeze(0).float()  # [1,2,11,17]
+
+    # ── 为各方法注入额外参数 ──────────────────────────────────────────
+    if "topo_opt" in all_models:
+        all_models["topo_opt"]["target_lambda"] = args.target_lambda
     if "diffusion+guide" in all_models:
         all_models["diffusion+guide"]["surrogate"]   = surrogate
         all_models["diffusion+guide"]["target_norm"] = cond_norm.to(device)
 
     print(f"[run_eval] methods: {list(all_models.keys())}")
-
-    # ── 归一化目标条件 ────────────────────────────────────────────────
-    cond_norm_np = (cond_raw - cond_mean.squeeze(0)) / cond_std.squeeze(0)
-    cond_norm    = torch.from_numpy(cond_norm_np).unsqueeze(0).float()  # [1,2,11,17]
 
     # ── 每个方法评估 ──────────────────────────────────────────────────
     all_results = {}

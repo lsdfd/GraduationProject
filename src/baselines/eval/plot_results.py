@@ -25,21 +25,21 @@ import matplotlib.pyplot as plt
 
 # ── 配色：5 个方法，diffusion+guide 红色高亮（= Ours）────────────────
 METHOD_COLORS = {
-    "random"          : "#78909C",   # 灰
+    "topo_opt"        : "#78909C",   # 灰（拓扑优化）
     "cvae"            : "#42A5F5",   # 蓝
     "cgan"            : "#AB47BC",   # 紫
     "diffusion"       : "#FFA726",   # 橙（扩散无引导）
     "diffusion+guide" : "#EF5350",   # 红（Ours）
 }
 METHOD_LABELS = {
-    "random"          : "Random",
+    "topo_opt"        : "Topo-Opt",
     "cvae"            : "CVAE",
     "cgan"            : "cGAN",
     "diffusion"       : "Diffusion (CFG only)",
     "diffusion+guide" : "Ours (CFG + DPS)",
 }
 BG = "#FAFAFA"
-PREFERRED_ORDER = ["random", "cvae", "cgan", "diffusion", "diffusion+guide"]
+PREFERRED_ORDER = ["topo_opt", "cvae", "cgan", "diffusion", "diffusion+guide"]
 
 
 def load_results(path: str) -> dict:
