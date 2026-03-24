@@ -150,9 +150,10 @@ class ForwardSurrogate(nn.Module):
     输出:  [B,17]，归一化 tpp 角度响应
     """
 
-    def __init__(self, out_dim=17):
+    def __init__(self, out_dim=17, theta_min=-40.0, theta_max=40.0):
         super().__init__()
         base_ch = 32
+        self.out_dim = out_dim
         self.encoder = nn.Sequential(
             ConvNormAct(1, base_ch, 3),
             ResidualConvBlock(base_ch, base_ch),
@@ -164,19 +165,42 @@ class ForwardSurrogate(nn.Module):
             ResidualConvBlock(base_ch * 8, base_ch * 8),
             AttentionBlock(base_ch * 8),
         )
-        self.head = nn.Sequential(
+        token_dim = base_ch * 8
+        self.memory_proj = nn.Conv2d(token_dim, token_dim, 1)
+        self.global_proj = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(base_ch * 8, 256),
+            nn.Linear(token_dim, token_dim),
+            nn.SiLU(),
+        )
+        theta_grid = torch.linspace(theta_min, theta_max, out_dim, dtype=torch.float32)[:, None]
+        self.register_buffer("theta_grid", theta_grid, persistent=False)
+        self.theta_mlp = nn.Sequential(
+            nn.Linear(1, token_dim // 2),
+            nn.SiLU(),
+            nn.Linear(token_dim // 2, token_dim),
+        )
+        self.query_bias = nn.Parameter(torch.randn(out_dim, token_dim) * 0.02)
+        self.decoder = nn.MultiheadAttention(embed_dim=token_dim, num_heads=8, batch_first=True, dropout=0.0)
+        self.query_norm = nn.LayerNorm(token_dim)
+        self.memory_norm = nn.LayerNorm(token_dim)
+        self.head = nn.Sequential(
+            nn.Linear(token_dim, 128),
             nn.SiLU(),
             nn.Dropout(0.1),
-            nn.Linear(256, 128),
-            nn.SiLU(),
-            nn.Linear(128, out_dim),
+            nn.Linear(128, 1),
         )
 
     def forward(self, x):
-        return self.head(self.encoder(x))
+        feat = self.encoder(x)
+        memory = self.memory_proj(feat).flatten(2).transpose(1, 2)  # [B,64,256]
+        memory = self.memory_norm(memory)
+
+        global_ctx = self.global_proj(feat).unsqueeze(1)  # [B,1,256]
+        theta_embed = self.theta_mlp(self.theta_grid.to(x.device)).unsqueeze(0)  # [1,17,256]
+        query = self.query_bias.unsqueeze(0) + theta_embed + global_ctx
+        decoded, _ = self.decoder(self.query_norm(query), memory, memory, need_weights=False)
+        return self.head(decoded).squeeze(-1)
 
 
 class ResBlock(nn.Module):
