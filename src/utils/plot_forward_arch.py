@@ -127,8 +127,8 @@ blocks = [
     ( 6.7,  0.40, 4.00, 0.55, "enc",    "Enc3",            "256×8×8"),
     ( 7.9,  0.35, 4.00, 0.55, "enc",    "Enc4",            "256×4×4"),
     ( 9.4,  0.50, 4.00, 0.55, "bottle", "Bottleneck",      "256×4×4\n+Attention"),
-    (11.0,  0.40, 3.20, 0.55, "pool",   "AvgPool",         "256×11×17"),
-    (12.5,  0.50, 3.20, 0.55, "head",   "Spectral\nHead",  "128→2\n×11×17"),
+    (11.0,  0.40, 3.20, 0.55, "pool",   "AvgPool",         "256×11×13"),
+    (12.5,  0.50, 3.20, 0.55, "head",   "Spectral\nHead",  "128→2\n×11×13"),
 ]
 
 block_rights = []
@@ -162,7 +162,7 @@ for sx in stride_xs:
             bbox=dict(boxstyle="round,pad=0.1", fc=BG, ec="none"))
 
 # ── output heatmaps ───────────────────────────────────────────────────────────
-theta = np.linspace(-40, 40, 17)
+theta = np.linspace(-60, 60, 13)
 lam   = np.linspace(800, 1300, 11)
 
 for i, (title, cmap, cx_off) in enumerate([
@@ -172,15 +172,15 @@ for i, (title, cmap, cx_off) in enumerate([
     data = np.sin(np.deg2rad(theta[None, :]))**2 * \
            np.linspace(0.3, 0.9, 11)[:, None]
     if i == 1:
-        data = data * 0.6 + 0.1 * np.random.rand(11, 17)
+        data = data * 0.6 + 0.1 * np.random.rand(11, 13)
 
     # inset axes
     iax = ax.inset_axes([(cx_off - 0.9)/21, (CY - 1.5)/7.7,
                           2.2/21, 3.0/7.7])
     im = iax.imshow(data, aspect="auto", cmap=cmap,
                     vmin=0, vmax=1, origin="upper")
-    iax.set_xticks([0, 8, 16])
-    iax.set_xticklabels(["-40°", "0°", "40°"], fontsize=6)
+    iax.set_xticks([0, 6, 12])
+    iax.set_xticklabels(["-60°", "0°", "60°"], fontsize=6)
     iax.set_yticks([0, 5, 10])
     iax.set_yticklabels(["800", "1050", "1300"], fontsize=6)
     iax.set_xlabel("Angle (°)", fontsize=6.5, labelpad=2)
@@ -196,14 +196,14 @@ for i, (title, cmap, cx_off) in enumerate([
           cx_off - 1.15, CY, lw=1.2)
 
     # label below
-    ax.text(cx_off + 0.2, CY - 1.85, "[11 × 17]",
+    ax.text(cx_off + 0.2, CY - 1.85, "[11 × 13]",
             ha="center", fontsize=7, color="#555")
 
 # bracket for outputs
 ax.annotate("", xy=(14.6, CY + 2.1), xytext=(14.6, CY - 1.6),
             arrowprops=dict(arrowstyle="-", color="#999", lw=1.2,
                             connectionstyle="arc3,rad=0"))
-ax.text(14.75, CY + 0.25, "Output\n[2×11×17]",
+ax.text(14.75, CY + 0.25, "Output\n[2×11×13]",
         ha="left", va="center", fontsize=8, color=LABEL_C, fontweight="bold")
 
 # ── title ─────────────────────────────────────────────────────────────────────

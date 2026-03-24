@@ -127,7 +127,7 @@ def compute_second_order_metrics(
     target_lambda: float,
 ) -> tuple[list[dict], np.ndarray]:
     tpp_maps = pred_raw[:, 0].astype(np.float64)
-    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
+    edge_idx = int(np.argmax(np.abs(thetas)))
     lam_idx = int(np.argmin(np.abs(lambdas - float(target_lambda))))
     metrics = []
     for i in range(tpp_maps.shape[0]):
@@ -143,7 +143,7 @@ def compute_second_order_metrics(
                 "shape_score": float(s["shape"]),
                 "edge_score": float(s["edge"]),
                 "r2": float(s["r2"]),
-                "tpp_at_40": float(tpp_maps[i, lam_idx, t40_idx]),
+                "tpp_at_edge": float(tpp_maps[i, lam_idx, edge_idx]),
             }
         )
     rank = np.array(sorted(range(len(metrics)), key=lambda i: metrics[i]["rcwa_mae_raw"]), dtype=np.int32)
@@ -298,7 +298,7 @@ def main() -> None:
         "best_sample_idx": int(best_idx),
         "best_rcwa_mae_raw": float(err[best_idx]),
         "best_second_order_score": float(metrics[best_idx]["second_order_score"]),
-        "best_second_order_tpp_at_40": float(metrics[best_idx]["tpp_at_40"]),
+        "best_second_order_tpp_at_edge": float(metrics[best_idx]["tpp_at_edge"]),
     }
 
     np.save(save_dir / "target_cond_raw.npy", target_raw)

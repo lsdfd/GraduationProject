@@ -43,10 +43,10 @@ DATA_PATH    = PROJECT_ROOT / "data" / "train_data.npz"
 # ---------------------------------------------------------------------------
 # Fixed constants
 # ---------------------------------------------------------------------------
-THETA_MAX = 40.0
-NA        = np.sin(np.radians(THETA_MAX))    # ≈ 0.6428
+THETA_MAX = 60.0
+NA        = np.sin(np.radians(THETA_MAX))    # ≈ 0.8660
 LAMBDAS   = np.arange(800.0, 1300.1, 50.0)  # [11]
-THETAS    = np.arange(-40.0, 40.1,  5.0)    # [17]
+THETAS    = np.arange(-60.0, 60.1, 10.0)    # [13]
 NX, NY    = 502, 502
 
 POL_MAP: dict[str, np.ndarray] = {
@@ -131,7 +131,7 @@ def make_ideal_transfer(KX: np.ndarray, KY: np.ndarray,
 
 def load_from_training(sample_idx: int,
                        lam_idx: int) -> tuple[np.ndarray, np.ndarray]:
-    """返回 (t_ss_1d, t_pp_1d)，shape [17]。"""
+    """返回 (t_ss_1d, t_pp_1d)，shape [len(THETAS)]。"""
     data    = np.load(DATA_PATH)
     tpp_all = data["tpp_mag"]   # [N, 11, 17]
     tss_all = data["tss_mag"]
@@ -198,15 +198,14 @@ def load_from_kspace(npz_path: Path,
 def build_2d_transfer(t_1d: np.ndarray,
                       KX: np.ndarray, KY: np.ndarray,
                       K0: float, K_MAX: float) -> np.ndarray:
-    """将 1D 角度扫描（shape [17]）插值为 2D 传递函数（各向同性假设）。"""
-    center = 8   # THETAS 中 theta=0 的 index
-    n_half = 8
-    t_sym  = np.empty(n_half + 1)
+    """将 1D 角度扫描（shape [len(THETAS)]）插值为 2D 传递函数（各向同性假设）。"""
+    center = int(np.argmin(np.abs(THETAS)))
+    pos_thetas = THETAS[center:]
+    t_sym = np.empty(len(pos_thetas), dtype=np.float64)
     t_sym[0] = t_1d[center]
-    for i in range(1, n_half + 1):
+    for i in range(1, len(pos_thetas)):
         t_sym[i] = 0.5 * (t_1d[center - i] + t_1d[center + i])
-    thetas_pos    = np.arange(0.0, 40.1, 5.0)
-    k_rho_samples = K0 * np.sin(np.radians(thetas_pos))
+    k_rho_samples = K0 * np.sin(np.radians(pos_thetas))
 
     interp = interp1d(k_rho_samples, t_sym,
                       kind="linear", bounds_error=False, fill_value=0.0)

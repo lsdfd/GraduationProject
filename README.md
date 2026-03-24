@@ -159,7 +159,7 @@ python src/model/train_diffusion.py
 采样网格：
 
 - `lambda = 800, 850, ..., 1300`，共 `11` 个点
-- `theta = -40, -35, ..., 40`，共 `17` 个点
+- `theta = -60, -50, ..., 60`，共 `13` 个点
 
 默认取前 `5000` 个结构；如果显式传 `--max_samples` 会按传入值截断。默认 `rcwa_orders=7`。输出到 `data/train_data.npz`，并额外写：
 
@@ -189,17 +189,17 @@ python src/dataset/rcwa/rcwa_all.py --devices cuda:0,cuda:1 --max_samples 5000 -
 `train_data.npz` 当前约定如下：
 
 - `structures`: `[N, 64, 64]`
-- `tpp_mag`: `[N, 11, 17]`
-- `tss_mag`: `[N, 11, 17]`
+- `tpp_mag`: `[N, 11, 13]`
+- `tss_mag`: `[N, 11, 13]`
 - `lambdas`: `[11]`
-- `thetas`: `[17]`
+- `thetas`: `[13]`
 
 其中二维响应图固定按 `[lambda, theta]` 排列。
 
 `src/model/dataset.py` 会把它读成：
 
 - `x`: `[1, 64, 64]`
-- `cond`: `[2, 11, 17]`
+- `cond`: `[2, 11, 13]`
 
 这里 `2` 个通道分别是 `tpp_mag` 和 `tss_mag`。
 
@@ -210,7 +210,7 @@ python src/dataset/rcwa/rcwa_all.py --devices cuda:0,cuda:1 --max_samples 5000 -
 `src/model/train_forward.py`
 
 - 输入结构 `[1, 64, 64]`
-- 预测条件图 `[C, 11, 17]`
+- 预测条件图 `[C, 11, 13]`
 - 当前损失是 `L1`
 - 训练日志由 `src/model/train_utils.py` 统一管理
 
@@ -260,35 +260,35 @@ h = h * (1 + scale) + shift
 旧版 `ConditionEncoder2D` 用 CNN 下采样（11→6→3，17→9→5）+ AvgPool，信息损失严重：
 
 - 下采样后只剩 3×5=15 个 token 供 cross-attention 使用
-- AvgPool 丢失所有位置信息，模型不知道 λ=1000nm 和 θ=±40° 的位置
+- AvgPool 丢失所有位置信息，模型不知道 λ=1000nm 和 θ=±60° 的位置
 
-新版 `ConditionEncoderTokens` 把 `[B, 2, 11, 17]` 光谱**展开成 187 个 token**（每个格点一个）：
+新版 `ConditionEncoderTokens` 把 `[B, 2, 11, 13]` 光谱**展开成 143 个 token**（每个格点一个）：
 
 ```
-[B, 2, 11, 17]
-    ↓ flatten → [B, 187, 2]
+[B, 2, 11, 13]
+    ↓ flatten → [B, 143, 2]
     ↓ Linear(2→256)
-    ↓ + 物理位置编码（λ轴 Embedding(11,128) + θ轴 Embedding(17,128)）
+    ↓ + 物理位置编码（λ轴 Embedding(11,128) + θ轴 Embedding(13,128)）
     ↓ 3层 Pre-LN Transformer（全局自注意力）
     ↓
 CLS token → c_emb   [B, 256]     → AdaGN
-其余 token → tokens [B, 187, 256] → cross-attention
+其余 token → tokens [B, 143, 256] → cross-attention
 ```
 
 | | 旧版 | v3 新版 |
 |--|------|--------|
-| cross-attn token 数 | 15 | **187**（多12×） |
+| cross-attn token 数 | 15 | **143**（多9.5×） |
 | 知道 λ=1000nm 位置 | 否 | **是**（可学习 PE） |
-| 知道 θ=±40° 位置 | 否 | **是**（可学习 PE） |
+| 知道 θ=±60° 位置 | 否 | **是**（可学习 PE） |
 | 空间插值注入 | 频谱图→64×64（语义错位） | **已删除** |
 
 **③ SpectrumCrossAttention（跨注意力）**
 
-UNet 的结构特征图对 187 个光谱 token 做 multi-head cross-attention，每个空间位置可以"查询"最相关的 (λ, θ) 格点：
+UNet 的结构特征图对 143 个光谱 token 做 multi-head cross-attention，每个空间位置可以"查询"最相关的 (λ, θ) 格点：
 
 ```
 Q: UNet 特征图像素     [B, h*w, 128]
-K,V: 光谱 token       [B, 187, 128]
+K,V: 光谱 token       [B, 143, 128]
 → 每个像素位置选择性关注对它最相关的频谱信息
 ```
 
@@ -550,7 +550,7 @@ python src/infer/laplas.py --devices cuda:0,cuda:1,cuda:2,cuda:3
 
 将目标传递函数作用于输入图像（默认中心小方块），输出像平面强度分布。
 
-适配参数：λ = 1000 nm，θ_max = 40° → NA ≈ 0.6428，入射偏振推荐 `x`（p 偏振）。
+适配参数：λ = 1000 nm，θ_max = 60° → NA ≈ 0.8660，入射偏振推荐 `x`（p 偏振）。
 
 传递函数来源（精度递增）：
 
@@ -584,7 +584,7 @@ python src/infer/imag_process/image_processing.py --from_kspace --pol x
 # 各向同性近似（仅用 phi=0 已有数据，秒出）
 python src/infer/imag_process/scan_kspace.py --sample 0
 
-# 精确版（额外跑 phi=45° RCWA，17 次仿真，需 torcwa）
+# 精确版（额外跑 phi=45° RCWA，13 次仿真，需 torcwa）
 python src/infer/imag_process/scan_kspace.py --sample 0 --run_phi45 --device cuda:0
 
 # 从推理结果加载

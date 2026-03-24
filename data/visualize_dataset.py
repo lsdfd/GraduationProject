@@ -102,9 +102,9 @@ def load_lambda_theta(path: Path, tpp_shape: tuple[int, int]) -> tuple[np.ndarra
         return lambdas, thetas
 
     lambda_count, theta_count = tpp_shape
-    if (lambda_count, theta_count) == (11, 17):
+    if (lambda_count, theta_count) == (11, 13):
         lambdas = np.arange(800.0, 1300.1, 50.0, dtype=np.float32)
-        thetas = np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
+        thetas = np.arange(-60.0, 60.1, 10.0, dtype=np.float32)
         return lambdas, thetas
 
     lambdas = np.arange(lambda_count, dtype=np.float32)

@@ -112,7 +112,7 @@ def tv_loss(x: torch.Tensor) -> torch.Tensor:
 
 
 def theta_grid() -> np.ndarray:
-    return np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
+    return np.arange(-60.0, 60.1, 10.0, dtype=np.float32)
 
 
 def target_row_tensor(device: str) -> torch.Tensor:
@@ -123,11 +123,15 @@ def outer_monotonic_penalty(y_norm: torch.Tensor, thetas: np.ndarray) -> torch.T
     if y_norm.ndim == 1:
         y_norm = y_norm.unsqueeze(0)
     abs_thetas = np.abs(np.asarray(thetas, dtype=np.float64))
-    idx30 = int(np.argmin(np.abs(abs_thetas - 30.0)))
-    idx35 = int(np.argmin(np.abs(abs_thetas - 35.0)))
-    idx40 = int(np.argmin(np.abs(abs_thetas - 40.0)))
-    p1 = F.relu(y_norm[:, idx30] - y_norm[:, idx35])
-    p2 = F.relu(y_norm[:, idx35] - y_norm[:, idx40])
+    uniq = np.unique(abs_thetas)
+    if len(uniq) < 3:
+        return torch.zeros((), device=y_norm.device, dtype=y_norm.dtype)
+    vals = uniq[-3:]
+    idx_lo = int(np.argmin(np.abs(abs_thetas - vals[0])))
+    idx_mid = int(np.argmin(np.abs(abs_thetas - vals[1])))
+    idx_hi = int(np.argmin(np.abs(abs_thetas - vals[2])))
+    p1 = F.relu(y_norm[:, idx_lo] - y_norm[:, idx_mid])
+    p2 = F.relu(y_norm[:, idx_mid] - y_norm[:, idx_hi])
     return (p1 + p2).mean()
 
 
@@ -171,13 +175,13 @@ def plot_candidate_summary(
     thetas: np.ndarray,
     title: str,
     score: float,
-    tpp_at_40: float,
+    tpp_at_edge: float,
 ) -> None:
-    """合并结构图和 tpp 曲线到一张图，并标注 tpp@40° 值"""
+    """合并结构图和 tpp 曲线到一张图，并标注最大角度处的透过率"""
     target = second_order_target(thetas)
     y = tpp_row.astype(np.float64)
     yn = y / max(float(np.max(y)), 1e-8)
-    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
+    edge_idx = int(np.argmax(np.abs(thetas)))
 
     fig, (ax_struct, ax_curve) = plt.subplots(1, 2, figsize=(10, 4))
 
@@ -190,12 +194,12 @@ def plot_candidate_summary(
     ax_curve.plot(thetas, target, "k--", lw=1.7, label="ideal ~ |sin(θ)|²")
     ax_curve.plot(thetas, yn, lw=1.9, color="#1f77b4", label="optimized (normalized)")
 
-    # 标注 tpp@40°
-    ax_curve.axvline(x=float(thetas[t40_idx]), color="r", ls=":", lw=1.2, alpha=0.6)
+    # 标注最大角度处的透过率
+    ax_curve.axvline(x=float(thetas[edge_idx]), color="r", ls=":", lw=1.2, alpha=0.6)
     ax_curve.annotate(
-        f"|tpp|@40°={tpp_at_40:.3f}",
-        xy=(float(thetas[t40_idx]), float(yn[t40_idx])),
-        xytext=(float(thetas[t40_idx]) - 12, float(yn[t40_idx]) + 0.15),
+        f"|tpp|@{float(thetas[edge_idx]):.0f}°={tpp_at_edge:.3f}",
+        xy=(float(thetas[edge_idx]), float(yn[edge_idx])),
+        xytext=(float(thetas[edge_idx]) - 16, float(yn[edge_idx]) + 0.15),
         fontsize=9,
         color="red",
         bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "red", "alpha": 0.8},
@@ -363,7 +367,7 @@ def optimize_one(init: torch.Tensor, args, candidate_idx: int) -> tuple[torch.Te
 
 def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, save_dir: Path) -> dict:
     thetas = theta_grid()
-    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
+    edge_idx = int(np.argmax(np.abs(thetas)))
     cand_dir = save_dir / f"candidate_{idx:02d}"
     cand_dir.mkdir(parents=True, exist_ok=True)
 
@@ -384,8 +388,8 @@ def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, sa
         "rcwa_edge_score": float(best_rcwa_bin["edge"]),
         "rcwa_outer_score": float(best_rcwa_bin["outer"]),
         "rcwa_r2": float(best_rcwa_bin["r2"]),
-        "rcwa_tpp_at_40": float(bin_tpp_np[t40_idx]),
-        "target_tpp_at_40": float(target_row[t40_idx]),
+        "rcwa_tpp_at_edge": float(bin_tpp_np[edge_idx]),
+        "target_tpp_at_edge": float(target_row[edge_idx]),
         "best_continuous_score": float(best_rcwa_cont["score"]),
         "best_continuous_center": float(best_rcwa_cont["center"]),
         "best_continuous_shape": float(best_rcwa_cont["shape"]),
@@ -407,7 +411,7 @@ def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, sa
         thetas,
         f"Candidate {idx:02d} @ {args.target_lambda:.0f}nm",
         float(best_rcwa_bin["score"]),
-        float(bin_tpp_np[t40_idx]),
+        float(bin_tpp_np[edge_idx]),
     )
     with (cand_dir / "optimization_log.json").open("w", encoding="utf-8") as f:
         json.dump(
@@ -523,7 +527,7 @@ def _run_with_args(args) -> None:
             {
                 "candidate_idx": r["candidate_idx"],
                 "score": r["rcwa_second_order_score"],
-                "tpp_at_40": r["rcwa_tpp_at_40"],
+                "tpp_at_edge": r["rcwa_tpp_at_edge"],
             }
             for r in rows
         ],

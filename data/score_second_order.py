@@ -419,7 +419,7 @@ def main() -> None:
     p.add_argument("--w_edge", type=float, default=0.1)
     p.add_argument("--w_bandwidth", type=float, default=0.2)
     p.add_argument("--plot_topk", type=int, default=5)
-    p.add_argument("--theta_ref", type=float, default=40.0)
+    p.add_argument("--theta_ref", type=float, default=60.0)
     args = p.parse_args()
 
     args.in_npz = resolve_from_root(args.in_npz)

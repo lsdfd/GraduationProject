@@ -172,7 +172,7 @@ def compute_second_order_metrics(
     target_lambda: float,
 ) -> tuple[list[dict], np.ndarray]:
     tpp_maps = pred_raw[:, 0].astype(np.float64)
-    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
+    edge_idx = int(np.argmax(np.abs(thetas)))
     metrics = []
     for i in range(tpp_maps.shape[0]):
         s = second_order_score_map(tpp_maps[i], lambdas, thetas, target_lambda=target_lambda)
@@ -187,7 +187,7 @@ def compute_second_order_metrics(
                 "shape_score": float(s["shape"]),
                 "edge_score": float(s["edge"]),
                 "r2": float(s["r2"]),
-                "tpp_at_40": float(tpp_maps[i, np.argmin(np.abs(lambdas - float(target_lambda))), t40_idx]),
+                "tpp_at_edge": float(tpp_maps[i, np.argmin(np.abs(lambdas - float(target_lambda))), edge_idx]),
             }
         )
     rank = np.array(sorted(range(len(metrics)), key=lambda i: metrics[i]["second_order_score"], reverse=True), dtype=np.int32)
@@ -214,7 +214,7 @@ def plot_ranked_samples(
         vmax = vmin + 1e-6
     extent = [float(thetas[0]), float(thetas[-1]), float(lambdas[0]), float(lambdas[-1])]
     lam_idx = int(np.argmin(np.abs(lambdas - float(target_lambda))))
-    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
+    edge_idx = int(np.argmax(np.abs(thetas)))
     target = second_order_target(thetas)
 
     fig, axes = plt.subplots(k, 3, figsize=(13.5, max(2.7 * k, 5.0)), gridspec_kw={"width_ratios": [0.75, 1.1, 1.0]}, constrained_layout=True)
@@ -243,7 +243,7 @@ def plot_ranked_samples(
         a_curve.grid(alpha=0.25)
         if r == 0:
             a_curve.legend(fontsize=8, loc="lower right")
-        tag = f"|tpp|@{float(thetas[t40_idx]):.1f}deg={m['tpp_at_40']:.3f}"
+        tag = f"|tpp|@{float(thetas[edge_idx]):.1f}deg={m['tpp_at_edge']:.3f}"
         a_hm.text(0.98, 0.03, tag, transform=a_hm.transAxes, ha="right", va="bottom", fontsize=8, color="white", bbox={"facecolor": "black", "alpha": 0.45, "pad": 1.5, "edgecolor": "none"})
         a_curve.text(0.02, 0.03, tag, transform=a_curve.transAxes, ha="left", va="bottom", fontsize=8)
 
@@ -402,7 +402,7 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
         "best_rcwa_mae_raw": float(err[best_idx]),
         "best_second_order_sample_idx": best_idx,
         "best_second_order_score": float(metrics[best_idx]["second_order_score"]),
-        "best_second_order_tpp_at_40": float(metrics[best_idx]["tpp_at_40"]),
+        "best_second_order_tpp_at_edge": float(metrics[best_idx]["tpp_at_edge"]),
     }
 
     np.save(save_dir / "target_cond_raw.npy", target_raw)

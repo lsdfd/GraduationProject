@@ -16,6 +16,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+LAMBDA_COUNT = 11
+THETA_COUNT = 13
+
 
 # ── 条件编码器（光谱 → 嵌入向量） ────────────────────────────────────
 
@@ -25,7 +28,7 @@ class CondEmbed(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Flatten(),                              # [B, 2*11*17=374]
-            nn.Linear(in_ch * 11 * 17, 512),
+            nn.Linear(in_ch * LAMBDA_COUNT * THETA_COUNT, 512),
             nn.SiLU(),
             nn.Linear(512, cond_dim),
             nn.SiLU(),

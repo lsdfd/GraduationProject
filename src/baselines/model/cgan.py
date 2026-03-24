@@ -17,6 +17,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+LAMBDA_COUNT = 11
+THETA_COUNT = 13
+
 
 # ── 条件嵌入（生成器和判别器共用） ────────────────────────────────────
 
@@ -26,7 +29,7 @@ class CondEmbed(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(in_ch * 11 * 17, 512),
+            nn.Linear(in_ch * LAMBDA_COUNT * THETA_COUNT, 512),
             nn.LeakyReLU(0.2),
             nn.Linear(512, cond_dim),
             nn.LeakyReLU(0.2),

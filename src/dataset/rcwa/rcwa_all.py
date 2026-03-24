@@ -23,7 +23,7 @@ DEFAULT_STRUCTURES = ROOT / "data" / "structures" / "structures.npy"
 DEFAULT_OUT = ROOT / "data" / "train_data.npz"
 DEFAULT_LOG = ROOT / "data" / "rcwa.log"
 LAMBDAS = np.arange(800.0, 1300.1, 50.0, dtype=np.float32)
-THETAS = np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
+THETAS = np.arange(-60.0, 60.1, 10.0, dtype=np.float32)
 
 
 def log(path, msg):

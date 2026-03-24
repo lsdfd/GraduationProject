@@ -17,7 +17,7 @@ except Exception:
 
 def lambda_theta_grid() -> tuple[np.ndarray, np.ndarray]:
     lambdas = np.arange(800.0, 1300.1, 50.0, dtype=np.float32)
-    thetas = np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
+    thetas = np.arange(-60.0, 60.1, 10.0, dtype=np.float32)
     return lambdas, thetas
 
 
@@ -58,10 +58,11 @@ def second_order_target(thetas: np.ndarray) -> np.ndarray:
 
 def _outer_band_pairs(thetas: np.ndarray) -> list[tuple[int, int]]:
     thetas = np.asarray(thetas, dtype=np.float64)
-    idx30 = int(np.argmin(np.abs(np.abs(thetas) - 30.0)))
-    idx35 = int(np.argmin(np.abs(np.abs(thetas) - 35.0)))
-    idx40 = int(np.argmin(np.abs(np.abs(thetas) - 40.0)))
-    return [(idx30, idx35), (idx35, idx40)]
+    pos_idx = np.where(thetas >= 0.0)[0]
+    if len(pos_idx) < 3:
+        return []
+    lo, mid, hi = pos_idx[-3:]
+    return [(int(lo), int(mid)), (int(mid), int(hi))]
 
 
 def second_order_score_row(
@@ -421,7 +422,7 @@ def rcwa_second_order_metrics_target_lambda(
         return None
     mae, pred = out
     _, thetas = lambda_theta_grid()
-    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
+    edge_idx = int(np.argmax(np.abs(thetas)))
     score = second_order_score_row(pred[0], thetas)
     result = {
         "rcwa_mae_raw": float(mae),
@@ -430,11 +431,11 @@ def rcwa_second_order_metrics_target_lambda(
         "rcwa_shape_score": float(score["shape"]),
         "rcwa_edge_score": float(score["edge"]),
         "rcwa_r2": float(score["r2"]),
-        "rcwa_tpp_at_40": float(pred[0, t40_idx]),
+        "rcwa_tpp_at_edge": float(pred[0, edge_idx]),
         "rcwa_pred": pred,
     }
     if cond_ch == 2:
-        result["rcwa_tss_at_40"] = float(pred[1, t40_idx])
+        result["rcwa_tss_at_edge"] = float(pred[1, edge_idx])
     return result
 
 

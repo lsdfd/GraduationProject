@@ -4,6 +4,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+LAMBDA_COUNT = 11
+THETA_COUNT = 13
+TOKEN_COUNT = LAMBDA_COUNT * THETA_COUNT
+
 
 def _groups(ch, max_groups=8):
     for g in (max_groups, 4, 2, 1):
@@ -126,9 +130,9 @@ class ConditionEncoderTokens(nn.Module):
       tokens [B, 187, emb_dim]   → 逐格点条件 token
     """
 
-    N_LAMBDA = 11
-    N_THETA  = 17
-    N_TOKENS = 11 * 17  # 187
+    N_LAMBDA = LAMBDA_COUNT
+    N_THETA  = THETA_COUNT
+    N_TOKENS = TOKEN_COUNT
 
     def __init__(self, in_ch, emb_dim=256, n_layers=3, n_heads=4):
         super().__init__()
@@ -345,11 +349,11 @@ class ForwardSurrogate(nn.Module):
         self.mem_level_embed = nn.Parameter(torch.zeros(2, 1, model_dim))
 
         # ── 谱图 query：每个 (lambda, theta) 一个 token ──
-        self.query_base = nn.Parameter(torch.zeros(1, 11 * 17, model_dim))
-        self.query_lambda = nn.Embedding(11, model_dim // 2)
-        self.query_theta = nn.Embedding(17, model_dim // 2)
-        li = torch.arange(11).repeat_interleave(17)
-        ti = torch.arange(17).repeat(11)
+        self.query_base = nn.Parameter(torch.zeros(1, TOKEN_COUNT, model_dim))
+        self.query_lambda = nn.Embedding(LAMBDA_COUNT, model_dim // 2)
+        self.query_theta = nn.Embedding(THETA_COUNT, model_dim // 2)
+        li = torch.arange(LAMBDA_COUNT).repeat_interleave(THETA_COUNT)
+        ti = torch.arange(THETA_COUNT).repeat(LAMBDA_COUNT)
         self.register_buffer("query_lambda_idx", li, persistent=False)
         self.register_buffer("query_theta_idx", ti, persistent=False)
 
@@ -382,7 +386,7 @@ class ForwardSurrogate(nn.Module):
             nn.Conv2d(base_ch * 2, out_ch, 1),
         )
         self.register_buffer("coord_64", _coord_grid(64, 64), persistent=False)
-        self.register_buffer("coord_11x17", _coord_grid(11, 17), persistent=False)
+        self.register_buffer("coord_spec", _coord_grid(LAMBDA_COUNT, THETA_COUNT), persistent=False)
         self.register_buffer("coord_8", _coord_grid(8, 8), persistent=False)
         self.register_buffer("coord_4", _coord_grid(4, 4), persistent=False)
 
@@ -419,8 +423,8 @@ class ForwardSurrogate(nn.Module):
         queries = self._query_tokens(x.shape[0], x.dtype, x.device)
         spec_tokens = self.spec_decoder(tgt=queries, memory=memory)
 
-        grid = self.token_to_grid(spec_tokens).transpose(1, 2).reshape(x.shape[0], -1, 11, 17)
-        spec_coord = self.coord_11x17[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
+        grid = self.token_to_grid(spec_tokens).transpose(1, 2).reshape(x.shape[0], -1, LAMBDA_COUNT, THETA_COUNT)
+        spec_coord = self.coord_spec[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
         fused = self.grid_fuse(torch.cat([grid, spec_coord], dim=1))
         fused = self.spec_refine(fused)
         return self.spec_out(fused)
@@ -448,7 +452,7 @@ class ConditionalUNet(nn.Module):
         # ── 条件编码器：Token 化，187 个 (λ,θ) 格点 ──
         self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim)
         self.null_cond    = nn.Parameter(torch.zeros(1, cond_dim))
-        self.null_tokens  = nn.Parameter(torch.zeros(1, 187, cond_dim))
+        self.null_tokens  = nn.Parameter(torch.zeros(1, TOKEN_COUNT, cond_dim))
 
         # ── 时间嵌入 ──
         self.time_mlp = nn.Sequential(

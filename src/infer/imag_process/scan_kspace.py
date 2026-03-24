@@ -4,7 +4,7 @@ scan_kspace.py — 生成结构的 2D k 空间传递函数图（文献标准图�
 
 原理
 ----
-RCWA 只扫了 phi=0 平面（θ ∈ [-40°,+40°]）。
+RCWA 只扫了 phi=0 平面（θ ∈ [-60°,+60°]）。
 利用结构的 C4 + σx 对称性，只需额外扫 phi=45° 一条线，
 再在 [0°,45°] 之间插值，就能重建完整的 1/8 扇区，
 然后通过对称操作填满整个圆盘。
@@ -51,9 +51,9 @@ DATA_PATH = PROJECT_ROOT / "data" / "train_data.npz"
 # Physics
 # ---------------------------------------------------------------------------
 LAMBDAS = np.arange(800.0, 1300.1, 50.0)   # [11]
-THETAS  = np.arange(-40.0, 40.1,  5.0)     # [17]
-THETA_MAX = 40.0
-NA        = np.sin(np.radians(THETA_MAX))   # ≈ 0.6428
+THETAS  = np.arange(-60.0, 60.1, 10.0)     # [13]
+THETA_MAX = 60.0
+NA        = np.sin(np.radians(THETA_MAX))   # ≈ 0.8660
 
 # k 空间图分辨率（越大越细腻，但插值更慢）
 N_GRID = 300
@@ -153,7 +153,7 @@ def scan_phi45(structure: np.ndarray, lambda_nm: float, device: str = "cpu"):
 def _get_1d_interp(t_1d: np.ndarray):
     """
     从 [17] 的角度扫描数据构建 t(θ) 插值器。
-    输入: θ ∈ [-40,+40]，输出: 对任意 θ 插值（超出范围置0）。
+    输入: θ ∈ [-60,+60]，输出: 对任意 θ 插值（超出范围置0）。
     """
     from scipy.interpolate import interp1d
     return interp1d(
@@ -191,7 +191,7 @@ def build_2d_kspace(
 
     # θ（polar angle）从 k_rho 得到
     k_rho_clipped = np.clip(k_rho_norm, 0.0, 1.0)
-    theta_deg = np.degrees(np.arcsin(k_rho_clipped))  # [0°, 90°]，但有效范围 [0°, 40°]
+    theta_deg = np.degrees(np.arcsin(k_rho_clipped))  # [0°, 90°]，但有效范围 [0°, 60°]
 
     t_at_phi0  = interp0(theta_deg)
     t_at_phi45 = interp45(theta_deg)
