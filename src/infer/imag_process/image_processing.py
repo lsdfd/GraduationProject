@@ -24,10 +24,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import json
+from scipy.ndimage import binary_dilation
 from scipy.interpolate import interp1d, RegularGridInterpolator
 
 # ---------------------------------------------------------------------------
@@ -54,6 +57,60 @@ POL_MAP: dict[str, np.ndarray] = {
     "RCP":  np.array([1.0, -1j])  / np.sqrt(2),
     "LCP":  np.array([1.0,  1j])  / np.sqrt(2),
 }
+
+PATTERN_CHOICES = ("square", "thu", "square_thu")
+
+
+def _safe_tag(text: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text)
+
+
+def make_run_output_dir(src_label: str, lambda_nm: float, polarization: str, pattern: str) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    src_tag = _safe_tag(src_label)
+    pol_tag = _safe_tag(polarization)
+    pattern_tag = _safe_tag(pattern)
+    lam_tag = f"{int(round(lambda_nm))}nm"
+    out_dir = _HERE / f"run_{src_tag}_{lam_tag}_{pol_tag}_{pattern_tag}_{stamp}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def latest_kspace_npz() -> Path | None:
+    candidates = sorted(_HERE.rglob("kspace_result*.npz"), key=lambda p: p.stat().st_mtime)
+    return candidates[-1] if candidates else None
+
+
+def edge_mask_from_input(I_in: np.ndarray, dilation_px: int = 4) -> np.ndarray:
+    mask = I_in > 0.5
+    # 二值输入下，边缘可由 4 邻域不一致位置近似得到。
+    edge = (
+        (mask != np.roll(mask, 1, axis=0)) |
+        (mask != np.roll(mask, -1, axis=0)) |
+        (mask != np.roll(mask, 1, axis=1)) |
+        (mask != np.roll(mask, -1, axis=1))
+    ) & mask
+    if dilation_px > 0:
+        edge = binary_dilation(edge, iterations=dilation_px)
+    return edge
+
+
+def compute_imaging_metrics(I_in: np.ndarray, I_out: np.ndarray, edge_mask: np.ndarray) -> dict[str, float]:
+    peak_in = max(float(np.max(I_in)), 1e-12)
+    eta_peak = float(np.max(I_out) / peak_in)
+    eta_avg = float(np.mean(I_out[edge_mask]) / peak_in) if np.any(edge_mask) else 0.0
+    return {
+        "eta_peak": eta_peak,
+        "eta_avg": eta_avg,
+        "input_peak": float(np.max(I_in)),
+        "output_peak": float(np.max(I_out)),
+        "edge_pixels": int(np.sum(edge_mask)),
+    }
+
+
+def save_metrics(path: Path, metrics: dict[str, float]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
 
 
 # ===========================================================================
@@ -160,23 +217,61 @@ def build_2d_transfer(t_1d: np.ndarray,
 
 
 # ===========================================================================
-# 3. 傅里叶光学仿真
+# 3. 输入图案 + 傅里叶光学仿真
 # ===========================================================================
+
+def _draw_rect(img: np.ndarray, x0: int, x1: int, y0: int, y1: int, value: float = 1.0) -> None:
+    img[max(0, y0):min(img.shape[0], y1), max(0, x0):min(img.shape[1], x1)] = value
+
+
+def build_input_image(pattern: str) -> np.ndarray:
+    img = np.zeros((NY, NX), dtype=np.float64)
+    cx, cy = NX // 2, NY // 2
+
+    # 保留原始白色方块，便于和历史结果直接对比。
+    sq = min(NX, NY) // 16
+    hs = sq // 2
+    _draw_rect(img, cx - hs, cx + hs, cy - hs, cy + hs)
+
+    if pattern in {"thu", "square_thu"}:
+        stroke = max(14, NX // 26)
+        letter_h = max(120, NY // 2)
+        letter_w = max(52, NX // 9)
+        gap = max(18, NX // 30)
+        margin = max(20, NX // 18)
+        top = cy - letter_h // 2
+        bottom = top + letter_h
+        total_w = 3 * letter_w + 2 * gap
+        left_t = cx - total_w // 2
+        left_h = left_t + letter_w + gap
+        left_u = left_h + letter_w + gap
+
+        # T
+        _draw_rect(img, left_t, left_t + letter_w, top, top + stroke)
+        _draw_rect(img, left_t + letter_w // 2 - stroke // 2, left_t + letter_w // 2 + (stroke + 1) // 2, top, bottom)
+
+        # H
+        _draw_rect(img, left_h, left_h + stroke, top, bottom)
+        _draw_rect(img, left_h + letter_w - stroke, left_h + letter_w, top, bottom)
+        _draw_rect(img, left_h, left_h + letter_w, cy - stroke // 2, cy + (stroke + 1) // 2)
+
+        # U
+        _draw_rect(img, left_u, left_u + stroke, top, bottom - margin)
+        _draw_rect(img, left_u + letter_w - stroke, left_u + letter_w, top, bottom - margin)
+        _draw_rect(img, left_u, left_u + letter_w, bottom - stroke, bottom)
+
+    return img
 
 def run_fourier_optics(T_ss: np.ndarray, T_pp: np.ndarray,
                        e_in: np.ndarray,
                        KX: np.ndarray, KY: np.ndarray,
+                       pattern: str,
                        K0: float) -> tuple[np.ndarray, np.ndarray]:
     """
     角谱法 Jones 矩阵仿真。
     返回 (I_out [NY,NX], I_in [NY,NX])。
     """
-    # 输入图像：中心小方块
-    I_in        = np.zeros((NY, NX), dtype=np.float64)
-    sq          = min(NX, NY) // 16
-    cx, cy      = NX // 2, NY // 2
-    hs          = sq // 2
-    I_in[cy - hs: cy + hs, cx - hs: cx + hs] = 1.0
+    I_in = build_input_image(pattern)
     f_in        = np.sqrt(I_in)
 
     # k 空间角度
@@ -218,44 +313,58 @@ def run_fourier_optics(T_ss: np.ndarray, T_pp: np.ndarray,
 def plot_results(I_in: np.ndarray, I_out: np.ndarray,
                  T_ss: np.ndarray, T_pp: np.ndarray,
                  KX: np.ndarray, K_MAX: float,
-                 lambda_nm: float, polarization: str,
+                 lambda_nm: float, polarization: str, pattern: str,
+                 edge_mask: np.ndarray, metrics: dict[str, float],
                  save_path: Path) -> None:
     roi  = slice(150, 352)
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(18, 5))
 
     # 输入图像
     im0 = axes[0].imshow(I_in[roi, roi], cmap="gray", origin="upper")
-    axes[0].set_title("Input image")
+    axes[0].set_title(f"Input image ({pattern})")
     axes[0].set_xlabel("x (pixel)")
     axes[0].set_ylabel("y (pixel)")
     plt.colorbar(im0, ax=axes[0])
 
-    # 输出强度
-    vmax = float(np.percentile(I_out[roi, roi], 99)) or 1.0
-    im1  = axes[1].imshow(I_out[roi, roi], cmap="inferno",
-                           origin="upper", vmin=0, vmax=vmax)
-    axes[1].set_title(f"Output intensity  (pol={polarization})")
+    # 期望边缘区域
+    im_edge = axes[1].imshow(edge_mask[roi, roi].astype(float), cmap="viridis", origin="upper", vmin=0.0, vmax=1.0)
+    axes[1].set_title("Expected edge region")
     axes[1].set_xlabel("x (pixel)")
     axes[1].set_ylabel("y (pixel)")
-    plt.colorbar(im1, ax=axes[1])
+    plt.colorbar(im_edge, ax=axes[1])
+
+    # 输出强度
+    vmax = float(np.percentile(I_out[roi, roi], 99)) or 1.0
+    im1  = axes[2].imshow(I_out[roi, roi], cmap="inferno",
+                           origin="upper", vmin=0, vmax=vmax)
+    axes[2].set_title(f"Output intensity  (pol={polarization})")
+    axes[2].set_xlabel("x (pixel)")
+    axes[2].set_ylabel("y (pixel)")
+    plt.colorbar(im1, ax=axes[2])
 
     # 传递函数截面（沿 kx，归一化到 k_max）
     half    = NX // 2
     kx_norm = KX[NY // 2, half:] / K_MAX
-    axes[2].plot(kx_norm, T_ss[NY // 2, half:], "b-",  lw=1.5, label=r"$|t_{ss}|$")
-    axes[2].plot(kx_norm, T_pp[NY // 2, half:], "r--", lw=1.5, label=r"$|t_{pp}|$")
-    axes[2].axvline(1.0, color="gray", lw=0.8, ls=":", label="NA boundary")
-    axes[2].set_xlabel(r"$k_x\,/\,k_\mathrm{max}$")
-    axes[2].set_ylabel("Transmission amplitude")
-    axes[2].set_xlim([0, 1.3])
-    axes[2].set_ylim([0, None])
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.4)
-    axes[2].set_title("Transfer function (kx cross-section)")
+    axes[3].plot(kx_norm, T_ss[NY // 2, half:], "b-",  lw=1.5, label=r"$|t_{ss}|$")
+    axes[3].plot(kx_norm, T_pp[NY // 2, half:], "r--", lw=1.5, label=r"$|t_{pp}|$")
+    axes[3].axvline(1.0, color="gray", lw=0.8, ls=":", label="NA boundary")
+    axes[3].set_xlabel(r"$k_x\,/\,k_\mathrm{max}$")
+    axes[3].set_ylabel("Transmission amplitude")
+    axes[3].set_xlim([0, 1.3])
+    axes[3].set_ylim([0, None])
+    axes[3].legend()
+    axes[3].grid(True, alpha=0.4)
+    axes[3].set_title("Transfer function (kx cross-section)")
 
     fig.suptitle(
         f"Fourier optics simulation  |  "
-        f"λ = {lambda_nm:.0f} nm,  NA = {NA:.4f}  (θ_max = {THETA_MAX:.0f}°)"
+        f"λ = {lambda_nm:.0f} nm,  NA = {NA:.4f}  (θ_max = {THETA_MAX:.0f}°),  input = {pattern}"
+    )
+    fig.text(
+        0.5, 0.02,
+        f"eta_peak = {metrics['eta_peak']:.4f}    eta_avg = {metrics['eta_avg']:.4f}    edge_pixels = {metrics['edge_pixels']}",
+        ha="center", va="bottom", fontsize=11,
+        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85, "pad": 4.0},
     )
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -287,7 +396,9 @@ def main():
     parser.add_argument("--kspace_npz",  default=None,
                         help="kspace_result.npz 路径；不指定则找同目录下的文件")
     parser.add_argument("--out",         default=None,
-                        help="输出 PNG 路径（默认 imaging_result.png）")
+                        help="输出 PNG 路径；不指定时自动新建结果文件夹")
+    parser.add_argument("--pattern",     default="square_thu", choices=PATTERN_CHOICES,
+                        help="输入图案：square / thu / square_thu（默认 square_thu）")
     args = parser.parse_args()
 
     # --- 波长相关参数 -------------------------------------------------------
@@ -309,8 +420,10 @@ def main():
         src_label  = "ideal  T = (k_rho / k_max)²"
 
     elif args.from_kspace:
-        npz_path = (Path(args.kspace_npz) if args.kspace_npz
-                    else _HERE / "kspace_result.npz")
+        npz_path = Path(args.kspace_npz) if args.kspace_npz else latest_kspace_npz()
+        if npz_path is None:
+            print(f"找不到 {_HERE / 'kspace_result*.npz'}，请先运行 scan_kspace.py", file=sys.stderr)
+            sys.exit(1)
         if not npz_path.exists():
             print(f"找不到 {npz_path}，请先运行 scan_kspace.py", file=sys.stderr)
             sys.exit(1)
@@ -341,12 +454,22 @@ def main():
 
     # --- 仿真 ---------------------------------------------------------------
     e_in  = POL_MAP[args.pol]
-    I_out, I_in = run_fourier_optics(T_ss, T_pp, e_in, KX, KY, K0)
+    I_out, I_in = run_fourier_optics(T_ss, T_pp, e_in, KX, KY, args.pattern, K0)
+    edge_mask = edge_mask_from_input(I_in)
+    metrics = compute_imaging_metrics(I_in, I_out, edge_mask)
+    print(f"[metrics] eta_peak={metrics['eta_peak']:.6f} eta_avg={metrics['eta_avg']:.6f} edge_pixels={metrics['edge_pixels']}")
 
     # --- 画图 ---------------------------------------------------------------
-    out_path = Path(args.out) if args.out else _HERE / "imaging_result.png"
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        run_dir = make_run_output_dir(src_label, lambda_nm, args.pol, args.pattern)
+        out_path = run_dir / "imaging_result.png"
+        save_metrics(run_dir / "metrics.json", metrics)
+        print(f"[output_dir] {run_dir}")
     plot_results(I_in, I_out, T_ss, T_pp, KX, K_MAX,
-                 lambda_nm, args.pol, out_path)
+                 lambda_nm, args.pol, args.pattern, edge_mask, metrics, out_path)
 
 
 if __name__ == "__main__":

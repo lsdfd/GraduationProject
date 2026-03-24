@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(_ROOT, "src", "baselines", "model"))
 
 from dataset import RCWADataset
 from cvae import CVAE, cvae_loss
+from train_utils import prepare_run_dir, update_latest_run, write_json
 
 
 def main():
@@ -41,6 +42,9 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.save_dir, exist_ok=True)
+    run_dir = prepare_run_dir(args.save_dir, "cvae")
+    update_latest_run(args.save_dir, "cvae", run_dir)
+    print(f"[CVAE] run_dir={run_dir}")
 
     # ── 数据 ─────────────────────────────────────────────────────────
     dataset  = RCWADataset(args.data_path)
@@ -65,6 +69,14 @@ def main():
     best_epoch = -1
     stale      = 0
     patience   = 20
+    cfg = vars(args).copy()
+    cfg["device"] = device
+    cfg["run_dir"] = str(run_dir)
+    cfg["dataset_size"] = len(dataset)
+    cfg["train_size"] = n_train
+    cfg["val_size"] = n_val
+    cfg["cond_channels"] = cond_ch
+    write_json(os.path.join(run_dir, "run_info.json"), cfg)
 
     print(f"[CVAE] device={device}  train={n_train}  val={n_val}")
 
@@ -117,14 +129,17 @@ def main():
             "cond_mean"  : dataset.cond_mean,
             "cond_std"   : dataset.cond_std,
             "epoch"      : epoch,
+            "best_val"   : best_val,
+            "cfg"        : cfg,
         }
-        torch.save(ckpt, os.path.join(args.save_dir, "cvae_last.pt"))
+        torch.save(ckpt, os.path.join(run_dir, "cvae_last.pt"))
 
         if val_loss < best_val:
             best_val   = val_loss
             best_epoch = epoch
             stale      = 0
-            torch.save(ckpt, os.path.join(args.save_dir, "cvae_best.pt"))
+            ckpt["best_val"] = best_val
+            torch.save(ckpt, os.path.join(run_dir, "cvae_best.pt"))
         else:
             stale += 1
 
@@ -134,6 +149,20 @@ def main():
             break
 
     print(f"[CVAE] done. best_epoch={best_epoch}  best_val={best_val:.4f}")
+    write_json(
+        os.path.join(run_dir, "summary.json"),
+        {
+            "best_epoch": best_epoch,
+            "best_val_loss": best_val,
+            "dataset_size": len(dataset),
+            "train_size": n_train,
+            "val_size": n_val,
+            "data_path": args.data_path,
+            "beta": args.beta,
+            "latent_dim": args.latent_dim,
+            "run_dir": str(run_dir),
+        },
+    )
 
 
 if __name__ == "__main__":

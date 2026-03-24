@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(_ROOT, "src", "baselines", "model"))
 
 from dataset import RCWADataset
 from cgan import Generator, Discriminator, discriminator_loss, generator_loss
+from train_utils import prepare_run_dir, update_latest_run, write_json
 
 
 def main():
@@ -42,6 +43,9 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.save_dir, exist_ok=True)
+    run_dir = prepare_run_dir(args.save_dir, "cgan")
+    update_latest_run(args.save_dir, "cgan", run_dir)
+    print(f"[cGAN] run_dir={run_dir}")
 
     # ── 数据 ─────────────────────────────────────────────────────────
     dataset = RCWADataset(args.data_path)
@@ -62,6 +66,14 @@ def main():
     opt_D = torch.optim.Adam(D.parameters(), lr=args.lr_d, betas=(0.0, 0.999))
 
     best_g_loss = 1e9
+    cfg = vars(args).copy()
+    cfg["device"] = device
+    cfg["run_dir"] = str(run_dir)
+    cfg["dataset_size"] = len(dataset)
+    cfg["train_size"] = n_train
+    cfg["val_size"] = n_val
+    cfg["cond_channels"] = cond_ch
+    write_json(os.path.join(run_dir, "run_info.json"), cfg)
     print(f"[cGAN] device={device}  train={n_train}  val={n_val}")
     print(f"[cGAN] G params={sum(p.numel() for p in G.parameters()):,}  "
           f"D params={sum(p.numel() for p in D.parameters()):,}")
@@ -124,14 +136,31 @@ def main():
             "cond_mean"  : dataset.cond_mean,
             "cond_std"   : dataset.cond_std,
             "epoch"      : epoch,
+            "best_g_loss": best_g_loss,
+            "cfg"        : cfg,
         }
-        torch.save(ckpt, os.path.join(args.save_dir, "cgan_last.pt"))
+        torch.save(ckpt, os.path.join(run_dir, "cgan_last.pt"))
 
         if ep_g < best_g_loss:
             best_g_loss = ep_g
-            torch.save(ckpt, os.path.join(args.save_dir, "cgan_best.pt"))
+            ckpt["best_g_loss"] = best_g_loss
+            torch.save(ckpt, os.path.join(run_dir, "cgan_best.pt"))
 
     print(f"[cGAN] done.  best_g_loss={best_g_loss:.4f}")
+    write_json(
+        os.path.join(run_dir, "summary.json"),
+        {
+            "best_g_loss": best_g_loss,
+            "dataset_size": len(dataset),
+            "train_size": n_train,
+            "val_size": n_val,
+            "data_path": args.data_path,
+            "latent_dim": args.latent_dim,
+            "lambda_l1": args.lambda_l1,
+            "n_critic": args.n_critic,
+            "run_dir": str(run_dir),
+        },
+    )
 
 
 if __name__ == "__main__":

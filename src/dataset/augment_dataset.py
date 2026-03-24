@@ -212,14 +212,20 @@ def main():
 
     # ── 4. 方案 B：top-K 高分 + num_random 随机混合 ────────────────────────
     selected = select_mixed(scores, args.topk, args.num_random)
+
+    # 分别统计 top-K 和 random 部分的分数
+    sorted_idx = np.argsort(scores)[::-1]
+    topk_idx   = sorted_idx[:min(args.topk, len(scores))]
+    topk_scores = scores[topk_idx]
+
     print(
         f"[augment] 选出 {len(selected)} 个结构 "
         f"（top-{args.topk} 高分 + {args.num_random} 随机）"
     )
-    print(
-        f"[augment] 选中样本得分  "
-        f"min={scores[selected].min():.4f}  mean={scores[selected].mean():.4f}"
-    )
+    print(f"[augment] top-{args.topk} 高分部分:")
+    print(f"          min={topk_scores.min():.4f}  max={topk_scores.max():.4f}  mean={topk_scores.mean():.4f}")
+    print(f"[augment] 混合后全部 {len(selected)} 个样本:")
+    print(f"          min={scores[selected].min():.4f}  max={scores[selected].max():.4f}  mean={scores[selected].mean():.4f}")
 
     # ── 5. 保存 ────────────────────────────────────────────────────────────
     np.save(out_path, structures[selected])

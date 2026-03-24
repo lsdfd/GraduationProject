@@ -7,6 +7,7 @@
   3. all_scores 小提琴图（展示候选分数分布形状）
   4. 推理时间 vs 质量散点图（误差棒 = best→mean 差距）
   5. spectrum_mae 柱状图
+  6. 各方法 top-1 候选在目标波长下的 theta 响应曲线
 
 用法：
   cd /data/GraduationProject
@@ -248,6 +249,58 @@ def plot_spectrum_mae(results: dict, save_dir: str):
     plt.close(); print(f"saved → {out}")
 
 
+def plot_top1_theta_curves(results: dict, save_dir: str):
+    methods = _method_order(results)
+    usable = [m for m in methods if not (isinstance(results[m], list) or "error" in results[m])]
+    if not usable:
+        return
+
+    ref = results[usable[0]]
+    thetas = np.asarray(ref.get("thetas_deg", []), dtype=np.float32)
+    target = np.asarray(ref.get("target_theta_curve", []), dtype=np.float32)
+    if thetas.size == 0 or target.size == 0:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), constrained_layout=True)
+    fig.patch.set_facecolor(BG)
+    for ax in axes:
+        ax.set_facecolor(BG)
+        ax.plot(thetas, target, "k--", lw=2.0, label="Target ~ |sin(theta)|^2")
+        ax.grid(ls="--", alpha=0.35)
+        ax.set_ylim(-0.05, 1.05)
+        for sp in ax.spines.values():
+            sp.set_linewidth(0.7)
+            sp.set_color("#aaa")
+
+    for method in usable:
+        r = results[method]
+        color = METHOD_COLORS.get(method, "#999")
+        label = METHOD_LABELS.get(method, method)
+
+        tpp = np.asarray(r.get("best_tpp_theta_curve", []), dtype=np.float32)
+        tss = np.asarray(r.get("best_tss_theta_curve", []), dtype=np.float32)
+
+        if tpp.size == thetas.size:
+            tpp = tpp / max(float(np.max(tpp)), 1e-8)
+            axes[0].plot(thetas, tpp, lw=2.0, color=color, label=label)
+        if tss.size == thetas.size:
+            tss = tss / max(float(np.max(tss)), 1e-8)
+            axes[1].plot(thetas, tss, lw=2.0, color=color, label=label)
+
+    target_lambda = ref.get("target_lambda_nm", "target")
+    axes[0].set_title(rf"Top-1 $|t_{{pp}}|$ vs theta @ {target_lambda} nm", fontsize=12, fontweight="bold")
+    axes[1].set_title(rf"Top-1 $|t_{{ss}}|$ vs theta @ {target_lambda} nm", fontsize=12, fontweight="bold")
+    axes[0].set_xlabel("theta (deg)")
+    axes[1].set_xlabel("theta (deg)")
+    axes[0].set_ylabel("Normalized amplitude")
+    axes[1].set_ylabel("Normalized amplitude")
+    axes[0].legend(fontsize=8.5, framealpha=0.9, edgecolor="#ccc")
+
+    out = os.path.join(save_dir, "fig6_top1_theta_curves.png")
+    plt.savefig(out, dpi=200, bbox_inches="tight", facecolor=BG)
+    plt.close(); print(f"saved → {out}")
+
+
 # ── 主程序 ─────────────────────────────────────────────────────────────
 
 def main():
@@ -265,6 +318,7 @@ def main():
     plot_score_violin(results, args.save_dir)
     plot_time_vs_quality(results, args.save_dir)
     plot_spectrum_mae(results, args.save_dir)
+    plot_top1_theta_curves(results, args.save_dir)
     print("[plot] all done.")
 
 

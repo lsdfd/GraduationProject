@@ -263,18 +263,55 @@ class UNetUpBlock(nn.Module):
         return self.fuse(torch.cat([x, skip], dim=1))
 
 
+class SpectralAxisBlock(nn.Module):
+    """
+    在小尺寸谱图上分别沿 theta / lambda 轴建模。
+
+    11x17 的输出很小，不适合重型 decoder；这里用深度可分离卷积
+    显式建模二维局部关系，以及沿两条物理轴的相关性。
+    """
+
+    def __init__(self, ch):
+        super().__init__()
+        self.norm = nn.GroupNorm(_groups(ch), ch)
+        self.local = nn.Conv2d(ch, ch, 3, padding=1, groups=ch)
+        self.theta = nn.Conv2d(ch, ch, (1, 5), padding=(0, 2), groups=ch)
+        self.lam = nn.Conv2d(ch, ch, (5, 1), padding=(2, 0), groups=ch)
+        self.mix = nn.Sequential(
+            nn.Conv2d(ch * 3, ch * 2, 1),
+            nn.GroupNorm(_groups(ch * 2), ch * 2),
+            nn.SiLU(),
+            nn.Conv2d(ch * 2, ch, 1),
+        )
+        self.se = SqueezeExcite(ch)
+
+    def forward(self, x):
+        h = self.norm(x)
+        h = torch.cat([self.local(h), self.theta(h), self.lam(h)], dim=1)
+        h = self.mix(h)
+        h = self.se(h)
+        return F.silu(x + h)
+
 class ForwardSurrogate(nn.Module):
     """
     输入:  [B,1,64,64]，值域 0~1
-    输出:  [B,C,11,17]
+    输出:  [B,C,11,17]，归一化空间
 
-    纯 encoder 结构，去掉 decoder，直接池化到目标分辨率。
-    参数量约 4-6M，适合 5000 个样本规模。
+    一个更重型的前向代理：
+      - CNN encoder 提取 16x16 / 8x8 / 4x4 空间特征
+      - 8x8 / 4x4 特征展开为空间 token，作为 memory
+      - 11x17 个光谱 query token 通过 Transformer decoder 读取空间 token
+      - 最后再在 11x17 网格上做轻量谱图细化
+
+    目的：显式建模“输出谱图格点如何从结构空间特征中读取信息”，
+    用更强的 token 交互测试复杂模型上限。
     """
 
     def __init__(self, out_ch):
         super().__init__()
         base_ch = 32
+        model_dim = 256
+        self.out_ch = out_ch
         self.stem = nn.Sequential(
             ConvNormAct(1 + 2, base_ch, 3),
             ResidualConvBlock(base_ch, base_ch),
@@ -300,30 +337,93 @@ class ForwardSurrogate(nn.Module):
             AttentionBlock(base_ch * 8),
             ResidualConvBlock(base_ch * 8, base_ch * 8),
         )
-        # 直接池化到目标光谱分辨率，不需要 decoder
-        self.spectral_head = nn.Sequential(
-            ConvNormAct(base_ch * 8 + 2, base_ch * 8, 3),
-            nn.Dropout2d(p=0.2),
-            ResidualConvBlock(base_ch * 8, base_ch * 4),
-            nn.Dropout2d(p=0.2),
-            nn.Conv2d(base_ch * 4, out_ch, 1),
+
+        # ── 空间 token memory：从 8x8 / 4x4 特征图读出结构语义 ──
+        self.mem_proj8 = nn.Conv2d(base_ch * 8, model_dim, 1)
+        self.mem_proj4 = nn.Conv2d(base_ch * 8, model_dim, 1)
+        self.mem_coord_proj = nn.Linear(2, model_dim)
+        self.mem_level_embed = nn.Parameter(torch.zeros(2, 1, model_dim))
+
+        # ── 谱图 query：每个 (lambda, theta) 一个 token ──
+        self.query_base = nn.Parameter(torch.zeros(1, 11 * 17, model_dim))
+        self.query_lambda = nn.Embedding(11, model_dim // 2)
+        self.query_theta = nn.Embedding(17, model_dim // 2)
+        li = torch.arange(11).repeat_interleave(17)
+        ti = torch.arange(17).repeat(11)
+        self.register_buffer("query_lambda_idx", li, persistent=False)
+        self.register_buffer("query_theta_idx", ti, persistent=False)
+
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=model_dim,
+            nhead=8,
+            dim_feedforward=model_dim * 4,
+            dropout=0.1,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.spec_decoder = nn.TransformerDecoder(decoder_layer, num_layers=3)
+
+        self.token_to_grid = nn.Sequential(
+            nn.Linear(model_dim, model_dim),
+            nn.SiLU(),
+            nn.Linear(model_dim, base_ch * 4),
+        )
+        self.grid_fuse = ConvNormAct(base_ch * 4 + 2, base_ch * 4, 3)
+        self.spec_refine = nn.Sequential(
+            SpectralAxisBlock(base_ch * 4),
+            SpectralAxisBlock(base_ch * 4),
+            ConvNormAct(base_ch * 4, base_ch * 2, 3),
+            SpectralAxisBlock(base_ch * 2),
+            nn.Dropout2d(p=0.1),
+        )
+        self.spec_out = nn.Sequential(
+            nn.Conv2d(base_ch * 2, base_ch * 2, 1),
+            nn.SiLU(),
+            nn.Conv2d(base_ch * 2, out_ch, 1),
         )
         self.register_buffer("coord_64", _coord_grid(64, 64), persistent=False)
-        self.register_buffer("coord_spec", _coord_grid(11, 17), persistent=False)
+        self.register_buffer("coord_11x17", _coord_grid(11, 17), persistent=False)
+        self.register_buffer("coord_8", _coord_grid(8, 8), persistent=False)
+        self.register_buffer("coord_4", _coord_grid(4, 4), persistent=False)
+
+    def _memory_tokens(self, feat, coord, proj, level_idx):
+        b = feat.shape[0]
+        mem = proj(feat).flatten(2).transpose(1, 2)
+        mem_coord = coord.to(feat.dtype).permute(1, 2, 0).reshape(-1, 2)
+        mem = mem + self.mem_coord_proj(mem_coord)[None] + self.mem_level_embed[level_idx]
+        return mem
+
+    def _query_tokens(self, batch_size, dtype, device):
+        query_pe = torch.cat(
+            [
+                self.query_lambda(self.query_lambda_idx),
+                self.query_theta(self.query_theta_idx),
+            ],
+            dim=-1,
+        ).to(device=device, dtype=dtype)
+        return self.query_base.to(device=device, dtype=dtype).expand(batch_size, -1, -1) + query_pe[None]
 
     def forward(self, x):
         coord = self.coord_64[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
-        e = self.stem(torch.cat([x, coord], dim=1))  # 64x64
-        e = self.enc1(e)                              # 32x32
-        e = self.enc2(e)                              # 16x16
-        e = self.enc3(e)                              # 8x8
-        e = self.enc4(e)                              # 4x4
-        e = self.bottleneck(e)                        # 4x4
+        f64 = self.stem(torch.cat([x, coord], dim=1))      # 64x64
+        f32 = self.enc1(f64)                               # 32x32
+        f16 = self.enc2(f32)                               # 16x16
+        f8 = self.enc3(f16)                                # 8x8
+        f4 = self.enc4(f8)                                 # 4x4
+        fb = self.bottleneck(f4)                           # 4x4
 
-        # 直接池化到 11x17，不经过 decoder
-        spec_feat = F.adaptive_avg_pool2d(e, output_size=(11, 17))
-        spec_coord = self.coord_spec[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
-        return self.spectral_head(torch.cat([spec_feat, spec_coord], dim=1))
+        mem8 = self._memory_tokens(f8, self.coord_8, self.mem_proj8, 0)
+        mem4 = self._memory_tokens(fb, self.coord_4, self.mem_proj4, 1)
+        memory = torch.cat([mem8, mem4], dim=1)
+
+        queries = self._query_tokens(x.shape[0], x.dtype, x.device)
+        spec_tokens = self.spec_decoder(tgt=queries, memory=memory)
+
+        grid = self.token_to_grid(spec_tokens).transpose(1, 2).reshape(x.shape[0], -1, 11, 17)
+        spec_coord = self.coord_11x17[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
+        fused = self.grid_fuse(torch.cat([grid, spec_coord], dim=1))
+        fused = self.spec_refine(fused)
+        return self.spec_out(fused)
 
 
 class ConditionalUNet(nn.Module):

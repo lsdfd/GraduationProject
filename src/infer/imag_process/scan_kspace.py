@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -56,6 +57,24 @@ NA        = np.sin(np.radians(THETA_MAX))   # ≈ 0.6428
 
 # k 空间图分辨率（越大越细腻，但插值更慢）
 N_GRID = 300
+
+
+def _safe_tag(text: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text)
+
+
+def make_output_paths(label: str, lambda_nm: float) -> tuple[Path, Path, Path]:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    label_tag = _safe_tag(label)
+    lam_tag = f"{int(round(lambda_nm))}nm"
+    run_dir = _HERE / f"run_kspace_{label_tag}_{lam_tag}_{stamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    prefix = f"{label_tag}_{lam_tag}_{stamp}"
+    return (
+        run_dir / f"kspace_result_{prefix}.npz",
+        run_dir / f"kspace_tpp_{prefix}.png",
+        run_dir / f"kspace_tss_{prefix}.png",
+    )
 
 
 # ===========================================================================
@@ -174,12 +193,21 @@ def build_2d_kspace(
     k_rho_clipped = np.clip(k_rho_norm, 0.0, 1.0)
     theta_deg = np.degrees(np.arcsin(k_rho_clipped))  # [0°, 90°]，但有效范围 [0°, 40°]
 
-    # phi 插值权重 w=0 → phi=0°，w=1 → phi=45°
-    w = phi_fold / 45.0
-
     t_at_phi0  = interp0(theta_deg)
     t_at_phi45 = interp45(theta_deg)
-    T_2d = (1.0 - w) * t_at_phi0 + w * t_at_phi45
+
+    # 用最简单的 C4 谐波重建角向响应，而不是在 0° 和 45° 之间做线性插值：
+    # T(phi, theta) = A(theta) + B(theta) cos(4phi)
+    # 其中：
+    #   phi=0°  → cos(0)=1   → T = T_phi0
+    #   phi=45° → cos(pi)=-1 → T = T_phi45
+    # 这样能保持四重对称并让角向过渡更圆滑。
+    phi_fold_rad = np.radians(phi_fold)
+    cos4 = np.cos(4.0 * phi_fold_rad)
+    a = 0.5 * (t_at_phi0 + t_at_phi45)
+    b = 0.5 * (t_at_phi0 - t_at_phi45)
+    T_2d = a + b * cos4
+    T_2d = np.clip(T_2d, 0.0, 1.0)
 
     # 圆外（k_rho > NA）置 nan（mask 掉）
     T_2d[k_rho_norm > NA] = np.nan
@@ -301,7 +329,7 @@ def main():
     _, _, T_ss = build_2d_kspace(tss0, tss45)
 
     # --- 保存 npz（供 image_processing.py 使用）---
-    out_npz = _HERE / "kspace_result.npz"
+    out_npz, out_tpp_png, out_tss_png = make_output_paths(label, lam)
     np.savez(
         out_npz,
         T_pp=T_pp, T_ss=T_ss,
@@ -315,13 +343,13 @@ def main():
     plot_kspace(
         kx_norm, ky_norm, T_pp,
         title=rf"$|t_{{pp}}|$   {label}",
-        save_path=_HERE / "kspace_tpp.png",
+        save_path=out_tpp_png,
         cmap=args.cmap,
     )
     plot_kspace(
         kx_norm, ky_norm, T_ss,
         title=rf"$|t_{{ss}}|$   {label}",
-        save_path=_HERE / "kspace_tss.png",
+        save_path=out_tss_png,
         cmap=args.cmap,
     )
 

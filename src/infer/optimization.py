@@ -20,7 +20,12 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dataset.rcwa.rcwa import torcwa_simulation  # noqa: E402
+try:
+    from dataset.rcwa.rcwa import torcwa_simulation  # noqa: E402
+except ModuleNotFoundError:
+    # Avoid collisions with unrelated top-level `dataset` modules.
+    sys.path.insert(0, str(ROOT / "src" / "dataset" / "rcwa"))
+    from rcwa import torcwa_simulation  # type: ignore  # noqa: E402
 from infer.common import (  # noqa: E402
     lambda_theta_grid,
     plot_structure,

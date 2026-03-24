@@ -1,0 +1,45 @@
+一 Introduction
+1.1 OTF engineer
+1.2 逆向设计的问题：结构与角谱响应之间关系复杂、高维、非线性，经验试错效率低
+1.3 已有工作：不够自由，局限于结构参数； 不通用，忽略角度； rcwa效率低
+1.4 贡献：
+        构建自由形态二值结构与 OTF 的数据生成/标注流程。
+        提出条件生成逆向设计框架。
+        引入物理引导与后端优化形成闭环。
+        在二阶微分任务上完成系统对比、消融和器件功能验证。
+
+二 Methods
+2.0 Framework： 简单讲+清晰框架图（数据增强飞轮）
+2.1 dataset： 算法流程+数据增强+评价指标+聚类分析（评价指标）
+2.2 forward model： 架构（简单讲）+Loss 
+2.3 diffusion model： 扩散模型机制+算法流程+优势（注意力机制，物理损失）+Loss结果 
+2.4 Infer： 物理引导采样+topk+rcwa+拓扑优化的流程说明
+
+三 Results and Validation
+
+3.1 高效二阶微分超表面：
+* 结构图+光谱图+2D角谱图+1D-t（theta）图
+* 模拟图像处理效果*2+ 指标结果分析
+* 其他波长结果证明
+* 把别的文章sota的用我的score算一下对比一下
+
+3.2 模型对比+消融实验 Comparison with baseline methods
+* 代理模型对比（transformer显著提高）
+* 数据scale实验
+* cGAN，CVAE，diffusion w/o physics，拓扑
+* 比较：Best score，Mean score，OTF MAE，time-to-success
+
+3.3 Generalization to other OTF targets
+* 偏振复用尝试
+* 高阶微分/时空微分结果/高斯滤波等
+
+四 Discussions （简单写）
+* 为什么生成式方法适合这个问题：高维，一对多，优解稀疏，扩散比直接回归/GAN/VAE 更稳定
+* 当前方法局限性
+* 下一步策略
+* 单波长作为条件
+
+五 Conclusion
+* 提出一个面向自由形态二值超表面的 OTF 逆向设计闭环。
+* 在二阶微分主任务上证明其有效、稳定、可制造。
+* 说明该框架对更多 OTF 工程任务有推广潜力。

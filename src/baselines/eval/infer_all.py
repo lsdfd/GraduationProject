@@ -31,13 +31,33 @@ from cvae import CVAE
 from cgan import Generator
 from generate_one import generate_structure
 
-# 拓扑优化复用 optimization.py 的核心函数
-sys.path.insert(0, os.path.join(_ROOT, "src", "infer"))
-from optimization import (
-    symmetrize, density_filter, project_density, finalize_binary,
-    rcwa_tpp_tss_row, second_order_score_row_torch, theta_grid,
-    target_row_tensor, outer_monotonic_penalty, tv_loss,
-)
+METHODS = ("topo_opt", "cvae", "cgan", "diffusion", "diffusion+guide")
+
+_TOPO_OPT_FNS = None
+
+
+def _get_topo_opt_fns():
+    global _TOPO_OPT_FNS
+    if _TOPO_OPT_FNS is None:
+        sys.path.insert(0, os.path.join(_ROOT, "src", "infer"))
+        from optimization import (  # noqa: WPS433
+            symmetrize, density_filter, project_density, finalize_binary,
+            rcwa_tpp_tss_row, second_order_score_row_torch, theta_grid,
+            target_row_tensor, outer_monotonic_penalty, tv_loss,
+        )
+        _TOPO_OPT_FNS = {
+            "symmetrize": symmetrize,
+            "density_filter": density_filter,
+            "project_density": project_density,
+            "finalize_binary": finalize_binary,
+            "rcwa_tpp_tss_row": rcwa_tpp_tss_row,
+            "second_order_score_row_torch": second_order_score_row_torch,
+            "theta_grid": theta_grid,
+            "target_row_tensor": target_row_tensor,
+            "outer_monotonic_penalty": outer_monotonic_penalty,
+            "tv_loss": tv_loss,
+        }
+    return _TOPO_OPT_FNS
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -57,8 +77,9 @@ def generate_topo_opt(cond_norm, n_samples: int = 16, device: str = "cpu",
     不使用任何学习模型，纯 RCWA 梯度驱动。
     返回 [n_samples, 64, 64] 二值结构。
     """
-    thetas   = theta_grid()
-    target_t = target_row_tensor(device)
+    topo = _get_topo_opt_fns()
+    thetas   = topo["theta_grid"]()
+    target_t = topo["target_row_tensor"](device)
     results  = []
 
     for i in range(n_samples):
@@ -69,25 +90,25 @@ def generate_topo_opt(cond_norm, n_samples: int = 16, device: str = "cpu",
 
         rho_param      = init.clone().detach().requires_grad_(True)
         opt            = torch.optim.Adam([rho_param], lr=lr)
-        best_bin       = finalize_binary(init.detach())
+        best_bin       = topo["finalize_binary"](init.detach())
         best_score_val = -1.0
 
         for step in range(steps):
             beta  = beta_start + step / max(steps - 1, 1) * (beta_end - beta_start)
-            rho   = symmetrize(rho_param).clamp(0.0, 1.0)
-            rho_f = density_filter(rho, filter_radius)
-            x     = project_density(rho_f, beta=beta, eta=proj_eta)
+            rho   = topo["symmetrize"](rho_param).clamp(0.0, 1.0)
+            rho_f = topo["density_filter"](rho, filter_radius)
+            x     = topo["project_density"](rho_f, beta=beta, eta=proj_eta)
 
-            tpp_row, _ = rcwa_tpp_tss_row(x, target_lambda, device, rcwa_orders)
-            pack       = second_order_score_row_torch(tpp_row, thetas)
+            tpp_row, _ = topo["rcwa_tpp_tss_row"](x, target_lambda, device, rcwa_orders)
+            pack       = topo["second_order_score_row_torch"](tpp_row, thetas)
             row_max    = tpp_row.amax(dim=-1, keepdim=True).clamp_min(1e-8)
             y_norm     = tpp_row / row_max
 
             loss = ((1.0 - pack["score"].mean())
                     + 0.10 * (y_norm - target_t).abs().mean()
-                    + 0.10 * outer_monotonic_penalty(y_norm, thetas)
+                    + 0.10 * topo["outer_monotonic_penalty"](y_norm, thetas)
                     + 0.06 * (x * (1.0 - x)).mean()
-                    + 0.02 * tv_loss(rho_f))
+                    + 0.02 * topo["tv_loss"](rho_f))
 
             opt.zero_grad(); loss.backward()
             opt.step()
@@ -96,9 +117,9 @@ def generate_topo_opt(cond_norm, n_samples: int = 16, device: str = "cpu",
 
             if (step + 1) % 50 == 0 or step + 1 == steps:
                 try:
-                    xb       = finalize_binary(x.detach())
-                    tpp_b, _ = rcwa_tpp_tss_row(xb, target_lambda, device, rcwa_orders)
-                    sc       = float(second_order_score_row_torch(tpp_b, thetas)["score"].mean())
+                    xb       = topo["finalize_binary"](x.detach())
+                    tpp_b, _ = topo["rcwa_tpp_tss_row"](xb, target_lambda, device, rcwa_orders)
+                    sc       = float(topo["second_order_score_row_torch"](tpp_b, thetas)["score"].mean())
                     if sc > best_score_val:
                         best_score_val = sc
                         best_bin = xb.detach().clone()
@@ -136,7 +157,7 @@ def generate_random(cond_norm, n_samples: int = 16, device: str = "cpu",
 # ══════════════════════════════════════════════════════════════════════
 
 def load_cvae(ckpt_path: str, device: str) -> tuple:
-    ckpt   = torch.load(ckpt_path, map_location=device)
+    ckpt   = torch.load(ckpt_path, map_location=device, weights_only=False)
     cond_ch     = ckpt["cond_ch"]
     latent_dim  = ckpt.get("latent_dim", 128)
     model  = CVAE(cond_in_ch=cond_ch, latent_dim=latent_dim).to(device)
@@ -162,7 +183,7 @@ def generate_cvae(cond_norm, n_samples: int = 16, device: str = "cpu",
 # ══════════════════════════════════════════════════════════════════════
 
 def load_cgan(ckpt_path: str, device: str) -> tuple:
-    ckpt       = torch.load(ckpt_path, map_location=device)
+    ckpt       = torch.load(ckpt_path, map_location=device, weights_only=False)
     cond_ch    = ckpt["cond_ch"]
     latent_dim = ckpt.get("latent_dim", 128)
     G = Generator(latent_dim=latent_dim, cond_dim=256).to(device)
@@ -185,7 +206,7 @@ def generate_cgan(cond_norm, n_samples: int = 16, device: str = "cpu",
 # ══════════════════════════════════════════════════════════════════════
 
 def load_diffusion(ckpt_path: str, device: str):
-    ckpt     = torch.load(ckpt_path, map_location=device)
+    ckpt     = torch.load(ckpt_path, map_location=device, weights_only=False)
     cond_ch  = ckpt["cond_channels"]
     unet     = ConditionalUNet(cond_in_ch=cond_ch).to(device)
     diffusion = GaussianDiffusion(unet, timesteps=1000, image_size=64).to(device)
@@ -238,39 +259,45 @@ def load_all_models(
     cgan_ckpt:      str = "checkpoints/cgan/cgan_best.pt",
     diffusion_ckpt: str = "checkpoints/diffusion_best.pt",
     device:         str = "cuda",
+    methods:        list[str] | None = None,
 ) -> dict:
     """
     返回字典：method_name → {"model": ..., "fn": generate_xxx}
     如果某个 checkpoint 不存在则跳过该方法，不报错。
     """
     models = {}
+    selected = list(methods) if methods else list(METHODS)
 
     # 拓扑优化：无需模型，target_lambda 由 run_eval.py 填入
-    models["topo_opt"] = {"model": None, "fn": generate_topo_opt}
+    if "topo_opt" in selected:
+        models["topo_opt"] = {"model": None, "fn": generate_topo_opt}
 
     # CVAE
-    if os.path.exists(cvae_ckpt):
+    if "cvae" in selected and os.path.exists(cvae_ckpt):
         m, mean, std = load_cvae(cvae_ckpt, device)
         models["cvae"] = {"model": m, "fn": generate_cvae,
                           "cond_mean": mean, "cond_std": std}
-    else:
+    elif "cvae" in selected:
         print(f"[infer_all] CVAE checkpoint not found: {cvae_ckpt}")
 
     # cGAN
-    if os.path.exists(cgan_ckpt):
+    if "cgan" in selected and os.path.exists(cgan_ckpt):
         m, mean, std = load_cgan(cgan_ckpt, device)
         models["cgan"] = {"model": m, "fn": generate_cgan,
                           "cond_mean": mean, "cond_std": std}
-    else:
+    elif "cgan" in selected:
         print(f"[infer_all] cGAN checkpoint not found: {cgan_ckpt}")
 
     # 扩散模型（纯 CFG）
-    if os.path.exists(diffusion_ckpt):
+    need_diffusion = any(m in selected for m in ("diffusion", "diffusion+guide"))
+    if need_diffusion and os.path.exists(diffusion_ckpt):
         m, _, _ = load_diffusion(diffusion_ckpt, device)
-        models["diffusion"]       = {"model": m, "fn": generate_diffusion}
-        models["diffusion+guide"] = {"model": m, "fn": generate_diffusion_guided}
+        if "diffusion" in selected:
+            models["diffusion"] = {"model": m, "fn": generate_diffusion}
+        if "diffusion+guide" in selected:
+            models["diffusion+guide"] = {"model": m, "fn": generate_diffusion_guided}
         # surrogate / target_norm 由 run_eval.py 在注册后填入 method_info
-    else:
+    elif need_diffusion:
         print(f"[infer_all] Diffusion checkpoint not found: {diffusion_ckpt}")
 
     return models

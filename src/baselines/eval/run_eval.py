@@ -40,13 +40,13 @@ for _p in [
         sys.path.insert(0, _p)
 
 from models import ForwardSurrogate
-from common import lambda_theta_grid, second_order_score_map
-from infer_all import load_all_models, timed_generate
+from common import lambda_theta_grid, second_order_score_map, second_order_target
+from infer_all import METHODS, load_all_models, timed_generate
 from metrics import summarize
 
-# 复用 laplas2 里的目标构建函数
+# 复用当前 laplas.py 里的目标构建函数，和主推理流程保持一致
 sys.path.insert(0, os.path.join(_ROOT, "src", "infer"))
-from laplas2 import load_raw_top_condition, build_physics_target
+from laplas import build_target
 
 
 def parse_args():
@@ -66,13 +66,25 @@ def parse_args():
                    help="使用数据集中二阶得分第 N 名的样本作为目标模板")
     p.add_argument("--band_sigma_nm",  type=float, default=25.0)
     p.add_argument("--save_dir",       default="samples/eval_compare")
+    p.add_argument("--methods",        default="all",
+                   help=f"逗号分隔方法子集，候选：{','.join(METHODS)}；默认 all")
     return p.parse_args()
 
 
+def parse_methods(arg: str) -> list[str]:
+    if arg.strip().lower() == "all":
+        return list(METHODS)
+    methods = [m.strip() for m in arg.split(",") if m.strip()]
+    invalid = [m for m in methods if m not in METHODS]
+    if invalid:
+        raise ValueError(f"Unknown methods: {invalid}. Available: {list(METHODS)}")
+    return methods
+
+
 def load_surrogate(forward_ckpt: str, stats_path: str, device: str):
-    ckpt = torch.load(forward_ckpt, map_location=device)
-    cond_ch = ckpt.get("cond_ch", 2)
-    surrogate = ForwardSurrogate(cond_out_ch=cond_ch).to(device)
+    ckpt = torch.load(forward_ckpt, map_location=device, weights_only=False)
+    cond_ch = ckpt.get("cond_channels", ckpt.get("cond_ch", 2))
+    surrogate = ForwardSurrogate(out_ch=cond_ch).to(device)
     surrogate.load_state_dict(ckpt["model"])
     surrogate.eval()
     for param in surrogate.parameters():
@@ -114,8 +126,9 @@ def eval_one_method(
     scores         = []
     best_score_val = -1.0
     best_pred_cond = pred_raw[0]
+    best_idx = 0
 
-    for pr in pred_raw:
+    for idx, pr in enumerate(pred_raw):
         sc = second_order_score_map(
             pr[0], lambdas, thetas, target_lambda=target_lambda,
         )["score"]
@@ -123,6 +136,10 @@ def eval_one_method(
         if sc > best_score_val:
             best_score_val = sc
             best_pred_cond = pr
+            best_idx = idx
+
+    lam_idx = int(np.argmin(np.abs(lambdas - float(target_lambda))))
+    target_theta_curve = second_order_target(thetas).astype(np.float32)
 
     result = summarize(
         candidates     = structs,
@@ -132,6 +149,12 @@ def eval_one_method(
         infer_time     = infer_time,
     )
     result["method"] = method_name
+    result["best_idx"] = int(best_idx)
+    result["target_lambda_nm"] = float(target_lambda)
+    result["thetas_deg"] = thetas.astype(np.float32).tolist()
+    result["target_theta_curve"] = target_theta_curve.tolist()
+    result["best_tpp_theta_curve"] = best_pred_cond[0, lam_idx].astype(np.float32).tolist()
+    result["best_tss_theta_curve"] = best_pred_cond[1, lam_idx].astype(np.float32).tolist()
     return result
 
 
@@ -139,21 +162,20 @@ def main():
     args   = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.save_dir, exist_ok=True)
+    methods = parse_methods(args.methods)
+    if args.target_rank != 1:
+        raise ValueError("Current baseline target builder is aligned with laplas.py and only supports --target_rank 1.")
 
     lambdas, thetas = lambda_theta_grid()
 
-    # ── 构建物理目标（与 laplas2.py 完全一致）────────────────────────
+    # ── 构建目标（与当前 laplas.py 保持一致）──────────────────────────
     from pathlib import Path
-    target_raw, _, _, sample_idx = load_raw_top_condition(
-        Path(args.data_path),
-        Path(args.topk_csv),
-        args.target_lambda,
-        args.target_rank,
-    )
-    cond_raw = build_physics_target(
-        target_raw, lambdas, thetas,
+    cond_raw, _, _, sample_idx = build_target(
+        cond_ch=2,
         target_lambda=args.target_lambda,
         band_sigma_nm=args.band_sigma_nm,
+        train_npz_path=Path(args.data_path),
+        topk_csv_path=Path(args.topk_csv),
     )   # [2, 11, 17] 物理空间目标
 
     print(f"[run_eval] target: lambda={args.target_lambda}nm  "
@@ -168,6 +190,7 @@ def main():
         cgan_ckpt      = args.cgan_ckpt,
         diffusion_ckpt = args.diffusion_ckpt,
         device         = device,
+        methods        = methods,
     )
 
     # ── 归一化目标条件 ────────────────────────────────────────────────
