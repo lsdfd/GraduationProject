@@ -1,6 +1,5 @@
 import os
 import argparse
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
@@ -18,33 +17,21 @@ def augment_structure(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
-def second_order_target(thetas_deg: np.ndarray) -> np.ndarray:
-    sin_theta = np.sin(np.deg2rad(thetas_deg.astype(np.float64)))
-    smax = max(float(np.max(np.abs(sin_theta))), 1e-8)
-    target = (np.abs(sin_theta) / smax) ** 2
-    target = (target - target.min()) / max(float(target.max() - target.min()), 1e-8)
-    return target.astype(np.float32)
-
-
-def build_theta_weights(thetas_deg: np.ndarray) -> torch.Tensor:
-    target = second_order_target(thetas_deg)
-    center = np.exp(-0.5 * (thetas_deg.astype(np.float32) / 10.0) ** 2)
-    weights = 1.0 + 1.15 * target + 0.85 * center
-    weights = weights / max(float(weights.mean()), 1e-8)
-    return torch.from_numpy(weights.astype(np.float32)).view(1, -1)
-
-
-def forward_loss(pred, cond, mean_dev, std_dev, theta_weights):
+def forward_loss(pred, cond, mean_dev, std_dev):
     pred_phys = pred * std_dev + mean_dev
     cond_phys = cond * std_dev + mean_dev
 
-    weighted_l1 = (torch.abs(pred_phys - cond_phys) * theta_weights).mean()
+    loss_abs = F.l1_loss(pred_phys, cond_phys)
 
     pred_shape = pred_phys / pred_phys.amax(dim=1, keepdim=True).clamp_min(1e-6)
     cond_shape = cond_phys / cond_phys.amax(dim=1, keepdim=True).clamp_min(1e-6)
-    shape_l1 = (torch.abs(pred_shape - cond_shape) * theta_weights).mean()
+    loss_shape = F.l1_loss(pred_shape, cond_shape)
 
-    total = weighted_l1 + 0.35 * shape_l1
+    pred_diff = pred_phys[:, 1:] - pred_phys[:, :-1]
+    cond_diff = cond_phys[:, 1:] - cond_phys[:, :-1]
+    loss_smooth = F.l1_loss(pred_diff, cond_diff)
+
+    total = loss_abs + 0.10 * loss_shape + 0.02 * loss_smooth
     return total, pred_phys, cond_phys
 
 
@@ -96,7 +83,6 @@ def main():
     cond_std_t  = torch.from_numpy(dataset.cond_std).float()
     mean_dev = cond_mean_t.to(cfg["device"])
     std_dev  = cond_std_t.to(cfg["device"])
-    theta_weights = build_theta_weights(dataset.thetas).to(cfg["device"])
 
     np.savez(
         os.path.join(run_dir, "cond_stats.npz"),
@@ -151,7 +137,7 @@ def main():
             x = augment_structure(x)      # 随机翻转增强
 
             pred = model(x)
-            loss, pred_phys, cond_phys = forward_loss(pred, cond, mean_dev, std_dev, theta_weights)
+            loss, pred_phys, cond_phys = forward_loss(pred, cond, mean_dev, std_dev)
 
             opt.zero_grad()
             loss.backward()
@@ -173,7 +159,7 @@ def main():
                 x = x.to(cfg["device"])
                 cond = cond.to(cfg["device"])
                 pred = model(x)
-                loss, pred_phys, cond_phys = forward_loss(pred, cond, mean_dev, std_dev, theta_weights)
+                loss, pred_phys, cond_phys = forward_loss(pred, cond, mean_dev, std_dev)
                 val_loss += loss.item() * x.size(0)
                 val_mae_phys += F.l1_loss(pred_phys, cond_phys).item() * x.size(0)
         val_loss     /= len(val_loader.dataset)
