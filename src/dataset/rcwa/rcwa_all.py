@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""读取 structures.npy，批量做 1000nm 单波长 RCWA 仿真并输出 |tpp|、|tss|。"""
+"""读取 structures.npy，批量做 1000nm 单波长 RCWA 仿真并输出 |tpp|。"""
 
 import argparse
 import json
@@ -51,7 +51,6 @@ def phy_kwargs(lam, theta):
 def simulate_one(structure, device, orders):
     layer = torch.from_numpy(structure.astype(np.float32)).to(device)
     tpp_mag = np.full((len(THETAS),), np.nan, dtype=np.float32)
-    tss_mag = np.full_like(tpp_mag, np.nan)
     failures = []
 
     for j, theta in enumerate(THETAS):
@@ -64,19 +63,17 @@ def simulate_one(structure, device, orders):
                 device=device,
             )
             tpp_mag[j] = float(out["tpp_mag"].detach().cpu().item())
-            tss_mag[j] = float(out["tss_mag"].detach().cpu().item())
         except Exception as exc:
             failures.append({"lambda_nm": float(TARGET_LAMBDA), "theta_deg": float(theta), "error": str(exc)})
 
-    return tpp_mag, tss_mag, failures
+    return tpp_mag, failures
 
 
-def save_npz(path, structures, tpp_mag, tss_mag):
+def save_npz(path, structures, tpp_mag):
     np.savez(
         path,
         structures=structures,
         tpp_mag=tpp_mag,
-        tss_mag=tss_mag,
         target_lambda=TARGET_LAMBDA,
         thetas=THETAS,
     )
@@ -99,28 +96,20 @@ def parse_devices(devices_arg, device_arg):
 
 def _run_indices(structures, indices, device, orders):
     tpp_part = np.full((len(indices), len(THETAS)), np.nan, dtype=np.float32)
-    tss_part = np.full_like(tpp_part, np.nan)
     failed = []
 
     for local_i, idx in enumerate(indices):
         t0 = time.perf_counter()
-        tpp_i, tss_i, failures = simulate_one(structures[idx], device, orders)
+        tpp_i, failures = simulate_one(structures[idx], device, orders)
         tpp_part[local_i] = tpp_i
-        tss_part[local_i] = tss_i
         dt = time.perf_counter() - t0
         if failures:
             failed.append({"index": int(idx), "failures": failures})
-            print(
-                f"[worker {device}] 样本 {local_i + 1}/{len(indices)} (global={idx}) 失败点数={len(failures)}，用时={dt:.2f}s",
-                flush=True,
-            )
+            print(f"[worker {device}] 样本 {local_i + 1}/{len(indices)} (global={idx}) 失败点数={len(failures)}，用时={dt:.2f}s", flush=True)
         else:
-            print(
-                f"[worker {device}] 样本 {local_i + 1}/{len(indices)} (global={idx}) 完成，用时={dt:.2f}s",
-                flush=True,
-            )
+            print(f"[worker {device}] 样本 {local_i + 1}/{len(indices)} (global={idx}) 完成，用时={dt:.2f}s", flush=True)
 
-    return tpp_part, tss_part, failed
+    return tpp_part, failed
 
 
 def _worker_entry(structures, indices, device, orders, queue):
@@ -128,14 +117,13 @@ def _worker_entry(structures, indices, device, orders, queue):
         if str(device).startswith("cuda"):
             torch.cuda.set_device(device)
         torch.set_num_threads(1)
-        tpp_part, tss_part, failed = _run_indices(structures, indices, device, orders)
+        tpp_part, failed = _run_indices(structures, indices, device, orders)
         queue.put(
             {
                 "ok": True,
                 "device": device,
                 "indices": np.asarray(indices, dtype=np.int64),
                 "tpp": tpp_part,
-                "tss": tss_part,
                 "failed": failed,
             }
         )
@@ -171,7 +159,6 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     tpp_mag = np.full((len(structures), len(THETAS)), np.nan, dtype=np.float32)
-    tss_mag = np.full_like(tpp_mag, np.nan)
     failed = []
     devices = parse_devices(a.devices, a.device)
     num_workers = len(devices)
@@ -180,7 +167,7 @@ def main():
         log(log_path, f"开始 RCWA 批量仿真，样本数={len(structures)}，lambda={float(TARGET_LAMBDA):.0f}nm，device={devices[0]}，orders={a.rcwa_orders}")
         for idx in range(len(structures)):
             t0 = time.perf_counter()
-            tpp_mag[idx], tss_mag[idx], failures = simulate_one(structures[idx], devices[0], a.rcwa_orders)
+            tpp_mag[idx], failures = simulate_one(structures[idx], devices[0], a.rcwa_orders)
             dt = time.perf_counter() - t0
             if failures:
                 failed.append({"index": idx, "failures": failures})
@@ -188,7 +175,7 @@ def main():
             else:
                 log(log_path, f"样本 {idx + 1}/{len(structures)} 完成，用时={dt:.2f}s")
             if (idx + 1) % max(1, a.save_every) == 0 or idx + 1 == len(structures):
-                save_npz(out_path, structures, tpp_mag, tss_mag)
+                save_npz(out_path, structures, tpp_mag)
                 log(log_path, f"已保存中间结果: {out_path}")
     else:
         all_indices = np.arange(len(structures), dtype=np.int64)
@@ -198,16 +185,10 @@ def main():
         queue = ctx.Queue()
         procs = []
 
-        log(
-            log_path,
-            f"开始 RCWA 多卡并行，样本数={len(structures)}，lambda={float(TARGET_LAMBDA):.0f}nm，devices={active_devices}，orders={a.rcwa_orders}",
-        )
+        log(log_path, f"开始 RCWA 多卡并行，样本数={len(structures)}，lambda={float(TARGET_LAMBDA):.0f}nm，devices={active_devices}，orders={a.rcwa_orders}")
         for dev, idxs in zip(active_devices, split_indices):
             log(log_path, f"分配 {dev}: {len(idxs)} 个样本（index {idxs[0]}..{idxs[-1]}）")
-            proc = ctx.Process(
-                target=_worker_entry,
-                args=(structures, idxs, dev, a.rcwa_orders, queue),
-            )
+            proc = ctx.Process(target=_worker_entry, args=(structures, idxs, dev, a.rcwa_orders, queue))
             proc.start()
             procs.append(proc)
 
@@ -223,10 +204,9 @@ def main():
 
             idxs = msg["indices"]
             tpp_mag[idxs] = msg["tpp"]
-            tss_mag[idxs] = msg["tss"]
             failed.extend(msg["failed"])
             log(log_path, f"worker {msg['device']} 完成，回收 {len(idxs)} 个样本")
-            save_npz(out_path, structures, tpp_mag, tss_mag)
+            save_npz(out_path, structures, tpp_mag)
             log(log_path, f"已保存中间结果: {out_path}")
 
         for proc in procs:

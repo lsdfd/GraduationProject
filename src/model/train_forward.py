@@ -59,7 +59,7 @@ def main():
     print(f"[Forward] run_dir={run_dir}")
 
     dataset = RCWADataset(cfg["data_path"], target_lambda=cfg["target_lambda"])
-    cond_channels = dataset[0][1].shape[0]
+    cond_dim = int(dataset[0][1].shape[0])
 
     # 用于反归一化，计算物理单位下的误差
     cond_mean_t = torch.from_numpy(dataset.cond_mean).float()
@@ -80,7 +80,7 @@ def main():
     cfg["dataset_size"] = len(dataset)
     cfg["train_size"] = n_train
     cfg["val_size"] = n_val
-    cfg["cond_channels"] = cond_channels
+    cfg["cond_dim"] = cond_dim
     write_json(os.path.join(run_dir, "run_info.json"), cfg)
 
     train_loader = DataLoader(
@@ -92,7 +92,7 @@ def main():
         num_workers=cfg["num_workers"], pin_memory=use_cuda
     )
 
-    model = ForwardSurrogate(out_ch=cond_channels).to(cfg["device"])
+    model = ForwardSurrogate(out_dim=cond_dim).to(cfg["device"])
     opt = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         opt,
@@ -164,7 +164,7 @@ def main():
 
         ckpt = {
             "model": model.state_dict(),
-            "cond_channels": cond_channels,
+            "cond_dim": cond_dim,
             "epoch": epoch,
             "best_val": best_val,
             "cfg": cfg,

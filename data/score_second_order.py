@@ -49,25 +49,6 @@ def load_bundle(npz_path: Path, field: str) -> tuple[np.ndarray, np.ndarray, np.
     return structures, spec, lambdas, thetas
 
 
-def load_companion_spec(npz_path: Path, field: str) -> tuple[np.ndarray | None, str | None]:
-    if field == "tpp_mag":
-        other = "tss_mag"
-    elif field == "tss_mag":
-        other = "tpp_mag"
-    else:
-        return None, None
-
-    data = np.load(npz_path)
-    if other not in data.files:
-        return None, None
-    spec = np.asarray(data[other], dtype=np.float32)
-    if spec.ndim == 2:
-        spec = spec[:, None, :]
-    elif spec.ndim != 3:
-        return None, None
-    return spec, other
-
-
 def target_profile(thetas_deg: np.ndarray) -> np.ndarray:
     tmax = float(np.max(np.abs(thetas_deg)))
     if tmax <= 0:
@@ -241,8 +222,6 @@ def plot_per_lambda(
     out_dir: Path,
     structures: np.ndarray,
     spec: np.ndarray,
-    companion_spec: np.ndarray | None,
-    companion_label: str | None,
     field_label: str,
     score: np.ndarray,
     lambdas: np.ndarray,
@@ -266,32 +245,19 @@ def plot_per_lambda(
         extent = [float(thetas[0]), float(thetas[-1]), float(lambdas[0] - 5.0), float(lambdas[0] + 5.0)]
     else:
         extent = [float(thetas[0]), float(thetas[-1]), float(lambdas[0]), float(lambdas[-1])]
-    comp_vmin = comp_vmax = None
-    if companion_spec is not None:
-        comp_finite = companion_spec[np.isfinite(companion_spec)]
-        comp_vmin = float(np.quantile(comp_finite, 0.01)) if comp_finite.size else 0.0
-        comp_vmax = float(np.quantile(comp_finite, 0.99)) if comp_finite.size else 1.0
-        if comp_vmax <= comp_vmin:
-            comp_vmax = comp_vmin + 1e-6
 
     for j, lam in enumerate(lambdas):
-        ncols = 5 if companion_spec is not None else 3
-        width_ratios = [0.75, 1.05, 1.0, 1.05, 1.0] if companion_spec is not None else [0.75, 1.05, 1.0]
         fig, axes = plt.subplots(
             topk,
-            ncols,
-            figsize=(20.0 if companion_spec is not None else 13.2, max(2.6 * topk, 5.0)),
-            gridspec_kw={"width_ratios": width_ratios},
+            3,
+            figsize=(13.2, max(2.6 * topk, 5.0)),
+            gridspec_kw={"width_ratios": [0.75, 1.05, 1.0]},
             constrained_layout=True,
         )
         axes = np.atleast_2d(axes)
         hm = None
-        hm_comp = None
         for r in range(topk):
-            if companion_spec is not None:
-                a_struct, a_hm, a_curve, a_hm_comp, a_curve_comp = axes[r]
-            else:
-                a_struct, a_hm, a_curve = axes[r]
+            a_struct, a_hm, a_curve = axes[r]
             i = int(top_idx[j, r])
             if i < 0:
                 for ax in axes[r]:
@@ -333,49 +299,11 @@ def plot_per_lambda(
             )
             a_curve.text(0.02, 0.03, tag, transform=a_curve.transAxes, ha="left", va="bottom", fontsize=8)
 
-            if companion_spec is not None:
-                full_comp = companion_spec[i].astype(np.float64)
-                y_comp = companion_spec[i, j].astype(np.float64)
-                yn_comp = y_comp / max(float(np.max(y_comp)), 1e-8)
-                t_ref_val_comp = float(y_comp[t_ref_idx])
-
-                hm_comp = a_hm_comp.imshow(
-                    full_comp,
-                    cmap="turbo",
-                    aspect="auto",
-                    origin="lower",
-                    extent=extent,
-                    vmin=comp_vmin,
-                    vmax=comp_vmax,
-                    interpolation="bicubic",
-                )
-                a_hm_comp.axhline(float(lam), color="w", ls="--", lw=1.0)
-                a_hm_comp.set_title(f"{companion_label}", fontsize=10)
-                a_hm_comp.set_xlabel("theta (deg)")
-                a_hm_comp.set_ylabel(f"lambda (nm)\n{companion_label}")
-
-                a_curve_comp.plot(thetas, yn_comp, lw=1.9, color="#ff7f0e", label=f"{companion_label} (normalized)")
-                a_curve_comp.set_ylim(-0.05, 1.05)
-                a_curve_comp.set_xlabel("theta (deg)")
-                a_curve_comp.set_ylabel(f"normalized |{companion_label}|")
-                a_curve_comp.grid(alpha=0.25)
-                if r == 0:
-                    a_curve_comp.legend(fontsize=8, loc="lower right")
-                tag_comp = f"|{companion_label}|@{t_ref_actual:.1f}deg={t_ref_val_comp:.3f}"
-                a_hm_comp.text(
-                    0.98, 0.03, tag_comp, transform=a_hm_comp.transAxes, ha="right", va="bottom", fontsize=8, color="white",
-                    bbox={"facecolor": "black", "alpha": 0.45, "pad": 1.5, "edgecolor": "none"},
-                )
-                a_curve_comp.text(0.02, 0.03, tag_comp, transform=a_curve_comp.transAxes, ha="left", va="bottom", fontsize=8)
-
         valid = score[:, j][np.isfinite(score[:, j])]
         stats = f"lambda={float(lam):.1f} nm | valid={len(valid)} | mean={float(np.mean(valid)):.3f} | p90={float(np.quantile(valid, 0.9)):.3f}" if len(valid) else f"lambda={float(lam):.1f} nm | valid=0"
-        extra = f" + {companion_label}" if companion_spec is not None else ""
-        fig.suptitle(f"Top-{topk}: {field_label}{extra} ({stats})", fontsize=12)
+        fig.suptitle(f"Top-{topk}: {field_label} ({stats})", fontsize=12)
         if hm is not None:
             fig.colorbar(hm, ax=axes[:, 1].tolist(), shrink=0.9, pad=0.01, label="|t|")
-        if hm_comp is not None:
-            fig.colorbar(hm_comp, ax=axes[:, 3].tolist(), shrink=0.9, pad=0.01, label=f"|{companion_label}|")
         fig.savefig(out_dir / f"lambda_{float(lam):.1f}nm_top{topk}.png", dpi=180)
         plt.close(fig)
 
@@ -438,7 +366,6 @@ def main() -> None:
     args.out_dir = resolve_from_root(args.out_dir)
 
     structures, spec, lambdas, thetas = load_bundle(args.in_npz, args.field)
-    companion_spec, companion_label = load_companion_spec(args.in_npz, args.field)
     pack = score_spectra(spec, thetas, args.w_center, args.w_shape, args.w_edge, args.w_bandwidth)
     top_idx, top_score = topk_per_lambda(pack["score"], args.topk)
     summary = summary_json(lambdas, pack["score"], top_idx, top_score)
@@ -457,8 +384,6 @@ def main() -> None:
             plot_dir,
             structures,
             spec,
-            companion_spec,
-            companion_label,
             args.field,
             pack["score"],
             lambdas,

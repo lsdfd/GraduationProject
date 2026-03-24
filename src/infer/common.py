@@ -41,12 +41,6 @@ def denormalize_with_stats(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> 
     return x * std + mean
 
 
-def build_weight(cond_ch: int, target_lambda: float = 1000.0) -> np.ndarray:
-    _, thetas = lambda_theta_grid()
-    w = np.ones((len(thetas),), dtype=np.float32)
-    return np.stack([w, w], axis=0) if cond_ch == 2 else w[None]
-
-
 def second_order_target(thetas: np.ndarray) -> np.ndarray:
     sin_theta = np.sin(np.deg2rad(thetas.astype(np.float64)))
     smax = max(float(np.max(np.abs(sin_theta))), 1e-8)
@@ -95,7 +89,6 @@ def second_order_score_row(
     center_score = float(np.clip(1.0 - center_val / max(edge_mean, 1e-8), 0.0, 1.0))
     shape_score = float(np.clip(r2, 0.0, 1.0)) if a >= 0 else 0.0
     edge_score = float(np.clip(edge_mean, 0.0, 1.0))
-    outer_vals = np.asarray([y_norm[i] for i, _ in _outer_band_pairs(thetas)] + [y_norm[_outer_band_pairs(thetas)[-1][1]]], dtype=np.float64)
     outer_rank_terms = []
     for lo, hi in _outer_band_pairs(thetas):
         outer_rank_terms.append(float(np.clip(y_norm[hi] - y_norm[lo], 0.0, 1.0)))
@@ -164,7 +157,6 @@ def second_order_score_row_torch(
 def rcwa_eval_target_lambda(
     structure: torch.Tensor,
     target_raw: np.ndarray,
-    cond_ch: int,
     device: str,
     target_lambda: float = 1000.0,
     rcwa_orders: int = 7,
@@ -174,7 +166,6 @@ def rcwa_eval_target_lambda(
     _, thetas = lambda_theta_grid()
     layer = structure.squeeze().to(device)
     tpp = np.full((len(thetas),), np.nan, np.float32)
-    tss = np.full_like(tpp, np.nan)
     for j, theta in enumerate(thetas):
         out = torcwa_simulation(
             {
@@ -198,87 +189,16 @@ def rcwa_eval_target_lambda(
             device=device,
         )
         tpp[j] = float(out["tpp_mag"].detach().cpu().item())
-        tss[j] = float(out["tss_mag"].detach().cpu().item())
-    pred = np.stack([tpp, tss], axis=0) if cond_ch == 2 else tpp[None]
-    if target_raw.ndim == 2:
-        target_row = target_raw
-    elif target_raw.ndim == 3 and target_raw.shape[0] == 1:
-        target_row = target_raw[0]
-    else:
-        target_row = target_raw[:, int(np.argmin(np.abs(lambda_theta_grid()[0] - float(target_lambda)))), :]
+    pred = tpp[None]
+    target_row = target_raw[None] if target_raw.ndim == 1 else target_raw
     mae = float(np.mean(np.abs(pred - target_row)))
     return mae, pred
 
 
-def rcwa_second_order_metrics_target_lambda(
-    structure: torch.Tensor,
-    target_raw: np.ndarray,
-    cond_ch: int,
-    device: str,
-    target_lambda: float = 1000.0,
-    rcwa_orders: int = 7,
-) -> dict | None:
-    out = rcwa_eval_target_lambda(
-        structure,
-        target_raw,
-        cond_ch,
-        device,
-        target_lambda=target_lambda,
-        rcwa_orders=rcwa_orders,
-    )
-    if out is None:
-        return None
-    mae, pred = out
-    _, thetas = lambda_theta_grid()
-    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
-    score = second_order_score_row(pred[0], thetas)
-    result = {
-        "rcwa_mae_raw": float(mae),
-        "rcwa_second_order_score": float(score["score"]),
-        "rcwa_center_score": float(score["center"]),
-        "rcwa_shape_score": float(score["shape"]),
-        "rcwa_edge_score": float(score["edge"]),
-        "rcwa_r2": float(score["r2"]),
-        "rcwa_tpp_at_40": float(pred[0, t40_idx]),
-        "rcwa_pred": pred,
-    }
-    if cond_ch == 2:
-        result["rcwa_tss_at_40"] = float(pred[1, t40_idx])
-    return result
-
-
-def plot_map(path: Path, cond: np.ndarray, lambdas: np.ndarray, thetas: np.ndarray, title: str, vmax: float, channel_idx: int = 0):
-    img = cond if cond.ndim == 2 else cond[channel_idx]
-    if len(lambdas) == 1:
-        half_step = 5.0
-        y0 = float(lambdas[0] - half_step)
-        y1 = float(lambdas[0] + half_step)
-    else:
-        y0 = float(lambdas[0])
-        y1 = float(lambdas[-1])
-    plt.figure(figsize=(5, 4))
-    plt.imshow(
-        img,
-        aspect="auto",
-        origin="lower",
-        cmap="turbo",
-        extent=[float(thetas[0]), float(thetas[-1]), y0, y1],
-        vmin=0.0,
-        vmax=vmax,
-    )
-    plt.xlabel("theta (deg)")
-    plt.ylabel("lambda (nm)")
-    plt.title(title)
-    plt.colorbar()
-    plt.tight_layout()
-    plt.savefig(path, dpi=180)
-    plt.close()
-
-
-def plot_structure(path: Path, x: np.ndarray, title: str):
-    img = x.squeeze()
+def plot_structure(path: Path, structure: np.ndarray, title: str) -> None:
+    x = structure[0, 0] if structure.ndim == 4 else structure.squeeze()
     plt.figure(figsize=(4, 4))
-    plt.imshow(img, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
+    plt.imshow(x, cmap="gray_r", interpolation="nearest", vmin=0.0, vmax=1.0)
     plt.title(title)
     plt.axis("off")
     plt.tight_layout()

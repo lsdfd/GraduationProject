@@ -12,15 +12,6 @@ def _groups(ch, max_groups=8):
     return 1
 
 
-def _coord_grid(height, width):
-    yy, xx = torch.meshgrid(
-        torch.linspace(-1.0, 1.0, steps=height),
-        torch.linspace(-1.0, 1.0, steps=width),
-        indexing="ij",
-    )
-    return torch.stack([xx, yy], dim=0)
-
-
 class SinusoidalTimeEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -86,100 +77,6 @@ class ResidualConvBlock(nn.Module):
         return F.silu(h + self.skip(x))
 
 
-class SpectrumCrossAttention(nn.Module):
-    def __init__(self, feat_ch, cond_ch, heads=4, head_dim=32):
-        super().__init__()
-        self.heads = heads
-        self.head_dim = head_dim
-        inner = heads * head_dim
-        self.norm = nn.GroupNorm(_groups(feat_ch), feat_ch)
-        self.to_q = nn.Conv2d(feat_ch, inner, 1)
-        self.to_k = nn.Linear(cond_ch, inner)
-        self.to_v = nn.Linear(cond_ch, inner)
-        self.to_out = nn.Conv2d(inner, feat_ch, 1)
-        self.scale = head_dim ** -0.5
-
-    def forward(self, x, cond_tokens):
-        b, _, h, w = x.shape
-        q = self.to_q(self.norm(x)).reshape(b, self.heads, self.head_dim, h * w).transpose(-1, -2)
-        k = self.to_k(cond_tokens).reshape(b, -1, self.heads, self.head_dim).permute(0, 2, 1, 3)
-        v = self.to_v(cond_tokens).reshape(b, -1, self.heads, self.head_dim).permute(0, 2, 1, 3)
-        attn = torch.softmax(torch.matmul(q, k.transpose(-1, -2)) * self.scale, dim=-1)
-        out = torch.matmul(attn, v).transpose(-1, -2).reshape(b, -1, h, w)
-        return x + self.to_out(out)
-
-
-class ConditionEncoderTokens(nn.Module):
-    """
-    onelambda 条件编码器：
-      - 输入只保留一个目标波长下的角度响应 [B, C, 17]
-      - 每个 theta 格点一个 token
-      - 角度位置编码 + Transformer 全局建模
-      - CLS token 输出全局条件向量，17 个 angle token 用于 cross-attention
-
-    输入: [B, C, 17]
-    输出:
-      emb    [B, emb_dim]        → 全局条件向量
-      tokens [B, 17, emb_dim]    → 逐角度条件 token
-    """
-
-    N_THETA = 17
-    N_TOKENS = 17
-
-    def __init__(self, in_ch, emb_dim=256, n_layers=3, n_heads=4):
-        super().__init__()
-        self.input_proj = nn.Linear(in_ch, emb_dim)
-        self.theta_pe = nn.Embedding(self.N_THETA, emb_dim)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=emb_dim,
-            nhead=n_heads,
-            dim_feedforward=emb_dim * 2,
-            batch_first=True,
-            dropout=0.1,
-            norm_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        self.cls = nn.Parameter(torch.zeros(1, 1, emb_dim))
-        self.register_buffer("theta_idx", torch.arange(self.N_THETA))
-
-    def encode(self, cond):
-        B, C, T = cond.shape
-        x = cond.transpose(1, 2)
-        x = self.input_proj(x)
-        x = x + self.theta_pe(self.theta_idx)[None]
-        cls = self.cls.expand(B, -1, -1)
-        x = self.transformer(torch.cat([cls, x], dim=1))
-        emb = x[:, 0]
-        tokens = x[:, 1:]
-        return emb, {"1x17": None}, tokens
-
-    def forward(self, cond):
-        emb, _, _ = self.encode(cond)
-        return emb
-
-
-class ResBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, time_dim, cond_dim):
-        super().__init__()
-        self.norm1 = nn.GroupNorm(_groups(in_ch), in_ch)
-        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.norm2 = nn.GroupNorm(_groups(out_ch), out_ch)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
-        self.emb_proj = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(time_dim + cond_dim, out_ch * 2),
-        )
-        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
-
-    def forward(self, x, t_emb, c_emb):
-        h = self.conv1(F.silu(self.norm1(x)))
-        scale, shift = self.emb_proj(torch.cat([t_emb, c_emb], dim=1)).chunk(2, dim=1)
-        h = self.norm2(h)
-        h = h * (1 + scale[:, :, None, None]) + shift[:, :, None, None]
-        h = self.conv2(F.silu(h))
-        return h + self.skip(x)
-
-
 class AttentionBlock(nn.Module):
     def __init__(self, ch):
         super().__init__()
@@ -216,184 +113,111 @@ class Upsample(nn.Module):
         return self.op(x)
 
 
-class UNetUpBlock(nn.Module):
-    def __init__(self, in_ch, skip_ch, out_ch):
-        super().__init__()
-        self.up = nn.ConvTranspose2d(in_ch, out_ch, 4, stride=2, padding=1)
-        self.fuse = nn.Sequential(
-            ResidualConvBlock(out_ch + skip_ch, out_ch),
-            ResidualConvBlock(out_ch, out_ch),
-        )
-
-    def forward(self, x, skip):
-        x = self.up(x)
-        if x.shape[-2:] != skip.shape[-2:]:
-            x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
-        return self.fuse(torch.cat([x, skip], dim=1))
-
-
-class SpectralAxisBlock(nn.Module):
+class ConditionEncoder1D(nn.Module):
     """
-    历史遗留模块。onelambda 主流程不再使用二维谱图 refine。
+    输入:  [B,17]
+    输出:  [B,cond_dim]
+
+    only-tpp 版本把条件视为一条一维角度响应曲线，不再做 token 化和 cross-attn。
     """
 
-    def __init__(self, ch):
+    def __init__(self, cond_dim=256):
         super().__init__()
-        self.norm = nn.GroupNorm(_groups(ch), ch)
-        self.local = nn.Conv2d(ch, ch, 3, padding=1, groups=ch)
-        self.theta = nn.Conv2d(ch, ch, (1, 5), padding=(0, 2), groups=ch)
-        self.lam = nn.Conv2d(ch, ch, (5, 1), padding=(2, 0), groups=ch)
-        self.mix = nn.Sequential(
-            nn.Conv2d(ch * 3, ch * 2, 1),
-            nn.GroupNorm(_groups(ch * 2), ch * 2),
+        hidden = cond_dim // 2
+        self.net = nn.Sequential(
+            nn.Conv1d(1, 32, 3, padding=1),
             nn.SiLU(),
-            nn.Conv2d(ch * 2, ch, 1),
+            nn.Conv1d(32, 64, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv1d(64, hidden, 3, padding=1),
+            nn.SiLU(),
         )
-        self.se = SqueezeExcite(ch)
+        self.out = nn.Sequential(
+            nn.Linear(hidden, cond_dim),
+            nn.SiLU(),
+            nn.Linear(cond_dim, cond_dim),
+        )
 
-    def forward(self, x):
-        h = self.norm(x)
-        h = torch.cat([self.local(h), self.theta(h), self.lam(h)], dim=1)
-        h = self.mix(h)
-        h = self.se(h)
-        return F.silu(x + h)
+    def forward(self, cond):
+        h = self.net(cond.unsqueeze(1))
+        h = h.mean(dim=-1)
+        return self.out(h)
+
 
 class ForwardSurrogate(nn.Module):
     """
     输入:  [B,1,64,64]，值域 0~1
-    输出:  [B,C,17]，归一化空间
-
-    onelambda 版本只预测目标波长下的角度响应。
-    仍保留“结构 memory token -> angle query token”的 decoder 形式，
-    但输出不再展开为 11x17 小图，而是直接预测 17 个 theta 点。
+    输出:  [B,17]，归一化 tpp 角度响应
     """
 
-    def __init__(self, out_ch):
+    def __init__(self, out_dim=17):
         super().__init__()
         base_ch = 32
-        model_dim = 256
-        self.out_ch = out_ch
-        self.stem = nn.Sequential(
-            ConvNormAct(1 + 2, base_ch, 3),
+        self.encoder = nn.Sequential(
+            ConvNormAct(1, base_ch, 3),
             ResidualConvBlock(base_ch, base_ch),
-        )
-        self.enc1 = nn.Sequential(
-            ResidualConvBlock(base_ch, base_ch * 2, stride=2),    # 32x32
+            ResidualConvBlock(base_ch, base_ch * 2, stride=2),
             ResidualConvBlock(base_ch * 2, base_ch * 2),
-        )
-        self.enc2 = nn.Sequential(
-            ResidualConvBlock(base_ch * 2, base_ch * 4, stride=2), # 16x16
+            ResidualConvBlock(base_ch * 2, base_ch * 4, stride=2),
             ResidualConvBlock(base_ch * 4, base_ch * 4),
-        )
-        self.enc3 = nn.Sequential(
-            ResidualConvBlock(base_ch * 4, base_ch * 8, stride=2), # 8x8
-            ResidualConvBlock(base_ch * 8, base_ch * 8),
-        )
-        self.enc4 = nn.Sequential(
-            ResidualConvBlock(base_ch * 8, base_ch * 8, stride=2), # 4x4
-            ResidualConvBlock(base_ch * 8, base_ch * 8),
-        )
-        self.bottleneck = nn.Sequential(
+            ResidualConvBlock(base_ch * 4, base_ch * 8, stride=2),
             ResidualConvBlock(base_ch * 8, base_ch * 8),
             AttentionBlock(base_ch * 8),
-            ResidualConvBlock(base_ch * 8, base_ch * 8),
         )
-
-        # ── 空间 token memory：从 8x8 / 4x4 特征图读出结构语义 ──
-        self.mem_proj8 = nn.Conv2d(base_ch * 8, model_dim, 1)
-        self.mem_proj4 = nn.Conv2d(base_ch * 8, model_dim, 1)
-        self.mem_coord_proj = nn.Linear(2, model_dim)
-        self.mem_level_embed = nn.Parameter(torch.zeros(2, 1, model_dim))
-
-        self.query_base = nn.Parameter(torch.zeros(1, 17, model_dim))
-        self.query_theta = nn.Embedding(17, model_dim)
-        self.register_buffer("query_theta_idx", torch.arange(17), persistent=False)
-
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=model_dim,
-            nhead=8,
-            dim_feedforward=model_dim * 4,
-            dropout=0.1,
-            batch_first=True,
-            norm_first=True,
-        )
-        self.spec_decoder = nn.TransformerDecoder(decoder_layer, num_layers=3)
-
-        self.token_head = nn.Sequential(
-            nn.Linear(model_dim, model_dim),
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(base_ch * 8, 256),
             nn.SiLU(),
-            nn.Linear(model_dim, base_ch * 2),
-        )
-        self.row_refine = nn.Sequential(
-            nn.Conv1d(base_ch * 2, base_ch * 2, 5, padding=2, groups=base_ch * 2),
-            nn.Conv1d(base_ch * 2, base_ch * 2, 1),
-            nn.GroupNorm(_groups(base_ch * 2), base_ch * 2),
+            nn.Dropout(0.1),
+            nn.Linear(256, 128),
             nn.SiLU(),
-            nn.Conv1d(base_ch * 2, base_ch, 3, padding=1),
-            nn.GroupNorm(_groups(base_ch), base_ch),
-            nn.SiLU(),
-            nn.Dropout(p=0.1),
+            nn.Linear(128, out_dim),
         )
-        self.row_out = nn.Sequential(
-            nn.Conv1d(base_ch, base_ch, 1),
-            nn.SiLU(),
-            nn.Conv1d(base_ch, out_ch, 1),
-        )
-        self.register_buffer("coord_64", _coord_grid(64, 64), persistent=False)
-        self.register_buffer("coord_8", _coord_grid(8, 8), persistent=False)
-        self.register_buffer("coord_4", _coord_grid(4, 4), persistent=False)
-
-    def _memory_tokens(self, feat, coord, proj, level_idx):
-        b = feat.shape[0]
-        mem = proj(feat).flatten(2).transpose(1, 2)
-        mem_coord = coord.to(feat.dtype).permute(1, 2, 0).reshape(-1, 2)
-        mem = mem + self.mem_coord_proj(mem_coord)[None] + self.mem_level_embed[level_idx]
-        return mem
-
-    def _query_tokens(self, batch_size, dtype, device):
-        query_pe = self.query_theta(self.query_theta_idx).to(device=device, dtype=dtype)
-        return self.query_base.to(device=device, dtype=dtype).expand(batch_size, -1, -1) + query_pe[None]
 
     def forward(self, x):
-        coord = self.coord_64[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
-        f64 = self.stem(torch.cat([x, coord], dim=1))      # 64x64
-        f32 = self.enc1(f64)                               # 32x32
-        f16 = self.enc2(f32)                               # 16x16
-        f8 = self.enc3(f16)                                # 8x8
-        f4 = self.enc4(f8)                                 # 4x4
-        fb = self.bottleneck(f4)                           # 4x4
+        return self.head(self.encoder(x))
 
-        mem8 = self._memory_tokens(f8, self.coord_8, self.mem_proj8, 0)
-        mem4 = self._memory_tokens(fb, self.coord_4, self.mem_proj4, 1)
-        memory = torch.cat([mem8, mem4], dim=1)
 
-        queries = self._query_tokens(x.shape[0], x.dtype, x.device)
-        row_tokens = self.spec_decoder(tgt=queries, memory=memory)
-        row_feat = self.token_head(row_tokens).transpose(1, 2)
-        row_feat = self.row_refine(row_feat)
-        return self.row_out(row_feat)
+class ResBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, time_dim, cond_dim):
+        super().__init__()
+        self.norm1 = nn.GroupNorm(_groups(in_ch), in_ch)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.norm2 = nn.GroupNorm(_groups(out_ch), out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.emb_proj = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(time_dim + cond_dim, out_ch * 2),
+        )
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x, t_emb, c_emb):
+        h = self.conv1(F.silu(self.norm1(x)))
+        scale, shift = self.emb_proj(torch.cat([t_emb, c_emb], dim=1)).chunk(2, dim=1)
+        h = self.norm2(h)
+        h = h * (1 + scale[:, :, None, None]) + shift[:, :, None, None]
+        h = self.conv2(F.silu(h))
+        return h + self.skip(x)
 
 
 class ConditionalUNet(nn.Module):
     """
     输入:
       x_t:   [B,1,64,64]
-      cond:  [B,C,17]
+      cond:  [B,17]
       t:     [B]
     输出:
       v_pred [B,1,64,64]
 
-    onelambda 版本只接收目标波长的一维角度响应条件。
+    only-tpp 版本只用一维条件全局嵌入，通过 AdaGN/FiLM 注入。
     """
 
-    def __init__(self, cond_in_ch, base_ch=64, time_dim=256, cond_dim=256):
+    def __init__(self, cond_dim=256, base_ch=64, time_dim=256):
         super().__init__()
+        self.cond_encoder = ConditionEncoder1D(cond_dim=cond_dim)
+        self.null_cond = nn.Parameter(torch.zeros(1, cond_dim))
 
-        self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim)
-        self.null_cond    = nn.Parameter(torch.zeros(1, cond_dim))
-        self.null_tokens  = nn.Parameter(torch.zeros(1, 17, cond_dim))
-
-        # ── 时间嵌入 ──
         self.time_mlp = nn.Sequential(
             SinusoidalTimeEmbedding(base_ch),
             nn.Linear(base_ch, time_dim),
@@ -401,92 +225,70 @@ class ConditionalUNet(nn.Module):
             nn.Linear(time_dim, time_dim),
         )
 
-        # ── 编码器（条件只通过 AdaGN 和 cross-attn 进入，无空间插值注入）──
         self.in_conv = ConvNormAct(1, base_ch, 3)
 
-        self.res1  = ResBlock(base_ch,     base_ch,     time_dim, cond_dim)   # 64×64
+        self.res1 = ResBlock(base_ch, base_ch, time_dim, cond_dim)
         self.down1 = Downsample(base_ch)
 
-        self.res2  = ResBlock(base_ch,     base_ch * 2, time_dim, cond_dim)   # 32×32
+        self.res2 = ResBlock(base_ch, base_ch * 2, time_dim, cond_dim)
         self.down2 = Downsample(base_ch * 2)
 
-        self.res3   = ResBlock(base_ch * 2, base_ch * 4, time_dim, cond_dim)  # 16×16
-        self.attn3  = AttentionBlock(base_ch * 4)
-        self.cross3 = SpectrumCrossAttention(base_ch * 4, cond_dim)           # ← cross-attn
-        self.down3  = Downsample(base_ch * 4)
+        self.res3 = ResBlock(base_ch * 2, base_ch * 4, time_dim, cond_dim)
+        self.attn3 = AttentionBlock(base_ch * 4)
+        self.down3 = Downsample(base_ch * 4)
 
-        self.res4   = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)  # 8×8
-        self.cross4 = SpectrumCrossAttention(base_ch * 4, cond_dim)           # ← cross-attn
+        self.res4 = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)
 
-        # ── Bottleneck 8×8 ──
-        self.mid1      = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)
-        self.mid_attn  = AttentionBlock(base_ch * 4)
-        self.mid_cross = SpectrumCrossAttention(base_ch * 4, cond_dim)        # ← cross-attn
-        self.mid2      = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)
+        self.mid1 = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)
+        self.mid_attn = AttentionBlock(base_ch * 4)
+        self.mid2 = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)
 
-        # ── 解码器 ──
-        self.up1       = Upsample(base_ch * 4)
-        self.up_res1   = ResBlock(base_ch * 8, base_ch * 4, time_dim, cond_dim)  # 16×16
-        self.up_cross1 = SpectrumCrossAttention(base_ch * 4, cond_dim)            # ← cross-attn
+        self.up1 = Upsample(base_ch * 4)
+        self.up_res1 = ResBlock(base_ch * 8, base_ch * 4, time_dim, cond_dim)
 
-        self.up2       = Upsample(base_ch * 4)
-        self.up_res2   = ResBlock(base_ch * 6, base_ch * 2, time_dim, cond_dim)  # 32×32
-        self.up_cross2 = SpectrumCrossAttention(base_ch * 2, cond_dim)            # ← cross-attn 新增
+        self.up2 = Upsample(base_ch * 4)
+        self.up_res2 = ResBlock(base_ch * 6, base_ch * 2, time_dim, cond_dim)
 
-        self.up3       = Upsample(base_ch * 2)
-        self.up_res3   = ResBlock(base_ch * 3, base_ch,     time_dim, cond_dim)  # 64×64
+        self.up3 = Upsample(base_ch * 2)
+        self.up_res3 = ResBlock(base_ch * 3, base_ch, time_dim, cond_dim)
 
         self.out_norm = nn.GroupNorm(_groups(base_ch), base_ch)
         self.out_conv = nn.Conv2d(base_ch, 1, 3, padding=1)
 
     def encode_cond(self, cond, batch_size, device, cond_drop_prob=0.0, force_uncond=False):
         if force_uncond or cond is None:
-            return (
-                self.null_cond.expand(batch_size, -1),
-                self.null_tokens.expand(batch_size, -1, -1),
-            )
+            return self.null_cond.expand(batch_size, -1)
 
-        cond_emb, _, cond_tokens = self.cond_encoder.encode(cond)
-
+        cond_emb = self.cond_encoder(cond)
         if self.training and cond_drop_prob > 0:
             drop_mask = torch.rand(batch_size, device=device) < cond_drop_prob
             if drop_mask.any():
-                cond_emb    = cond_emb.clone()
-                cond_tokens = cond_tokens.clone()
-                cond_emb[drop_mask]    = self.null_cond.expand(drop_mask.sum(), -1)
-                cond_tokens[drop_mask] = self.null_tokens.expand(drop_mask.sum(), -1, -1)
-
-        return cond_emb, cond_tokens
+                cond_emb = cond_emb.clone()
+                cond_emb[drop_mask] = self.null_cond.expand(drop_mask.sum(), -1)
+        return cond_emb
 
     def forward(self, x, t, cond=None, cond_drop_prob=0.0, force_uncond=False):
         b = x.shape[0]
-        t_emb            = self.time_mlp(t)
-        c_emb, c_tokens  = self.encode_cond(cond, b, x.device, cond_drop_prob, force_uncond)
+        t_emb = self.time_mlp(t)
+        c_emb = self.encode_cond(cond, b, x.device, cond_drop_prob, force_uncond)
 
-        # 编码器
         x0 = self.in_conv(x)
-        x1 = self.res1(x0, t_emb, c_emb)                                   # 64×64
-        x2 = self.res2(self.down1(x1), t_emb, c_emb)                       # 32×32
-        x3 = self.res3(self.down2(x2), t_emb, c_emb)                       # 16×16
-        x3 = self.cross3(self.attn3(x3), c_tokens)                         # ← cross-attn
-        x4 = self.res4(self.down3(x3), t_emb, c_emb)                       # 8×8
-        x4 = self.cross4(x4, c_tokens)                                     # ← cross-attn
+        x1 = self.res1(x0, t_emb, c_emb)
+        x2 = self.res2(self.down1(x1), t_emb, c_emb)
+        x3 = self.attn3(self.res3(self.down2(x2), t_emb, c_emb))
+        x4 = self.res4(self.down3(x3), t_emb, c_emb)
 
-        # Bottleneck
         h = self.mid1(x4, t_emb, c_emb)
-        h = self.mid_cross(self.mid_attn(h), c_tokens)                     # ← cross-attn
+        h = self.mid_attn(h)
         h = self.mid2(h, t_emb, c_emb)
 
-        # 解码器
         h = self.up1(h)
-        h = self.up_res1(torch.cat([h, x3], dim=1), t_emb, c_emb)         # 16×16
-        h = self.up_cross1(h, c_tokens)                                    # ← cross-attn
+        h = self.up_res1(torch.cat([h, x3], dim=1), t_emb, c_emb)
 
         h = self.up2(h)
-        h = self.up_res2(torch.cat([h, x2], dim=1), t_emb, c_emb)         # 32×32
-        h = self.up_cross2(h, c_tokens)                                    # ← cross-attn 新增
+        h = self.up_res2(torch.cat([h, x2], dim=1), t_emb, c_emb)
 
         h = self.up3(h)
-        h = self.up_res3(torch.cat([h, x1], dim=1), t_emb, c_emb)         # 64×64
+        h = self.up_res3(torch.cat([h, x1], dim=1), t_emb, c_emb)
 
         return self.out_conv(F.silu(self.out_norm(h)))

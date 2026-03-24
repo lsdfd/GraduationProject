@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Construct one-lambda targets and run diffusion inference."""
+"""Construct ideal one-dimensional second-order targets and run diffusion inference."""
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import sys
 from datetime import datetime
@@ -18,10 +17,8 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from model.diffusion import GaussianDiffusion  # noqa: E402
-from model.models import ConditionalUNet, ForwardSurrogate  # noqa: E402
-from model.train_utils import resolve_latest_run  # noqa: E402
 from infer.common import (  # noqa: E402
+    lambda_theta_grid,
     load_model,
     load_stats,
     normalize_with_stats,
@@ -30,9 +27,12 @@ from infer.common import (  # noqa: E402
     second_order_score_row,
     second_order_target,
 )
+from model.diffusion import GaussianDiffusion  # noqa: E402
+from model.models import ConditionalUNet, ForwardSurrogate  # noqa: E402
+from model.train_utils import resolve_latest_run  # noqa: E402
 
 TARGET_SWEEP = [
-    {"name": "template_top1"},
+    {"name": "ideal_second_order"},
 ]
 
 
@@ -93,35 +93,10 @@ def resolve_infer_artifacts(
     return stats, diffusion, forward
 
 
-def load_template_row(
-    cond_ch: int,
-    train_npz_path: Path,
-    topk_csv_path: Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
-    data = np.load(train_npz_path)
-    thetas = np.asarray(data["thetas"], dtype=np.float32)
-    target_lambda = float(data["target_lambda"]) if "target_lambda" in data.files else 1000.0
-    lambdas = np.asarray([target_lambda], dtype=np.float32)
-
-    sample_idx = None
-    with topk_csv_path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if float(row["lambda_nm"]) == float(target_lambda) and int(row["rank"]) == 1:
-                sample_idx = int(row["sample_idx"])
-                break
-    if sample_idx is None:
-        raise ValueError(f"rank-1 sample at {target_lambda} nm not found in {topk_csv_path}")
-
-    tpp_all = np.asarray(data["tpp_mag"], dtype=np.float32)
-    tss_all = np.asarray(data["tss_mag"], dtype=np.float32)
-    tpp_row = np.asarray(tpp_all[sample_idx], dtype=np.float32)
-    if cond_ch == 2:
-        tss_row = np.asarray(tss_all[sample_idx], dtype=np.float32)
-        target = np.stack([tpp_row, tss_row], axis=0)
-    else:
-        target = tpp_row[None]
-    return target.astype(np.float32), lambdas.astype(np.float32), thetas, sample_idx
+def ideal_target_row() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    lambdas, thetas = lambda_theta_grid()
+    target = second_order_target(thetas).astype(np.float32)
+    return target, lambdas, thetas
 
 
 def compute_second_order_metrics(
@@ -152,10 +127,9 @@ def compute_second_order_metrics(
 
 def plot_curve(path: Path, target_row: np.ndarray, pred_row: np.ndarray | None, thetas: np.ndarray, title: str) -> None:
     ideal = second_order_target(thetas)
-    target_norm = target_row / max(float(np.max(target_row)), 1e-8)
     plt.figure(figsize=(5, 3.6))
     plt.plot(thetas, ideal, "k--", lw=1.6, label="ideal ~ |sin(theta)|^2")
-    plt.plot(thetas, target_norm, lw=1.9, color="#d62728", label="target")
+    plt.plot(thetas, target_row, lw=1.9, color="#d62728", label="target")
     if pred_row is not None:
         pred_norm = pred_row / max(float(np.max(pred_row)), 1e-8)
         plt.plot(thetas, pred_norm, lw=1.9, color="#1f77b4", label="candidate")
@@ -207,7 +181,7 @@ def plot_ranked_samples(
     plt.close(fig)
 
 
-def _laplas_eval_worker(samples_np, target_raw, cond_ch, indices, device, target_lambda, rcwa_orders, queue):
+def _laplas_eval_worker(samples_np, target_raw, indices, device, target_lambda, rcwa_orders, queue):
     try:
         if str(device).startswith("cuda"):
             torch.cuda.set_device(device)
@@ -220,7 +194,6 @@ def _laplas_eval_worker(samples_np, target_raw, cond_ch, indices, device, target
             result = rcwa_eval_target_lambda(
                 sample_t,
                 target_raw,
-                cond_ch,
                 device,
                 target_lambda=target_lambda,
                 rcwa_orders=rcwa_orders,
@@ -235,7 +208,7 @@ def _laplas_eval_worker(samples_np, target_raw, cond_ch, indices, device, target
                 "ok": True,
                 "device": device,
                 "indices": np.asarray(indices, dtype=np.int64),
-                "rows": np.stack(rows, axis=0) if rows else np.empty((0, cond_ch, target_raw.shape[-1]), dtype=np.float32),
+                "rows": np.stack(rows, axis=0) if rows else np.empty((0, 1, target_raw.shape[-1]), dtype=np.float32),
                 "errs": np.asarray(errs, dtype=np.float32),
             }
         )
@@ -246,7 +219,6 @@ def _laplas_eval_worker(samples_np, target_raw, cond_ch, indices, device, target
 def evaluate_rcwa_candidates(
     samples: torch.Tensor,
     target_raw: np.ndarray,
-    cond_ch: int,
     devices: list[str],
     target_lambda: float,
     rcwa_orders: int,
@@ -254,14 +226,13 @@ def evaluate_rcwa_candidates(
     samples_np = samples.cpu().numpy().astype(np.float32)
     num_samples = samples_np.shape[0]
     if len(devices) == 1:
-        pred_raw = np.empty((num_samples, cond_ch, target_raw.shape[-1]), dtype=np.float32)
+        pred_raw = np.empty((num_samples, 1, target_raw.shape[-1]), dtype=np.float32)
         err = np.empty((num_samples,), dtype=np.float32)
         for idx in range(num_samples):
             print(f"[laplas-rcwa {devices[0]}] sample {idx + 1}/{num_samples}", flush=True)
             result = rcwa_eval_target_lambda(
                 samples[idx: idx + 1],
                 target_raw,
-                cond_ch,
                 devices[0],
                 target_lambda=target_lambda,
                 rcwa_orders=rcwa_orders,
@@ -280,12 +251,12 @@ def evaluate_rcwa_candidates(
     for dev, idxs in zip(active_devices, split_indices):
         proc = ctx.Process(
             target=_laplas_eval_worker,
-            args=(samples_np, target_raw, cond_ch, idxs, dev, target_lambda, rcwa_orders, queue),
+            args=(samples_np, target_raw, idxs, dev, target_lambda, rcwa_orders, queue),
         )
         proc.start()
         procs.append(proc)
 
-    pred_raw = np.empty((num_samples, cond_ch, target_raw.shape[-1]), dtype=np.float32)
+    pred_raw = np.empty((num_samples, 1, target_raw.shape[-1]), dtype=np.float32)
     err = np.empty((num_samples,), dtype=np.float32)
     received = 0
     while received < len(procs):
@@ -307,17 +278,13 @@ def evaluate_rcwa_candidates(
     return pred_raw, err
 
 
-def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, diffusion: torch.nn.Module, root_save_dir: Path, devices: list[str], surrogate: torch.nn.Module | None = None):
+def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, diffusion: torch.nn.Module, root_save_dir: Path, devices: list[str], surrogate: torch.nn.Module | None = None):
     save_dir = root_save_dir / case["name"]
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    target_raw, lambdas, thetas, template_idx = load_template_row(
-        cond_ch,
-        ROOT / "data" / "train_data.npz",
-        ROOT / "data" / "second_order_scores" / "tpp_mag_top5_per_lambda.csv",
-    )
+    target_raw, lambdas, thetas = ideal_target_row()
     target = normalize_with_stats(target_raw, mean, std, args.device)
-    cond_batch = target.repeat(args.num_samples, 1, 1)
+    cond_batch = target.repeat(args.num_samples, 1)
 
     if surrogate is not None:
         samples = diffusion.sample_guided(
@@ -335,7 +302,6 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
     pred_raw, err = evaluate_rcwa_candidates(
         samples,
         target_raw,
-        cond_ch,
         devices,
         target_lambda=1000.0,
         rcwa_orders=args.rcwa_orders,
@@ -349,7 +315,6 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
     info = {
         "sweep_case": case["name"],
         "target_lambda_nm": 1000.0,
-        "template_sample_idx": int(template_idx),
         "best_rcwa_mae_raw": float(err[best_idx]),
         "best_second_order_sample_idx": best_idx,
         "best_second_order_score": float(metrics[best_idx]["second_order_score"]),
@@ -367,20 +332,8 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
     np.save(save_dir / "topk_second_samples.npy", samples[topk_second_t].cpu().numpy())
     np.save(save_dir / "topk_second_pred_cond_raw.npy", pred_raw[topk_second])
 
-    plot_curve(
-        save_dir / "target_second_order_curve.png",
-        target_raw[0],
-        None,
-        thetas,
-        "Target 1000nm second-order curve",
-    )
-    plot_curve(
-        save_dir / "best_second_order_curve.png",
-        target_raw[0],
-        pred_raw[best_idx, 0],
-        thetas,
-        "Best RCWA row @ 1000nm",
-    )
+    plot_curve(save_dir / "target_second_order_curve.png", target_raw, None, thetas, "Ideal target @ 1000nm")
+    plot_curve(save_dir / "best_second_order_curve.png", target_raw, pred_raw[best_idx, 0], thetas, "Best RCWA row @ 1000nm")
     plot_structure(save_dir / "best_structure.png", best.cpu().numpy(), "Best binary structure")
     with (save_dir / "second_order_metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
@@ -400,11 +353,7 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
 
 @torch.no_grad()
 def _run_with_args(args) -> None:
-    stats_path, diffusion_path, forward_path = resolve_infer_artifacts(
-        args.stats,
-        args.diffusion_ckpt,
-        args.forward_ckpt,
-    )
+    stats_path, diffusion_path, forward_path = resolve_infer_artifacts(args.stats, args.diffusion_ckpt, args.forward_ckpt)
     args.stats = str(stats_path)
     args.diffusion_ckpt = str(diffusion_path)
     args.forward_ckpt = str(forward_path) if forward_path is not None else None
@@ -419,10 +368,9 @@ def _run_with_args(args) -> None:
     print(f"[laplas] forward_ckpt={args.forward_ckpt}")
 
     mean, std = load_stats(args.stats)
-    cond_ch = int(mean.shape[1])
     diffusion = load_model(
         args.diffusion_ckpt,
-        GaussianDiffusion(ConditionalUNet(cond_ch).to(args.device), timesteps=1000, image_size=64).to(args.device),
+        GaussianDiffusion(ConditionalUNet().to(args.device), timesteps=1000, image_size=64).to(args.device),
         "diffusion",
         args.device,
     )
@@ -433,22 +381,20 @@ def _run_with_args(args) -> None:
             raise FileNotFoundError("启用物理引导时需要 forward checkpoint；请先训练 forward 或显式传入 --forward_ckpt")
         forward_ckpt = Path(args.forward_ckpt)
         if forward_ckpt.exists():
-            surrogate = ForwardSurrogate(out_ch=cond_ch).to(args.device)
+            surrogate = ForwardSurrogate(out_dim=17).to(args.device)
             ckpt = torch.load(str(forward_ckpt), map_location=args.device)
             surrogate.load_state_dict(ckpt["model"])
             surrogate.eval()
             for param in surrogate.parameters():
                 param.requires_grad_(False)
             print(f"[laplas] 物理引导已启用: guidance_scale={args.guidance_scale}, guide_start_t={args.guide_start_t}, guide_every={args.guide_every}")
-        else:
-            print(f"[laplas] 警告: forward_ckpt 不存在 ({forward_ckpt})，禁用物理引导")
 
     for case in TARGET_SWEEP:
-        run_case(case, args, mean, std, cond_ch, diffusion, root_save_dir, devices, surrogate=surrogate)
+        run_case(case, args, mean, std, diffusion, root_save_dir, devices, surrogate=surrogate)
 
 
 def main():
-    p = argparse.ArgumentParser(description="Run diffusion inference with one-lambda second-order targets.")
+    p = argparse.ArgumentParser(description="Run diffusion inference with ideal one-dimensional second-order targets.")
     p.add_argument("--stats", default=None)
     p.add_argument("--diffusion_ckpt", default=None)
     p.add_argument("--forward_ckpt", default=None)

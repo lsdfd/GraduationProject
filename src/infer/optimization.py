@@ -28,8 +28,6 @@ except ModuleNotFoundError:
     sys.path.insert(0, str(ROOT / "src" / "dataset" / "rcwa"))
     from rcwa import torcwa_simulation  # type: ignore  # noqa: E402
 from infer.common import (  # noqa: E402
-    lambda_theta_grid,
-    plot_structure,
     second_order_score_row,
     second_order_score_row_torch,
     second_order_target,
@@ -69,11 +67,13 @@ def load_target_raw(path: str) -> np.ndarray:
     if hasattr(loaded, "files"):
         raise ValueError(f"target 路径必须是 laplas 导出的 target_cond_raw.npy，而不是 npz: {path}")
     x = loaded.astype(np.float32)
+    if x.ndim == 1:
+        if x.shape[-1] != 17:
+            raise ValueError(f"target_cond_raw 必须是 [17]，实际得到 {x.shape}")
+        return x[None]
     if x.ndim == 2:
         if x.shape[-1] != 17:
-            raise ValueError(f"target_cond_raw 必须是 [2,17]，实际得到 {x.shape}")
-        return x[None]
-    if x.ndim == 3 and x.shape[-1] == 17:
+            raise ValueError(f"target_cond_raw 必须是 [1,17] 或 [17]，实际得到 {x.shape}")
         return x
     raise ValueError(f"Unsupported target shape: {x.shape}")
 
@@ -156,11 +156,10 @@ def rcwa_physics_kwargs(theta: float) -> dict:
     }
 
 
-def rcwa_tpp_tss_row(x: torch.Tensor, device: str, rcwa_orders: int) -> tuple[torch.Tensor, torch.Tensor]:
+def rcwa_tpp_row(x: torch.Tensor, device: str, rcwa_orders: int) -> torch.Tensor:
     thetas = theta_grid()
     layer = x.squeeze(0).squeeze(0)
     tpp_vals = []
-    tss_vals = []
     for theta in thetas:
         out = torcwa_simulation(
             rcwa_physics_kwargs(float(theta)),
@@ -170,8 +169,7 @@ def rcwa_tpp_tss_row(x: torch.Tensor, device: str, rcwa_orders: int) -> tuple[to
             device=device,
         )
         tpp_vals.append(out["tpp_mag"].real.float())
-        tss_vals.append(out["tss_mag"].real.float())
-    return torch.stack(tpp_vals, dim=0), torch.stack(tss_vals, dim=0)
+    return torch.stack(tpp_vals, dim=0)
 
 
 def plot_candidate_summary(
@@ -228,13 +226,11 @@ def plot_candidate_summary(
 def evaluate_binary_candidate(x_cont: torch.Tensor, args) -> tuple[torch.Tensor, dict]:
     thetas = theta_grid()
     x_bin = finalize_binary(x_cont)
-    tpp_row, tss_row = rcwa_tpp_tss_row(x_bin, args.device, args.rcwa_orders)
+    tpp_row = rcwa_tpp_row(x_bin, args.device, args.rcwa_orders)
     tpp_np = tpp_row.detach().cpu().numpy()
-    tss_np = tss_row.detach().cpu().numpy()
     score = second_order_score_row(tpp_np, thetas)
     return x_bin, {
         "tpp_row": tpp_np,
-        "tss_row": tss_np,
         "score": float(score["score"]),
         "center": float(score["center"]),
         "shape": float(score["shape"]),
@@ -289,7 +285,7 @@ def optimize_one(init: torch.Tensor, args, candidate_idx: int) -> tuple[torch.Te
         rho_f = density_filter(rho, args.filter_radius)
         x = project_density(rho_f, beta=beta, eta=args.proj_eta)
 
-        tpp_row, tss_row = rcwa_tpp_tss_row(x, args.device, args.rcwa_orders)
+        tpp_row = rcwa_tpp_row(x, args.device, args.rcwa_orders)
         main_pack = second_order_score_row_torch(tpp_row, thetas)
         row_max = tpp_row.amax(dim=-1, keepdim=True).clamp_min(1e-8)
         y_norm = tpp_row / row_max
@@ -328,7 +324,6 @@ def optimize_one(init: torch.Tensor, args, candidate_idx: int) -> tuple[torch.Te
                 x.detach().clone(),
                 {
                     "tpp_row": tpp_row.detach().cpu().numpy(),
-                    "tss_row": tss_row.detach().cpu().numpy(),
                     "score": float(main_pack["score"].mean().item()),
                     "center": float(main_pack["center"].mean().item()),
                     "shape": float(main_pack["shape"].mean().item()),
@@ -379,9 +374,8 @@ def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, sa
 
     best_x_cont, best_bin, best_rcwa_cont, best_rcwa_bin, hist, opt_elapsed = optimize_one(init, args, idx)
     bin_tpp_np = best_rcwa_bin["tpp_row"]
-    bin_tss_np = best_rcwa_bin["tss_row"]
 
-    target_row = target_raw[0, 0]
+    target_row = target_raw[0]
     out = {
         "candidate_idx": idx,
         "target_lambda_nm": TARGET_LAMBDA_NM,
@@ -404,9 +398,7 @@ def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, sa
     np.save(cand_dir / "optimized_continuous.npy", best_x_cont.cpu().numpy())
     np.save(cand_dir / "optimized_binary.npy", best_bin.cpu().numpy())
     np.save(cand_dir / "optimized_rcwa_tpp_row.npy", bin_tpp_np)
-    np.save(cand_dir / "optimized_rcwa_tss_row.npy", bin_tss_np)
     np.save(cand_dir / "optimized_rcwa_continuous_tpp_row.npy", best_rcwa_cont["tpp_row"])
-    np.save(cand_dir / "optimized_rcwa_continuous_tss_row.npy", best_rcwa_cont["tss_row"])
     np.save(cand_dir / "target_cond_raw.npy", target_raw)
     plot_candidate_summary(
         cand_dir / "optimized_summary.png",

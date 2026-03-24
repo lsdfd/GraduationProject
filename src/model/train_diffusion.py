@@ -115,7 +115,7 @@ def main():
     print(f"[Diffusion] using forward_ckpt={cfg['forward_ckpt']}")
 
     dataset = RCWADataset(cfg["data_path"], target_lambda=cfg["target_lambda"])
-    cond_channels = dataset[0][1].shape[0]
+    cond_dim = int(dataset[0][1].shape[0])
 
     n_train = int(len(dataset) * cfg["train_ratio"])
     n_val = len(dataset) - n_train
@@ -124,7 +124,7 @@ def main():
     cfg["dataset_size"] = len(dataset)
     cfg["train_size"] = n_train
     cfg["val_size"] = n_val
-    cfg["cond_channels"] = cond_channels
+    cfg["cond_dim"] = cond_dim
     write_json(os.path.join(run_dir, "run_info.json"), cfg)
 
     train_loader = DataLoader(
@@ -136,14 +136,14 @@ def main():
         num_workers=cfg["num_workers"], pin_memory=use_cuda
     )
 
-    surrogate = ForwardSurrogate(out_ch=cond_channels).to(cfg["device"])
+    surrogate = ForwardSurrogate(out_dim=cond_dim).to(cfg["device"])
     forward_ckpt = torch.load(cfg["forward_ckpt"], map_location=cfg["device"], weights_only=False)
     load_state_dict_flexible(surrogate, forward_ckpt["model"])
     surrogate.eval()
     for p in surrogate.parameters():
         p.requires_grad = False
 
-    unet = ConditionalUNet(cond_in_ch=cond_channels).to(cfg["device"])
+    unet = ConditionalUNet().to(cfg["device"])
     diffusion = GaussianDiffusion(unet, timesteps=cfg["timesteps"], image_size=64).to(cfg["device"])
 
     opt = torch.optim.AdamW(unet.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -250,7 +250,7 @@ def main():
 
         ckpt = {
             "diffusion": diffusion.state_dict(),
-            "cond_channels": cond_channels,
+            "cond_dim": cond_dim,
             "epoch": epoch,
             "best_val": best_val,
             "cfg": cfg,

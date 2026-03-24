@@ -16,7 +16,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from infer.common import denormalize_with_stats, lambda_theta_grid, load_model, load_stats, second_order_score_row, second_order_target  # noqa: E402
+from infer.common import denormalize_with_stats, load_model, load_stats, second_order_score_row, second_order_target  # noqa: E402
 from model.models import ForwardSurrogate  # noqa: E402
 from model.train_utils import resolve_latest_run  # noqa: E402
 
@@ -41,10 +41,10 @@ def load_dataset(npz_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, fl
     data = np.load(npz_path)
     structures = np.asarray(data["structures"], dtype=np.float32)
     tpp = np.asarray(data["tpp_mag"], dtype=np.float32)
-    if tpp.ndim != 2:
-        raise ValueError(f"validate_surrogate_top 只支持 onelambda 数据集 [N,17]，实际得到 {tpp.shape}")
     thetas = np.asarray(data["thetas"], dtype=np.float32)
     target_lambda = float(data["target_lambda"])
+    if tpp.ndim != 2:
+        raise ValueError(f"validate_surrogate_top 只支持 only-tpp 数据集 [N,17]，实际得到 {tpp.shape}")
     return structures, tpp, thetas, target_lambda
 
 
@@ -66,20 +66,20 @@ def plot_sample_compare(
     pred_row_n = pred_row / max(float(np.max(pred_row)), 1e-8)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), gridspec_kw={"width_ratios": [0.8, 1.2]}, constrained_layout=True)
-    a0, a3 = axes
+    a0, a1 = axes
     a0.imshow(structure, cmap="gray_r", interpolation="nearest", vmin=0.0, vmax=1.0)
     a0.set_title(f"id={sample_idx}")
     a0.axis("off")
 
-    a3.plot(thetas, target, "k--", lw=1.8, label="ideal ~ |sin(theta)|^2")
-    a3.plot(thetas, real_row_n, lw=2.0, color="#1f77b4", label="real (normalized)")
-    a3.plot(thetas, pred_row_n, lw=2.0, color="#d62728", label="surrogate (normalized)")
-    a3.set_ylim(-0.05, 1.05)
-    a3.set_xlabel("theta (deg)")
-    a3.set_ylabel("normalized |tpp|")
-    a3.grid(alpha=0.25)
-    a3.legend(fontsize=8, loc="lower right")
-    a3.set_title(
+    a1.plot(thetas, target, "k--", lw=1.8, label="ideal ~ |sin(theta)|^2")
+    a1.plot(thetas, real_row_n, lw=2.0, color="#1f77b4", label="real (normalized)")
+    a1.plot(thetas, pred_row_n, lw=2.0, color="#d62728", label="surrogate (normalized)")
+    a1.set_ylim(-0.05, 1.05)
+    a1.set_xlabel("theta (deg)")
+    a1.set_ylabel("normalized |tpp|")
+    a1.grid(alpha=0.25)
+    a1.legend(fontsize=8, loc="lower right")
+    a1.set_title(
         f"{target_lambda:.0f}nm row\nreal center={real_score['center']:.3f} pred center={pred_score['center']:.3f}",
         fontsize=10,
     )
@@ -115,18 +115,16 @@ def main() -> None:
     structures, tpp, thetas, target_lambda = load_dataset(Path(args.train_npz))
     sample_ids = load_top_sample_ids(Path(args.topk_csv), target_lambda, args.topk)
     mean, std = load_stats(args.stats)
-    cond_ch = int(mean.shape[1])
-    model = load_model(args.forward_ckpt, ForwardSurrogate(cond_ch).to(args.device), "model", args.device)
+    model = load_model(args.forward_ckpt, ForwardSurrogate(out_dim=17).to(args.device), "model", args.device)
 
     x = torch.from_numpy(structures[sample_ids, None]).to(args.device)
     pred = model(x)
-    pred_raw = denormalize_with_stats(pred.cpu().numpy(), mean, std)
-    pred_tpp = pred_raw[:, 0].astype(np.float32)
+    pred_raw = denormalize_with_stats(pred.cpu().numpy(), mean, std).astype(np.float32)
 
     summary: list[dict] = []
     for local_idx, sample_idx in enumerate(sample_ids):
         real_row = tpp[sample_idx]
-        pred_row = pred_tpp[local_idx]
+        pred_row = pred_raw[local_idx]
         real_score = second_order_score_row(real_row, thetas)
         pred_score = second_order_score_row(pred_row, thetas)
         row_mae = float(np.mean(np.abs(pred_row - real_row)))
