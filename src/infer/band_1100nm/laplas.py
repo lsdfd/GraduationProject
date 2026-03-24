@@ -26,9 +26,9 @@ _DEFAULT_SAVE_DIR = str(_ROOT / "samples" / "laplas_1100nm")
 
 def main():
     p = argparse.ArgumentParser(description="Run diffusion inference targeting 1100 nm second-order response.")
-    p.add_argument("--stats",          default=str(_ROOT / "checkpoints" / "cond_stats.npz"))
-    p.add_argument("--diffusion_ckpt", default=str(_ROOT / "checkpoints" / "diffusion_best.pt"))
-    p.add_argument("--forward_ckpt",   default=str(_ROOT / "checkpoints" / "forward_best.pt"))
+    p.add_argument("--stats",          default=None)
+    p.add_argument("--diffusion_ckpt", default=None)
+    p.add_argument("--forward_ckpt",   default=None)
     p.add_argument("--num_samples",    type=int,   default=32)
     p.add_argument("--cfg_scale",      type=float, default=3.0)
     p.add_argument("--save_dir",       default=_DEFAULT_SAVE_DIR)

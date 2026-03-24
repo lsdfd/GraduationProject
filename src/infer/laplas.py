@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from model.diffusion import GaussianDiffusion  # noqa: E402
 from model.models import ConditionalUNet, ForwardSurrogate  # noqa: E402
+from model.train_utils import resolve_latest_run  # noqa: E402
 from infer.common import (  # noqa: E402
     lambda_theta_grid,
     load_model,
@@ -55,6 +56,25 @@ def parse_devices(devices_arg: str | None, device_arg: str | None) -> list[str]:
 def resolve_from_root(path_like: str | Path) -> Path:
     path = Path(path_like)
     return path if path.is_absolute() else ROOT / path
+
+
+def resolve_infer_artifacts(
+    stats_path: str | Path | None,
+    diffusion_ckpt: str | Path | None,
+    forward_ckpt: str | Path | None,
+) -> tuple[Path, Path, Path]:
+    ckpt_root = ROOT / "checkpoints"
+    latest_forward = resolve_latest_run(ckpt_root, "forward")
+    latest_diffusion = resolve_latest_run(ckpt_root, "diffusion")
+
+    default_stats = latest_forward / "cond_stats.npz" if latest_forward is not None else ckpt_root / "cond_stats.npz"
+    default_forward = latest_forward / "forward_best.pt" if latest_forward is not None else ckpt_root / "forward_best.pt"
+    default_diffusion = latest_diffusion / "diffusion_best.pt" if latest_diffusion is not None else ckpt_root / "diffusion_best.pt"
+
+    stats = resolve_from_root(stats_path) if stats_path is not None else default_stats
+    diffusion = resolve_from_root(diffusion_ckpt) if diffusion_ckpt is not None else default_diffusion
+    forward = resolve_from_root(forward_ckpt) if forward_ckpt is not None else default_forward
+    return stats, diffusion, forward
 
 
 def smooth_lambda_axis(spec_map: np.ndarray) -> np.ndarray:
@@ -464,15 +484,23 @@ def _run_with_args(args) -> None:
     Called both by main() (direct execution) and by band-specific wrapper
     scripts (e.g. band_900nm/laplas.py) that only override default values.
     """
-    args.stats = str(resolve_from_root(args.stats))
-    args.diffusion_ckpt = str(resolve_from_root(args.diffusion_ckpt))
-    args.forward_ckpt = str(resolve_from_root(args.forward_ckpt))
+    stats_path, diffusion_path, forward_path = resolve_infer_artifacts(
+        args.stats,
+        args.diffusion_ckpt,
+        args.forward_ckpt,
+    )
+    args.stats = str(stats_path)
+    args.diffusion_ckpt = str(diffusion_path)
+    args.forward_ckpt = str(forward_path)
     args.save_dir = str(resolve_from_root(args.save_dir))
     devices = parse_devices(args.devices, args.device)
     args.device = devices[0]
 
     root_save_dir = Path(args.save_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
     root_save_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[laplas] stats={args.stats}")
+    print(f"[laplas] diffusion_ckpt={args.diffusion_ckpt}")
+    print(f"[laplas] forward_ckpt={args.forward_ckpt}")
 
     mean, std = load_stats(args.stats)
     cond_ch = int(mean.shape[1])
@@ -504,9 +532,9 @@ def _run_with_args(args) -> None:
 
 def main():
     p = argparse.ArgumentParser(description="Run diffusion inference with swept second-order targets at 1000nm.")
-    p.add_argument("--stats", default=str(ROOT / "checkpoints" / "cond_stats.npz"))
-    p.add_argument("--diffusion_ckpt", default=str(ROOT / "checkpoints" / "diffusion_best.pt"))
-    p.add_argument("--forward_ckpt", default=str(ROOT / "checkpoints" / "forward_best.pt"))
+    p.add_argument("--stats", default=None)
+    p.add_argument("--diffusion_ckpt", default=None)
+    p.add_argument("--forward_ckpt", default=None)
     p.add_argument("--num_samples", type=int, default=32)
     p.add_argument("--cfg_scale", type=float, default=3.0)
     p.add_argument("--save_dir", default=str(ROOT / "samples" / "laplas"))
