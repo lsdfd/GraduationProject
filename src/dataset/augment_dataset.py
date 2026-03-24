@@ -95,11 +95,11 @@ def score_with_surrogate(
                 .unsqueeze(1)   # [B, 1, 64, 64]，值域 0/1
                 .to(device)
             )
-            pred_norm = surrogate(batch).cpu().numpy()          # [B, 2, 11, 17]
+            pred_norm = surrogate(batch).cpu().numpy()          # [B, 2, 11, 13]
             pred_raw = pred_norm * std + mean                   # 反归一化
 
             for i in range(end - start):
-                tpp_row = pred_raw[i, 0, lam_idx]              # [17] tpp @ target_lambda
+                tpp_row = pred_raw[i, 0, lam_idx]              # [13] tpp @ target_lambda
                 s = second_order_score_row(tpp_row, thetas)
                 scores[start + i] = float(s["score"])
 

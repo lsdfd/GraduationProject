@@ -61,8 +61,8 @@ def main():
     cond_channels = dataset[0][1].shape[0]
 
     # 用于反归一化，计算物理单位下的误差
-    cond_mean_t = torch.from_numpy(dataset.cond_mean).float()  # [1,2,11,17]
-    cond_std_t  = torch.from_numpy(dataset.cond_std).float()   # [1,2,11,17]
+    cond_mean_t = torch.from_numpy(dataset.cond_mean).float()  # [1,2,11,13]
+    cond_std_t  = torch.from_numpy(dataset.cond_std).float()   # [1,2,11,13]
     mean_dev = cond_mean_t.to(cfg["device"])
     std_dev  = cond_std_t.to(cfg["device"])
 

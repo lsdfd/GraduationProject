@@ -82,7 +82,7 @@ def make_output_paths(label: str, lambda_nm: float) -> tuple[Path, Path, Path]:
 # ===========================================================================
 
 def load_phi0_from_training(sample_idx: int, lambda_nm: float):
-    """返回 t_ss_phi0, t_pp_phi0，shape [17]，对应 THETAS。"""
+    """返回 t_ss_phi0, t_pp_phi0，shape [len(THETAS)]，对应 THETAS。"""
     data = np.load(DATA_PATH)
     lam_idx = int(np.argmin(np.abs(LAMBDAS - lambda_nm)))
     tpp = data["tpp_mag"][sample_idx, lam_idx, :].astype(np.float64)
@@ -94,7 +94,7 @@ def load_phi0_from_training(sample_idx: int, lambda_nm: float):
 def load_phi0_from_infer(infer_dir: Path, lambda_nm: float):
     """从 laplas 推理结果加载最优样本的 phi=0 数据。"""
     lam_idx = int(np.argmin(np.abs(LAMBDAS - lambda_nm)))
-    pred = np.load(infer_dir / "all_pred_cond_raw.npy")   # [N, 2, 11, 17]
+    pred = np.load(infer_dir / "all_pred_cond_raw.npy")   # [N, 2, 11, 13]
     errors = np.load(infer_dir / "all_errors.npy")
     best = int(np.argmin(errors))
     tss = pred[best, 1, lam_idx, :].astype(np.float64)
@@ -109,7 +109,7 @@ def load_phi0_from_infer(infer_dir: Path, lambda_nm: float):
 
 def scan_phi45(structure: np.ndarray, lambda_nm: float, device: str = "cpu"):
     """
-    对给定结构在 phi=45° 扫描 17 个 θ，返回 t_ss_phi45, t_pp_phi45 [17]。
+    对给定结构在 phi=45° 扫描 len(THETAS) 个 θ，返回 t_ss_phi45, t_pp_phi45。
     需要 torcwa 可用。
     """
     try:
@@ -152,7 +152,7 @@ def scan_phi45(structure: np.ndarray, lambda_nm: float, device: str = "cpu"):
 
 def _get_1d_interp(t_1d: np.ndarray):
     """
-    从 [17] 的角度扫描数据构建 t(θ) 插值器。
+    从 [len(THETAS)] 的角度扫描数据构建 t(θ) 插值器。
     输入: θ ∈ [-60,+60]，输出: 对任意 θ 插值（超出范围置0）。
     """
     from scipy.interpolate import interp1d
@@ -163,8 +163,8 @@ def _get_1d_interp(t_1d: np.ndarray):
 
 
 def build_2d_kspace(
-    t_phi0: np.ndarray,     # [17]，phi=0° 传递函数
-    t_phi45: np.ndarray,    # [17]，phi=45° 传递函数（若为 None 则用 phi=0 近似）
+    t_phi0: np.ndarray,     # [len(THETAS)]，phi=0° 传递函数
+    t_phi45: np.ndarray,    # [len(THETAS)]，phi=45° 传递函数（若为 None 则用 phi=0 近似）
     n_grid: int = N_GRID,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """

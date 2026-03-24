@@ -13,7 +13,7 @@ class RCWADataset(Dataset):
         # Strict new format: two magnitude channels [tpp_mag, tss_mag].
         if "tpp_mag" not in data.files or "tss_mag" not in data.files:
             raise ValueError("Need tpp_mag and tss_mag in npz.")
-        cond = np.stack([data["tpp_mag"], data["tss_mag"]], axis=1).astype(np.float32)  # [N,2,11,17]
+        cond = np.stack([data["tpp_mag"], data["tss_mag"]], axis=1).astype(np.float32)  # [N,2,11,13]
 
         # RCWA 失败点会写成 NaN，这里直接丢掉无效样本，避免污染标准化统计。
         valid_mask = np.isfinite(cond).all(axis=(1, 2, 3))
@@ -27,8 +27,8 @@ class RCWADataset(Dataset):
         if cond_mean is None or cond_std is None:
             # 按 (channel, lambda, theta) 每个位置独立归一化，而不是全局归一化
             # 这样不同波长/角度的分布差异不会被平均掉
-            cond_mean = cond.mean(axis=0, keepdims=True)  # [1, 2, 11, 17]
-            cond_std = cond.std(axis=0, keepdims=True) + 1e-6  # [1, 2, 11, 17]
+            cond_mean = cond.mean(axis=0, keepdims=True)  # [1, 2, 11, 13]
+            cond_std = cond.std(axis=0, keepdims=True) + 1e-6  # [1, 2, 11, 13]
 
         self.structures = structures
         self.cond_mean = cond_mean.astype(np.float32)
@@ -40,7 +40,7 @@ class RCWADataset(Dataset):
 
     def __getitem__(self, idx):
         x = self.structures[idx]  # [64,64], 0/1
-        c = self.cond[idx]        # [C,11,17]
+        c = self.cond[idx]        # [C,11,13]
 
         x = torch.from_numpy(x).unsqueeze(0).float()  # [1,64,64]
         c = torch.from_numpy(c).float()

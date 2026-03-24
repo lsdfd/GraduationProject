@@ -95,12 +95,12 @@ def build_physics_target(
 ) -> np.ndarray:
     """
     物理约束目标构建：
-    - 保留模板在每个波长 ±40° 的边界透过率值
+    - 保留模板在每个波长最大角度处的边界透过率值
     - 将角度分布修正为理想 sin²θ 形状（用边界值缩放）
     - 以高斯权重从 target_lambda 向两侧衰减，远处保持原始谱
     - tss 直接复制修正后的 tpp（C4 对称性 tpp≈tss）
     """
-    ideal = second_order_target(thetas).astype(np.float64)  # sin²θ / sin²(40°)
+    ideal = second_order_target(thetas).astype(np.float64)
     lam_dist = lambdas.astype(np.float64) - float(target_lambda)
     gauss_w = np.exp(-0.5 * (lam_dist / max(float(band_sigma_nm), 1e-6)) ** 2)
 

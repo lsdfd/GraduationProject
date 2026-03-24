@@ -2,8 +2,8 @@
 CVAE (Conditional Variational Autoencoder) for metasurface inverse design.
 
 Architecture:
-  Encoder: structure [B,1,64,64] + cond [B,2,11,17] → μ, logσ² [B, latent_dim]
-  Decoder: z [B, latent_dim] + cond [B,2,11,17]    → structure [B,1,64,64]
+  Encoder: structure [B,1,64,64] + cond [B,2,11,13] → μ, logσ² [B, latent_dim]
+  Decoder: z [B, latent_dim] + cond [B,2,11,13]    → structure [B,1,64,64]
 
 Training loss:
   L = Recon (BCE) + β * KL(q(z|x,c) || N(0,I))
@@ -23,7 +23,7 @@ THETA_COUNT = 13
 # ── 条件编码器（光谱 → 嵌入向量） ────────────────────────────────────
 
 class CondEmbed(nn.Module):
-    """[B,2,11,17] → [B, cond_dim]"""
+    """[B,2,11,13] → [B, cond_dim]"""
     def __init__(self, in_ch: int = 2, cond_dim: int = 256):
         super().__init__()
         self.net = nn.Sequential(
@@ -128,7 +128,7 @@ class CVAE(nn.Module):
     def sample(self, cond, n_samples: int = 16):
         """
         推理：从先验 N(0,I) 采样，解码出 n_samples 个候选结构。
-        cond: [1, 2, 11, 17] 单个目标条件
+        cond: [1, 2, 11, 13] 单个目标条件
         返回: [n_samples, 1, 64, 64] 二值结构（0/1）
         """
         device = next(self.parameters()).device

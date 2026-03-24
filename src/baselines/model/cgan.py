@@ -2,8 +2,8 @@
 cGAN (Conditional GAN) for metasurface inverse design.
 
 Architecture:
-  Generator:     z [B,128] + cond [B,2,11,17] → structure [B,1,64,64]
-  Discriminator: structure [B,1,64,64] + cond [B,2,11,17] → real/fake prob [B,1]
+  Generator:     z [B,128] + cond [B,2,11,13] → structure [B,1,64,64]
+  Discriminator: structure [B,1,64,64] + cond [B,2,11,13] → real/fake prob [B,1]
 
 Training:
   Loss_D = BCE(D(x_real, c), 1) + BCE(D(G(z,c), c), 0)
@@ -24,7 +24,7 @@ THETA_COUNT = 13
 # ── 条件嵌入（生成器和判别器共用） ────────────────────────────────────
 
 class CondEmbed(nn.Module):
-    """[B,2,11,17] → [B, cond_dim]"""
+    """[B,2,11,13] → [B, cond_dim]"""
     def __init__(self, in_ch: int = 2, cond_dim: int = 256):
         super().__init__()
         self.net = nn.Sequential(
@@ -81,7 +81,7 @@ class Generator(nn.Module):
     def sample(self, cond, n_samples: int = 16):
         """
         推理：从 N(0,I) 采样 n_samples 个候选结构。
-        cond: [1, 2, 11, 17]
+        cond: [1, 2, 11, 13]
         返回: [n_samples, 1, 64, 64] 二值结构
         """
         device = next(self.parameters()).device

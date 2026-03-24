@@ -99,8 +99,8 @@ def load_surrogate(forward_ckpt: str, stats_path: str, device: str):
 def eval_one_method(
     method_name: str,
     method_info: dict,
-    cond_norm: torch.Tensor,   # [1,2,11,17] 归一化目标条件
-    cond_raw: np.ndarray,      # [2,11,17]   物理空间目标条件（MAE 用）
+    cond_norm: torch.Tensor,   # [1,2,11,13] 归一化目标条件
+    cond_raw: np.ndarray,      # [2,11,13]   物理空间目标条件（MAE 用）
     n_samples: int,
     device: str,
     lambdas: np.ndarray,
@@ -119,9 +119,9 @@ def eval_one_method(
     # ── 代理批量打分 ───────────────────────────────────────────────────
     x_batch = torch.from_numpy(structs[:, None]).float().to(device)  # [N,1,64,64]
     with torch.no_grad():
-        pred_norm = surrogate(x_batch)   # [N, 2, 11, 17]
+        pred_norm = surrogate(x_batch)   # [N, 2, 11, 13]
 
-    pred_raw = pred_norm.cpu().numpy() * cond_std + cond_mean   # [N, 2, 11, 17]
+    pred_raw = pred_norm.cpu().numpy() * cond_std + cond_mean   # [N, 2, 11, 13]
 
     scores         = []
     best_score_val = -1.0
@@ -176,7 +176,7 @@ def main():
         band_sigma_nm=args.band_sigma_nm,
         train_npz_path=Path(args.data_path),
         topk_csv_path=Path(args.topk_csv),
-    )   # [2, 11, 17] 物理空间目标
+    )   # [2, 11, 13] 物理空间目标
 
     print(f"[run_eval] target: lambda={args.target_lambda}nm  "
           f"rank={args.target_rank}  dataset_idx={sample_idx}")
@@ -195,7 +195,7 @@ def main():
 
     # ── 归一化目标条件 ────────────────────────────────────────────────
     cond_norm_np = (cond_raw - cond_mean.squeeze(0)) / cond_std.squeeze(0)
-    cond_norm    = torch.from_numpy(cond_norm_np).unsqueeze(0).float()  # [1,2,11,17]
+    cond_norm    = torch.from_numpy(cond_norm_np).unsqueeze(0).float()  # [1,2,11,13]
 
     # ── 为各方法注入额外参数 ──────────────────────────────────────────
     if "topo_opt" in all_models:

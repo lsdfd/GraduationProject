@@ -133,7 +133,7 @@ def load_from_training(sample_idx: int,
                        lam_idx: int) -> tuple[np.ndarray, np.ndarray]:
     """返回 (t_ss_1d, t_pp_1d)，shape [len(THETAS)]。"""
     data    = np.load(DATA_PATH)
-    tpp_all = data["tpp_mag"]   # [N, 11, 17]
+    tpp_all = data["tpp_mag"]   # [N, 11, 13]
     tss_all = data["tss_mag"]
     n = tpp_all.shape[0]
     if not (0 <= sample_idx < n):
@@ -152,7 +152,7 @@ def load_from_infer(infer_dir: Path,
         d = PROJECT_ROOT / d
     if not (d / "all_pred_cond_raw.npy").exists():
         raise FileNotFoundError(f"找不到 all_pred_cond_raw.npy in {d}")
-    pred   = np.load(d / "all_pred_cond_raw.npy")   # [N, 2, 11, 17]
+    pred   = np.load(d / "all_pred_cond_raw.npy")   # [N, 2, 11, 13]
     errors = np.load(d / "all_errors.npy")
     best   = int(np.argmin(errors))
     print(f"[infer] best={best}, error={errors[best]:.4f}")

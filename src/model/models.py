@@ -115,19 +115,19 @@ class SpectrumCrossAttention(nn.Module):
 
 class ConditionEncoderTokens(nn.Module):
     """
-    把 [B, C, 11, 17] 光谱条件展开成 187 个 token，用 Transformer 全局建模。
+    把 [B, C, 11, 13] 光谱条件展开成 143 个 token，用 Transformer 全局建模。
 
     设计原则：
-      - 不做空间下采样，11×17 所有格点全部保留
-      - 波长轴 (11) 和角度轴 (17) 分别使用独立可学习位置编码
+      - 不做空间下采样，11×13 所有格点全部保留
+      - 波长轴 (11) 和角度轴 (13) 分别使用独立可学习位置编码
       - CLS token 聚合全局语义 → cond_emb（用于 AdaGN scale/shift）
-      - 其余 187 个位置 token → cross-attention（精细频谱查询）
+      - 其余 143 个位置 token → cross-attention（精细频谱查询）
       - Pre-LN Transformer 训练更稳定
 
-    输入: [B, C, 11, 17]
+    输入: [B, C, 11, 13]
     输出:
       emb    [B, emb_dim]        → 全局条件向量
-      tokens [B, 187, emb_dim]   → 逐格点条件 token
+      tokens [B, 143, emb_dim]   → 逐格点条件 token
     """
 
     N_LAMBDA = LAMBDA_COUNT
@@ -158,35 +158,35 @@ class ConditionEncoderTokens(nn.Module):
         self.cls = nn.Parameter(torch.zeros(1, 1, emb_dim))
 
         # 预存位置索引（固定，不随输入变化）
-        li = torch.arange(self.N_LAMBDA).repeat_interleave(self.N_THETA)  # [187]
-        ti = torch.arange(self.N_THETA).repeat(self.N_LAMBDA)             # [187]
+        li = torch.arange(self.N_LAMBDA).repeat_interleave(self.N_THETA)  # [143]
+        ti = torch.arange(self.N_THETA).repeat(self.N_LAMBDA)             # [143]
         self.register_buffer("lambda_idx", li)
         self.register_buffer("theta_idx",  ti)
 
     def encode(self, cond):
-        B, C, L, T = cond.shape          # C=in_ch, L=11波长, T=17角度
+        B, C, L, T = cond.shape          # C=in_ch, L=11波长, T=13角度
 
-        # 展开成 token 序列 [B, 187, C] → [B, 187, emb_dim]
+        # 展开成 token 序列 [B, 143, C] → [B, 143, emb_dim]
         x = cond.permute(0, 2, 3, 1).reshape(B, L * T, C)
         x = self.input_proj(x)
 
-        # 加物理位置编码：知道哪个 token 是 1000nm、哪个是 ±40°
+        # 加物理位置编码：知道哪个 token 是 1000nm、哪个是 ±60°
         pe = torch.cat(
-            [self.lambda_pe(self.lambda_idx),   # [187, emb_dim//2]
-             self.theta_pe(self.theta_idx)],    # [187, emb_dim//2]
+            [self.lambda_pe(self.lambda_idx),   # [143, emb_dim//2]
+             self.theta_pe(self.theta_idx)],    # [143, emb_dim//2]
             dim=-1,
-        )                                        # [187, emb_dim]
+        )                                        # [143, emb_dim]
         x = x + pe                              # broadcast over batch
 
         # 拼 CLS token，Transformer 编码
         cls = self.cls.expand(B, -1, -1)
-        x = self.transformer(torch.cat([cls, x], dim=1))   # [B, 188, emb_dim]
+        x = self.transformer(torch.cat([cls, x], dim=1))   # [B, 144, emb_dim]
 
         emb    = x[:, 0]    # [B, emb_dim]   — 全局频谱语义
-        tokens = x[:, 1:]   # [B, 187, emb_dim] — 逐格点 token
+        tokens = x[:, 1:]   # [B, 143, emb_dim] — 逐格点 token
 
         # 兼容旧接口：cond_feats 全为 None（不再做空间插值注入）
-        return emb, {"11x17": None, "6x9": None, "3x5": None}, tokens
+        return emb, {"11x13": None, "6x7": None, "3x4": None}, tokens
 
     def forward(self, cond):
         emb, _, _ = self.encode(cond)
@@ -271,7 +271,7 @@ class SpectralAxisBlock(nn.Module):
     """
     在小尺寸谱图上分别沿 theta / lambda 轴建模。
 
-    11x17 的输出很小，不适合重型 decoder；这里用深度可分离卷积
+    11x13 的输出很小，不适合重型 decoder；这里用深度可分离卷积
     显式建模二维局部关系，以及沿两条物理轴的相关性。
     """
 
@@ -299,13 +299,13 @@ class SpectralAxisBlock(nn.Module):
 class ForwardSurrogate(nn.Module):
     """
     输入:  [B,1,64,64]，值域 0~1
-    输出:  [B,C,11,17]，归一化空间
+    输出:  [B,C,11,13]，归一化空间
 
     一个更重型的前向代理：
       - CNN encoder 提取 16x16 / 8x8 / 4x4 空间特征
       - 8x8 / 4x4 特征展开为空间 token，作为 memory
-      - 11x17 个光谱 query token 通过 Transformer decoder 读取空间 token
-      - 最后再在 11x17 网格上做轻量谱图细化
+      - 11x13 个光谱 query token 通过 Transformer decoder 读取空间 token
+      - 最后再在 11x13 网格上做轻量谱图细化
 
     目的：显式建模“输出谱图格点如何从结构空间特征中读取信息”，
     用更强的 token 交互测试复杂模型上限。
@@ -434,13 +434,13 @@ class ConditionalUNet(nn.Module):
     """
     输入:
       x_t:   [B,1,64,64]
-      cond:  [B,C,11,17]
+      cond:  [B,C,11,13]
       t:     [B]
     输出:
       v_pred [B,1,64,64]
 
     条件注入改进（v3）：
-      - ConditionEncoderTokens: 把光谱展成 187 个 token，保留所有 (λ,θ) 信息
+      - ConditionEncoderTokens: 把光谱展成 143 个 token，保留所有 (λ,θ) 信息
       - AdaGN (scale+shift): 全局语义注入每个 ResBlock
       - Cross-Attention: 16×16, 8×8(×2), 16×16(解码器), 32×32(解码器，新增)
       - 去掉了语义错位的空间插值注入（cond_feats → 全 None）
@@ -449,7 +449,7 @@ class ConditionalUNet(nn.Module):
     def __init__(self, cond_in_ch, base_ch=64, time_dim=256, cond_dim=256):
         super().__init__()
 
-        # ── 条件编码器：Token 化，187 个 (λ,θ) 格点 ──
+        # ── 条件编码器：Token 化，143 个 (λ,θ) 格点 ──
         self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim)
         self.null_cond    = nn.Parameter(torch.zeros(1, cond_dim))
         self.null_tokens  = nn.Parameter(torch.zeros(1, TOKEN_COUNT, cond_dim))

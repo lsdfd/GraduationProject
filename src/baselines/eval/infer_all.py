@@ -169,7 +169,7 @@ def load_cvae(ckpt_path: str, device: str) -> tuple:
 def generate_cvae(cond_norm, n_samples: int = 16, device: str = "cpu",
                   model=None, **kwargs) -> np.ndarray:
     """
-    cond_norm: torch.Tensor [1, 2, 11, 17]（已归一化）或 np.ndarray
+    cond_norm: torch.Tensor [1, 2, 11, 13]（已归一化）或 np.ndarray
     """
     if isinstance(cond_norm, np.ndarray):
         cond_norm = torch.from_numpy(cond_norm).float()

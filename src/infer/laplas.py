@@ -139,10 +139,10 @@ def build_target(
     for i, w in enumerate(lam_weight):
         if template_idx is not None:
             base_row = tpp[i].astype(np.float64)
-            # 用模板 ±40° 边界均值缩放理想目标，保持边界透过率不变
+            # 用模板最大角度处的边界均值缩放理想目标，保持边界透过率不变
             edge_val = (float(base_row[0]) + float(base_row[-1])) / 2.0
             scaled_ideal = kx2 * edge_val
-            # theta 方向混合权重：kx2 在 ±40° 处=1，所以 (1-kx2) 在边界处=0，边界值完全保留
+            # theta 方向混合权重：kx2 在最大角度处=1，所以 (1-kx2) 在边界处=0，边界值完全保留
             theta_mask = 1.0 - kx2
             blend = w * theta_mask
             row = (1.0 - blend) * base_row + blend * scaled_ideal
