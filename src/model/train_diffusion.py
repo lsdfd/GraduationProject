@@ -1,5 +1,6 @@
 import argparse
 import os
+from contextlib import nullcontext
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
@@ -25,6 +26,19 @@ def load_state_dict_flexible(model, state_dict):
     model.load_state_dict(stripped)
 
 
+def make_loader(dataset, batch_size, shuffle, num_workers, use_cuda):
+    kwargs = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": use_cuda,
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = True
+        kwargs["prefetch_factor"] = 4
+    return DataLoader(dataset, **kwargs)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train conditional diffusion model for metasurface inverse design.")
     parser.add_argument("--data_path", type=str, default=None, help="Path to training npz file.")
@@ -38,6 +52,9 @@ def parse_args():
     parser.add_argument("--lambda_phys", type=float, default=None, help="Weight for physics surrogate loss.")
     parser.add_argument("--lambda_bin", type=float, default=None, help="Weight for binarization loss.")
     parser.add_argument("--cond_drop_prob", type=float, default=None, help="Condition dropout probability for CFG training.")
+    parser.add_argument("--num_workers", type=int, default=None, help="Dataloader worker count.")
+    parser.add_argument("--preview_every", type=int, default=None, help="Preview sampling frequency in epochs.")
+    parser.add_argument("--no_amp", action="store_true", help="Disable AMP mixed precision on CUDA")
     return parser.parse_args()
 
 
@@ -67,6 +84,7 @@ def main():
         "min_lr": 1e-6,
         "early_stop_patience": 15,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "amp": True,
     }
 
     # Allow command-line overrides for quick experiment switching.
@@ -82,10 +100,14 @@ def main():
         "lambda_phys",
         "lambda_bin",
         "cond_drop_prob",
+        "num_workers",
+        "preview_every",
     ]:
         value = getattr(args, key)
         if value is not None:
             cfg[key] = value
+    if args.no_amp:
+        cfg["amp"] = False
 
     use_cuda = cfg["device"].startswith("cuda")
     if use_cuda:
@@ -94,6 +116,11 @@ def main():
             device_name = "cuda:0"
             cfg["device"] = device_name
         torch.cuda.set_device(device_name)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+    use_amp = use_cuda and cfg["amp"]
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     os.makedirs(cfg["save_dir"], exist_ok=True)
     run_dir = prepare_run_dir(cfg["save_dir"], "diffusion")
@@ -126,14 +153,8 @@ def main():
     cfg["cond_channels"] = cond_channels
     write_json(os.path.join(run_dir, "run_info.json"), cfg)
 
-    train_loader = DataLoader(
-        train_set, batch_size=cfg["batch_size"], shuffle=True,
-        num_workers=cfg["num_workers"], pin_memory=use_cuda
-    )
-    val_loader = DataLoader(
-        val_set, batch_size=cfg["batch_size"], shuffle=False,
-        num_workers=cfg["num_workers"], pin_memory=use_cuda
-    )
+    train_loader = make_loader(train_set, cfg["batch_size"], True, cfg["num_workers"], use_cuda)
+    val_loader = make_loader(val_set, cfg["batch_size"], False, cfg["num_workers"], use_cuda)
 
     surrogate = ForwardSurrogate(out_ch=cond_channels).to(cfg["device"])
     forward_ckpt = torch.load(cfg["forward_ckpt"], map_location=cfg["device"], weights_only=False)
@@ -157,7 +178,7 @@ def main():
     best_val = 1e9
     best_epoch = -1
     stale_epochs = 0
-    print(f"[Diffusion] train device={cfg['device']} epochs={cfg['epochs']} batch_size={cfg['batch_size']}")
+    print(f"[Diffusion] train device={cfg['device']} epochs={cfg['epochs']} batch_size={cfg['batch_size']} amp={use_amp}")
 
     for epoch in range(cfg["epochs"]):
         diffusion.train()
@@ -171,20 +192,23 @@ def main():
             cond = cond.to(cfg["device"]) # normalized
             x0 = x01 * 2.0 - 1.0          # [-1,1]
 
-            loss, log_dict = diffusion.p_losses(
-                x0=x0,
-                cond=cond,
-                surrogate=surrogate,
-                lambda_diff=cfg["lambda_diff"],
-                lambda_phys=cfg["lambda_phys"],
-                lambda_bin=cfg["lambda_bin"],
-                cond_drop_prob=cfg["cond_drop_prob"],
-            )
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp) if use_amp else nullcontext():
+                loss, log_dict = diffusion.p_losses(
+                    x0=x0,
+                    cond=cond,
+                    surrogate=surrogate,
+                    lambda_diff=cfg["lambda_diff"],
+                    lambda_phys=cfg["lambda_phys"],
+                    lambda_bin=cfg["lambda_bin"],
+                    cond_drop_prob=cfg["cond_drop_prob"],
+                )
 
             opt.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(unet.parameters(), cfg["grad_clip"])
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
 
             train_loss += loss.item() * x01.size(0)
             train_diff += log_dict.get("loss_diff", 0.0) * x01.size(0)
@@ -207,15 +231,16 @@ def main():
                 cond = cond.to(cfg["device"])
                 x0 = x01 * 2.0 - 1.0
 
-                loss, log_dict = diffusion.p_losses(
-                    x0=x0,
-                    cond=cond,
-                    surrogate=surrogate,
-                    lambda_diff=cfg["lambda_diff"],
-                    lambda_phys=cfg["lambda_phys"],
-                    lambda_bin=cfg["lambda_bin"],
-                    cond_drop_prob=0.0,
-                )
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp) if use_amp else nullcontext():
+                    loss, log_dict = diffusion.p_losses(
+                        x0=x0,
+                        cond=cond,
+                        surrogate=surrogate,
+                        lambda_diff=cfg["lambda_diff"],
+                        lambda_phys=cfg["lambda_phys"],
+                        lambda_bin=cfg["lambda_bin"],
+                        cond_drop_prob=0.0,
+                    )
                 val_loss += loss.item() * x01.size(0)
                 val_diff += log_dict.get("loss_diff", 0.0) * x01.size(0)
                 val_phys += log_dict.get("loss_phys", 0.0) * x01.size(0)

@@ -63,6 +63,17 @@ def latest_laplas_file(name: str) -> str:
     return str(files[-1])
 
 
+def latest_laplas_file_from_dirs(search_roots: list[Path], name: str) -> str:
+    candidates = []
+    for root in search_roots:
+        if root.exists():
+            candidates.extend([p for p in root.glob(f"**/{name}") if p.is_file()])
+    if not candidates:
+        roots_text = ", ".join(str(p) for p in search_roots)
+        raise FileNotFoundError(f"未找到 {name}，搜索目录: {roots_text}")
+    return str(max(candidates, key=lambda p: p.stat().st_mtime))
+
+
 def load_target_raw(path: str) -> np.ndarray:
     x = np.load(path).astype(np.float32)
     return x[None] if x.ndim == 3 else x
@@ -133,6 +144,19 @@ def outer_monotonic_penalty(y_norm: torch.Tensor, thetas: np.ndarray) -> torch.T
     p1 = F.relu(y_norm[:, idx_lo] - y_norm[:, idx_mid])
     p2 = F.relu(y_norm[:, idx_mid] - y_norm[:, idx_hi])
     return (p1 + p2).mean()
+
+
+def main_objective_loss(
+    objective_mode: str,
+    y_norm: torch.Tensor,
+    target_row: torch.Tensor,
+    main_pack: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, str]:
+    if objective_mode == "pointwise":
+        return (y_norm - target_row).abs().mean(), "point"
+    if objective_mode == "pointwise_l2":
+        return ((y_norm - target_row) ** 2).mean(), "point"
+    return 1.0 - main_pack["score"].mean(), "fit"
 
 
 def rcwa_physics_kwargs(target_lambda: float, theta: float) -> dict:
@@ -287,12 +311,12 @@ def optimize_one(init: torch.Tensor, args, candidate_idx: int) -> tuple[torch.Te
         main_pack = second_order_score_row_torch(tpp_row, thetas)
         row_max = tpp_row.amax(dim=-1, keepdim=True).clamp_min(1e-8)
         y_norm = tpp_row / row_max
-        loss_fit = 1.0 - main_pack["score"].mean()
+        loss_main, main_label = main_objective_loss(args.objective_mode, y_norm, target_row, main_pack)
         loss_row = (y_norm - target_row).abs().mean()
         loss_outer = outer_monotonic_penalty(y_norm, thetas)
         loss_bin = (x * (1.0 - x)).mean()
         loss_tv = tv_loss(rho_f)
-        loss = loss_fit + 0.10 * loss_row + 0.10 * loss_outer + 0.06 * loss_bin + 0.02 * loss_tv
+        loss = loss_main + 0.10 * loss_row + 0.10 * loss_outer + 0.06 * loss_bin + 0.02 * loss_tv
 
         opt.zero_grad()
         loss.backward()
@@ -304,7 +328,7 @@ def optimize_one(init: torch.Tensor, args, candidate_idx: int) -> tuple[torch.Te
             "step": step,
             "beta": beta,
             "loss": float(loss.item()),
-            "fit": float(loss_fit.item()),
+            main_label: float(loss_main.item()),
             "center": float(main_pack["center"].mean().item()),
             "shape": float(main_pack["shape"].mean().item()),
             "edge": float(main_pack["edge"].mean().item()),
@@ -352,7 +376,7 @@ def optimize_one(init: torch.Tensor, args, candidate_idx: int) -> tuple[torch.Te
             if "bin_eval_score" in item:
                 extra = f" binchk={item['bin_eval_score']:.4f}"
             print(
-                f"[opt {candidate_idx:02d}] step={step:03d} beta={beta:.1f} loss={item['loss']:.4f} fit={item['fit']:.4f} "
+                f"[opt {candidate_idx:02d}] step={step:03d} beta={beta:.1f} loss={item['loss']:.4f} {main_label}={item[main_label]:.4f} "
                 f"center={item['center']:.4f} shape={item['shape']:.4f} edge={item['edge']:.4f} outer={item['outer']:.4f} "
                 f"row={item['row']:.4f} mono={item['mono']:.4f} bin={item['bin']:.4f} tv={item['tv']:.4f}"
                 f"{extra} elapsed={elapsed:.1f}s eta={eta:.1f}s",
@@ -463,12 +487,21 @@ def _run_with_args(args) -> None:
 
     save_dir = Path(args.save_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir.mkdir(parents=True, exist_ok=True)
-    args.target = args.target or latest_laplas_file("target_cond_raw.npy")
-    try:
-        default_init = latest_laplas_file("topk_second_samples.npy")
-    except FileNotFoundError:
-        default_init = latest_laplas_file("topk_samples.npy")
-    args.init = args.init or default_init
+    if not args.target:
+        search_roots = [ROOT / "samples" / "laplas"]
+        band_dir = getattr(args, "laplas_dir", None)
+        if band_dir:
+            search_roots.insert(0, resolve_from_root(band_dir))
+        args.target = latest_laplas_file_from_dirs(search_roots, "target_cond_raw.npy")
+    if not args.init:
+        search_roots = [ROOT / "samples" / "laplas"]
+        band_dir = getattr(args, "laplas_dir", None)
+        if band_dir:
+            search_roots.insert(0, resolve_from_root(band_dir))
+        try:
+            args.init = latest_laplas_file_from_dirs(search_roots, "topk_second_samples.npy")
+        except FileNotFoundError:
+            args.init = latest_laplas_file_from_dirs(search_roots, "topk_samples.npy")
 
     target_raw = load_target_raw(args.target)
     init_batch = load_init_batch(args.init, "cpu", args.max_inits)
@@ -552,6 +585,7 @@ def main():
     p.add_argument("--beta_start", type=float, default=4.0)
     p.add_argument("--beta_end", type=float, default=16.0)
     p.add_argument("--log_every", type=int, default=10)
+    p.add_argument("--objective_mode", choices=["score", "pointwise", "pointwise_l2"], default="score")
     args = p.parse_args()
     _run_with_args(args)
 

@@ -22,12 +22,14 @@ import infer.optimization as _opt  # noqa: E402
 
 _DEFAULT_TARGET_LAMBDA = 1100.0
 _DEFAULT_SAVE_DIR = str(_ROOT / "samples" / "optimized_1100nm")
+_DEFAULT_LAPLAS_DIR = str(_ROOT / "samples" / "laplas_1100nm")
 
 
 def main():
     p = argparse.ArgumentParser(description="Multi-start topology optimization targeting 1100 nm.")
     p.add_argument("--target")
     p.add_argument("--init")
+    p.add_argument("--laplas_dir",        default=_DEFAULT_LAPLAS_DIR)
     p.add_argument("--steps",              type=int,   default=100)
     p.add_argument("--lr",                 type=float, default=0.005)
     p.add_argument("--save_dir",           default=_DEFAULT_SAVE_DIR)
@@ -42,6 +44,7 @@ def main():
     p.add_argument("--beta_start",         type=float, default=4.0)
     p.add_argument("--beta_end",           type=float, default=16.0)
     p.add_argument("--log_every",          type=int,   default=10)
+    p.add_argument("--objective_mode",     choices=["score", "pointwise", "pointwise_l2"], default="score")
     args = p.parse_args()
     _opt._run_with_args(args)
 

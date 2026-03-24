@@ -1,5 +1,6 @@
 import os
 import argparse
+from contextlib import nullcontext
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -18,10 +19,29 @@ def augment_structure(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
+def make_loader(dataset, batch_size, shuffle, num_workers, use_cuda):
+    kwargs = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": use_cuda,
+    }
+    if num_workers > 0:
+        kwargs["persistent_workers"] = True
+        kwargs["prefetch_factor"] = 4
+    return DataLoader(dataset, **kwargs)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", default="data/train_data.npz")
     parser.add_argument("--save_dir", default="checkpoints")
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--num_workers", type=int, default=None)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--no_amp", action="store_true", help="Disable AMP mixed precision on CUDA")
     args = parser.parse_args()
 
     cfg = {
@@ -40,7 +60,15 @@ def main():
         "min_lr": 1e-6,
         "early_stop_patience": 30,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "amp": True,
     }
+
+    for key in ["batch_size", "epochs", "lr", "num_workers", "device"]:
+        value = getattr(args, key)
+        if value is not None:
+            cfg[key] = value
+    if args.no_amp:
+        cfg["amp"] = False
 
     use_cuda = cfg["device"].startswith("cuda")
     if use_cuda:
@@ -49,6 +77,11 @@ def main():
             device_name = "cuda:0"
             cfg["device"] = device_name
         torch.cuda.set_device(device_name)
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+    use_amp = use_cuda and cfg["amp"]
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     os.makedirs(cfg["save_dir"], exist_ok=True)
     run_dir = prepare_run_dir(cfg["save_dir"], "forward")
@@ -82,14 +115,8 @@ def main():
     cfg["cond_channels"] = cond_channels
     write_json(os.path.join(run_dir, "run_info.json"), cfg)
 
-    train_loader = DataLoader(
-        train_set, batch_size=cfg["batch_size"], shuffle=True,
-        num_workers=cfg["num_workers"], pin_memory=use_cuda
-    )
-    val_loader = DataLoader(
-        val_set, batch_size=cfg["batch_size"], shuffle=False,
-        num_workers=cfg["num_workers"], pin_memory=use_cuda
-    )
+    train_loader = make_loader(train_set, cfg["batch_size"], True, cfg["num_workers"], use_cuda)
+    val_loader = make_loader(val_set, cfg["batch_size"], False, cfg["num_workers"], use_cuda)
 
     model = ForwardSurrogate(out_ch=cond_channels).to(cfg["device"])
     opt = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -105,7 +132,7 @@ def main():
     best_val_phys = 1e9
     best_epoch = -1
     stale_epochs = 0
-    print(f"[Forward] train device={cfg['device']} epochs={cfg['epochs']} batch_size={cfg['batch_size']}")
+    print(f"[Forward] train device={cfg['device']} epochs={cfg['epochs']} batch_size={cfg['batch_size']} amp={use_amp}")
 
     for epoch in range(cfg["epochs"]):
         model.train()
@@ -118,13 +145,16 @@ def main():
 
             x = augment_structure(x)      # 随机翻转增强
 
-            pred = model(x)
-            loss = F.l1_loss(pred, cond)
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp) if use_amp else nullcontext():
+                pred = model(x)
+                loss = F.l1_loss(pred, cond)
 
             opt.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
 
             train_loss += loss.item() * x.size(0)
             with torch.no_grad():
@@ -142,8 +172,9 @@ def main():
             for x, cond in val_loader:
                 x = x.to(cfg["device"])
                 cond = cond.to(cfg["device"])
-                pred = model(x)
-                loss = F.l1_loss(pred, cond)
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp) if use_amp else nullcontext():
+                    pred = model(x)
+                    loss = F.l1_loss(pred, cond)
                 val_loss += loss.item() * x.size(0)
                 # 反归一化到物理空间 [0,1]，计算每格点平均绝对误差
                 pred_phys = pred * std_dev + mean_dev

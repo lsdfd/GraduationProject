@@ -30,7 +30,7 @@
 * 比较：Best score，Mean score，OTF MAE，time-to-success
 
 3.3 Generalization to other OTF targets
-* 偏振复用尝试
+* 偏振复用尝试/60度高NA
 * 高阶微分/时空微分结果/高斯滤波等
 
 四 Discussions （简单写）
