@@ -32,11 +32,9 @@ src/
 │   ├── dataset.py
 │   ├── diffusion.py
 │   ├── models.py
-│   ├── sample.py
 │   ├── train_diffusion.py
 │   ├── train_forward.py
 │   └── train_utils.py
-└── utils/
 ```
 
 ## 数据格式
@@ -82,6 +80,14 @@ python src/dataset/rcwa/rcwa_all.py
 - `data/train_data.npz`
 - `data/train_data_failures.json`
 - `data/rcwa.log`
+
+如果已经有旧分支留下的 `data/train_data_20000.npz`，当前主线更推荐直接提取：
+
+```bash
+python data/extract_onelambda_dataset.py
+```
+
+它会从旧的 `[N,11,17]` 数据里抽出 `1000nm` 这一行，生成新的单波长训练集 `data/train_data.npz`。
 
 ### 3. 训练前向代理
 
@@ -137,13 +143,14 @@ python src/infer/optimization.py
 
 - 旧的多波段入口、整谱目标构造、baseline 对比框架已经从 `onelambda` 主线移除。
 - 当前仓库默认只支持 `1000nm` 单波长工作流。
-- 如果你仍持有旧版整谱 `train_data.npz`，训练代码也能从中抽取 `1000nm` 那一行继续使用；但推荐重新运行 `rcwa_all.py` 生成新的单波长数据。
+- 训练和推理现在都要求单波长数据格式：`structures [N,64,64]`，`tpp_mag/tss_mag [N,17]`。
+- 根目录历史 checkpoint、`runs/`、`samples/` 不再作为默认输入；需要先重新训练，或显式传入新的 run 目录产物。
 
 ## 最小运行顺序
 
 ```bash
-python src/dataset/structure/dataset_pre.py --num_samples 5000
-python src/dataset/rcwa/rcwa_all.py
+python data/extract_onelambda_dataset.py
+python data/score_second_order.py --in_npz data/train_data.npz --field tpp_mag --out_dir data/second_order_scores --topk 20 --plot_topk 5
 python src/model/train_forward.py
 python src/model/train_diffusion.py
 python src/infer/laplas.py

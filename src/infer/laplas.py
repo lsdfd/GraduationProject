@@ -22,8 +22,6 @@ from model.diffusion import GaussianDiffusion  # noqa: E402
 from model.models import ConditionalUNet, ForwardSurrogate  # noqa: E402
 from model.train_utils import resolve_latest_run  # noqa: E402
 from infer.common import (  # noqa: E402
-    build_weight,
-    lambda_theta_grid,
     load_model,
     load_stats,
     normalize_with_stats,
@@ -62,18 +60,36 @@ def resolve_infer_artifacts(
     stats_path: str | Path | None,
     diffusion_ckpt: str | Path | None,
     forward_ckpt: str | Path | None,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path, Path | None]:
     ckpt_root = ROOT / "checkpoints"
     latest_forward = resolve_latest_run(ckpt_root, "forward")
     latest_diffusion = resolve_latest_run(ckpt_root, "diffusion")
 
-    default_stats = latest_forward / "cond_stats.npz" if latest_forward is not None else ckpt_root / "cond_stats.npz"
-    default_forward = latest_forward / "forward_best.pt" if latest_forward is not None else ckpt_root / "forward_best.pt"
-    default_diffusion = latest_diffusion / "diffusion_best.pt" if latest_diffusion is not None else ckpt_root / "diffusion_best.pt"
+    if stats_path is None:
+        if latest_forward is None:
+            raise FileNotFoundError("未找到 forward run 的 cond_stats.npz；请先运行 train_forward.py 或显式传入 --stats")
+        stats = latest_forward / "cond_stats.npz"
+    else:
+        stats = resolve_from_root(stats_path)
 
-    stats = resolve_from_root(stats_path) if stats_path is not None else default_stats
-    diffusion = resolve_from_root(diffusion_ckpt) if diffusion_ckpt is not None else default_diffusion
-    forward = resolve_from_root(forward_ckpt) if forward_ckpt is not None else default_forward
+    if diffusion_ckpt is None:
+        if latest_diffusion is None:
+            raise FileNotFoundError("未找到 diffusion_best.pt；请先运行 train_diffusion.py 或显式传入 --diffusion_ckpt")
+        diffusion = latest_diffusion / "diffusion_best.pt"
+    else:
+        diffusion = resolve_from_root(diffusion_ckpt)
+
+    if forward_ckpt is None:
+        forward = latest_forward / "forward_best.pt" if latest_forward is not None else None
+    else:
+        forward = resolve_from_root(forward_ckpt)
+
+    if not stats.exists():
+        raise FileNotFoundError(f"cond stats 不存在: {stats}")
+    if not diffusion.exists():
+        raise FileNotFoundError(f"diffusion checkpoint 不存在: {diffusion}")
+    if forward is not None and not forward.exists():
+        raise FileNotFoundError(f"forward checkpoint 不存在: {forward}")
     return stats, diffusion, forward
 
 
@@ -291,7 +307,7 @@ def evaluate_rcwa_candidates(
     return pred_raw, err
 
 
-def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, weight: torch.Tensor, diffusion: torch.nn.Module, root_save_dir: Path, devices: list[str], surrogate: torch.nn.Module | None = None):
+def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, diffusion: torch.nn.Module, root_save_dir: Path, devices: list[str], surrogate: torch.nn.Module | None = None):
     save_dir = root_save_dir / case["name"]
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -342,18 +358,12 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
 
     np.save(save_dir / "target_cond_raw.npy", target_raw)
     np.save(save_dir / "target_cond_norm.npy", target.cpu().numpy())
-    np.save(save_dir / "target_weight.npy", weight.cpu().numpy())
     np.save(save_dir / "lambdas.npy", lambdas)
     np.save(save_dir / "thetas.npy", thetas)
     np.save(save_dir / "all_samples.npy", samples.cpu().numpy())
-    np.save(save_dir / "all_pred_cond.npy", pred_raw)
     np.save(save_dir / "all_pred_cond_raw.npy", pred_raw)
     np.save(save_dir / "all_errors.npy", err)
     np.save(save_dir / "rank_second_order.npy", topk_second)
-    np.save(save_dir / "topk_indices.npy", topk_second)
-    np.save(save_dir / "topk_samples.npy", samples[topk_second_t].cpu().numpy())
-    np.save(save_dir / "topk_pred_cond.npy", pred_raw[topk_second])
-    np.save(save_dir / "topk_pred_cond_raw.npy", pred_raw[topk_second])
     np.save(save_dir / "topk_second_samples.npy", samples[topk_second_t].cpu().numpy())
     np.save(save_dir / "topk_second_pred_cond_raw.npy", pred_raw[topk_second])
 
@@ -397,7 +407,7 @@ def _run_with_args(args) -> None:
     )
     args.stats = str(stats_path)
     args.diffusion_ckpt = str(diffusion_path)
-    args.forward_ckpt = str(forward_path)
+    args.forward_ckpt = str(forward_path) if forward_path is not None else None
     args.save_dir = str(resolve_from_root(args.save_dir))
     devices = parse_devices(args.devices, args.device)
     args.device = devices[0]
@@ -410,7 +420,6 @@ def _run_with_args(args) -> None:
 
     mean, std = load_stats(args.stats)
     cond_ch = int(mean.shape[1])
-    weight = torch.from_numpy(build_weight(cond_ch, 1000.0)).to(args.device)
     diffusion = load_model(
         args.diffusion_ckpt,
         GaussianDiffusion(ConditionalUNet(cond_ch).to(args.device), timesteps=1000, image_size=64).to(args.device),
@@ -420,6 +429,8 @@ def _run_with_args(args) -> None:
 
     surrogate = None
     if args.guidance_scale > 0:
+        if args.forward_ckpt is None:
+            raise FileNotFoundError("启用物理引导时需要 forward checkpoint；请先训练 forward 或显式传入 --forward_ckpt")
         forward_ckpt = Path(args.forward_ckpt)
         if forward_ckpt.exists():
             surrogate = ForwardSurrogate(out_ch=cond_ch).to(args.device)
@@ -433,7 +444,7 @@ def _run_with_args(args) -> None:
             print(f"[laplas] 警告: forward_ckpt 不存在 ({forward_ckpt})，禁用物理引导")
 
     for case in TARGET_SWEEP:
-        run_case(case, args, mean, std, cond_ch, weight, diffusion, root_save_dir, devices, surrogate=surrogate)
+        run_case(case, args, mean, std, cond_ch, diffusion, root_save_dir, devices, surrogate=surrogate)
 
 
 def main():

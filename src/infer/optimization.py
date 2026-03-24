@@ -65,10 +65,17 @@ def latest_laplas_file(name: str) -> str:
 
 
 def load_target_raw(path: str) -> np.ndarray:
-    x = np.load(path).astype(np.float32)
+    loaded = np.load(path)
+    if hasattr(loaded, "files"):
+        raise ValueError(f"target 路径必须是 laplas 导出的 target_cond_raw.npy，而不是 npz: {path}")
+    x = loaded.astype(np.float32)
     if x.ndim == 2:
+        if x.shape[-1] != 17:
+            raise ValueError(f"target_cond_raw 必须是 [2,17]，实际得到 {x.shape}")
         return x[None]
-    return x
+    if x.ndim == 3 and x.shape[-1] == 17:
+        return x
+    raise ValueError(f"Unsupported target shape: {x.shape}")
 
 
 def load_init_batch(path: str, device: str, max_inits: int) -> torch.Tensor:
@@ -457,11 +464,7 @@ def _run_with_args(args) -> None:
     save_dir = Path(args.save_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir.mkdir(parents=True, exist_ok=True)
     args.target = args.target or latest_laplas_file("target_cond_raw.npy")
-    try:
-        default_init = latest_laplas_file("topk_second_samples.npy")
-    except FileNotFoundError:
-        default_init = latest_laplas_file("topk_samples.npy")
-    args.init = args.init or default_init
+    args.init = args.init or latest_laplas_file("topk_second_samples.npy")
 
     target_raw = load_target_raw(args.target)
     init_batch = load_init_batch(args.init, "cpu", args.max_inits)

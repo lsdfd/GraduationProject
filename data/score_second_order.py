@@ -61,7 +61,9 @@ def load_companion_spec(npz_path: Path, field: str) -> tuple[np.ndarray | None, 
     if other not in data.files:
         return None, None
     spec = np.asarray(data[other], dtype=np.float32)
-    if spec.ndim != 3:
+    if spec.ndim == 2:
+        spec = spec[:, None, :]
+    elif spec.ndim != 3:
         return None, None
     return spec, other
 

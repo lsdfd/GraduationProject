@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from infer.common import denormalize_with_stats, lambda_theta_grid, load_model, load_stats, second_order_score_row, second_order_target  # noqa: E402
 from model.models import ForwardSurrogate  # noqa: E402
+from model.train_utils import resolve_latest_run  # noqa: E402
 
 
 def resolve_from_root(path_like: str | Path) -> Path:
@@ -36,15 +37,15 @@ def load_top_sample_ids(csv_path: Path, target_lambda: float, topk: int) -> list
     return [sample_idx for _, sample_idx in rows[:topk]]
 
 
-def load_dataset(npz_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_dataset(npz_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     data = np.load(npz_path)
     structures = np.asarray(data["structures"], dtype=np.float32)
     tpp = np.asarray(data["tpp_mag"], dtype=np.float32)
-    if tpp.ndim == 2:
-        tpp = tpp[:, None, :]
-    lambdas = np.asarray(data["lambdas"], dtype=np.float32) if "lambdas" in data.files else np.asarray([float(data["target_lambda"])], dtype=np.float32)
+    if tpp.ndim != 2:
+        raise ValueError(f"validate_surrogate_top 只支持 onelambda 数据集 [N,17]，实际得到 {tpp.shape}")
     thetas = np.asarray(data["thetas"], dtype=np.float32)
-    return structures, tpp, lambdas, thetas
+    target_lambda = float(data["target_lambda"])
+    return structures, tpp, thetas, target_lambda
 
 
 def plot_sample_compare(
@@ -88,15 +89,19 @@ def plot_sample_compare(
 
 @torch.no_grad()
 def main() -> None:
+    latest_forward = resolve_latest_run(ROOT / "checkpoints", "forward")
     p = argparse.ArgumentParser(description="Validate surrogate predictions on top-ranked second-order samples at a given wavelength.")
     p.add_argument("--train_npz", default=str(ROOT / "data" / "train_data.npz"))
     p.add_argument("--topk_csv", default=str(ROOT / "data" / "second_order_scores" / "tpp_mag_top5_per_lambda.csv"))
-    p.add_argument("--stats", default=str(ROOT / "checkpoints" / "cond_stats.npz"))
-    p.add_argument("--forward_ckpt", default=str(ROOT / "checkpoints" / "forward_best.pt"))
+    p.add_argument("--stats", default=str((latest_forward / "cond_stats.npz") if latest_forward is not None else ""))
+    p.add_argument("--forward_ckpt", default=str((latest_forward / "forward_best.pt") if latest_forward is not None else ""))
     p.add_argument("--topk", type=int, default=5)
     p.add_argument("--save_dir", default=str(ROOT / "samples" / "surrogate_validate"))
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
+
+    if not args.stats or not args.forward_ckpt:
+        raise FileNotFoundError("未找到 latest forward run；请先运行 train_forward.py 或显式传入 --stats 和 --forward_ckpt")
 
     args.train_npz = str(resolve_from_root(args.train_npz))
     args.topk_csv = str(resolve_from_root(args.topk_csv))
@@ -107,9 +112,8 @@ def main() -> None:
     save_dir = Path(args.save_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    target_lambda = 1000.0
+    structures, tpp, thetas, target_lambda = load_dataset(Path(args.train_npz))
     sample_ids = load_top_sample_ids(Path(args.topk_csv), target_lambda, args.topk)
-    structures, tpp, lambdas, thetas = load_dataset(Path(args.train_npz))
     mean, std = load_stats(args.stats)
     cond_ch = int(mean.shape[1])
     model = load_model(args.forward_ckpt, ForwardSurrogate(cond_ch).to(args.device), "model", args.device)
@@ -120,9 +124,8 @@ def main() -> None:
     pred_tpp = pred_raw[:, 0].astype(np.float32)
 
     summary: list[dict] = []
-    lam_idx = int(np.argmin(np.abs(lambdas - target_lambda))) if lambdas.size > 1 else 0
     for local_idx, sample_idx in enumerate(sample_ids):
-        real_row = tpp[sample_idx, lam_idx]
+        real_row = tpp[sample_idx]
         pred_row = pred_tpp[local_idx]
         real_score = second_order_score_row(real_row, thetas)
         pred_score = second_order_score_row(pred_row, thetas)
