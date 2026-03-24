@@ -27,7 +27,7 @@ class CondEmbed(nn.Module):
     def __init__(self, in_ch: int = 2, cond_dim: int = 256):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Flatten(),                              # [B, 2*11*17=374]
+            nn.Flatten(),                              # [B, 2*11*13=286]
             nn.Linear(in_ch * LAMBDA_COUNT * THETA_COUNT, 512),
             nn.SiLU(),
             nn.Linear(512, cond_dim),
