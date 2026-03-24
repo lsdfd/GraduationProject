@@ -143,6 +143,129 @@ python src/infer/optimization.py
 - 训练和推理现在都要求单波长数据格式：`structures [N,64,64]`，`tpp_mag [N,17]`。
 - 根目录历史 checkpoint、`runs/`、`samples/` 不再作为默认输入；需要先重新训练，或显式传入新的 run 目录产物。
 
+## 环境准备
+
+推荐在服务器上单独创建一个 `conda` 环境。
+
+### 1. 拉取 `onelambda` 分支
+
+如果服务器访问 GitHub 正常：
+
+```bash
+git clone -b onelambda --single-branch https://github.com/lsdfd/GraduationProject.git
+cd GraduationProject
+```
+
+如果服务器直连 GitHub 较慢，可以使用加速前缀：
+
+```bash
+git clone -b onelambda --single-branch https://ghfast.top/https://github.com/lsdfd/GraduationProject.git
+cd GraduationProject
+```
+
+如果服务器上已经有仓库目录，只需要更新：
+
+```bash
+git fetch origin
+git checkout onelambda
+git pull origin onelambda
+```
+
+### 2. 创建环境
+
+```bash
+conda create -n metagen python=3.10 -y
+conda activate metagen
+```
+
+如果你在服务器上第一次用 `conda`，通常还需要先执行：
+
+```bash
+conda init bash
+source ~/.bashrc
+conda activate metagen
+```
+
+### 3. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+如果你的服务器 CUDA 版本和默认 `torch` 轮子不匹配，建议先按官方方式安装对应版本的 `torch`，再安装剩余依赖。
+
+### 4. 检查数据
+
+当前主线默认使用：
+
+- `data/train_data.npz`
+
+如果你只有旧格式的：
+
+- `data/train_data_20000.npz`
+
+就先提取：
+
+```bash
+python data/extract_onelambda_dataset.py
+```
+
+## 服务器部署流程
+
+下面是一套从零到可推理的最小部署顺序。
+
+### 第一步：准备代码和环境
+
+```bash
+git clone -b onelambda --single-branch https://ghfast.top/https://github.com/lsdfd/GraduationProject.git
+cd GraduationProject
+conda create -n metagen python=3.10 -y
+conda activate metagen
+pip install -r requirements.txt
+```
+
+### 第二步：准备 one-lambda 数据
+
+如果已经有旧的 `data/train_data_20000.npz`：
+
+```bash
+python data/extract_onelambda_dataset.py
+```
+
+如果没有旧数据，而是从头生成：
+
+```bash
+python src/dataset/structure/dataset_pre.py --num_samples 5000
+python src/dataset/rcwa/rcwa_all.py
+```
+
+### 第三步：训练两个模型
+
+```bash
+python src/model/train_forward.py
+python src/model/train_diffusion.py
+```
+
+训练输出会写到：
+
+- `checkpoints/forward_runs/...`
+- `checkpoints/diffusion_runs/...`
+
+并且会自动更新：
+
+- `checkpoints/latest_forward_run.txt`
+- `checkpoints/latest_diffusion_run.txt`
+
+### 第四步：推理和优化
+
+```bash
+python src/infer/laplas.py
+python src/infer/optimization.py
+```
+
+`laplas.py` 会自动读取最新的 forward/diffusion run 目录中的 checkpoint 和 `cond_stats.npz`。  
+`optimization.py` 会继续读取 `laplas.py` 最新输出的目标和候选结构。
+
 ## 最小运行顺序
 
 ```bash
