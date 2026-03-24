@@ -19,6 +19,7 @@ import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
+TARGET_LAMBDA_NM = 1000.0
 
 try:
     from dataset.rcwa.rcwa import torcwa_simulation  # noqa: E402
@@ -65,7 +66,9 @@ def latest_laplas_file(name: str) -> str:
 
 def load_target_raw(path: str) -> np.ndarray:
     x = np.load(path).astype(np.float32)
-    return x[None] if x.ndim == 3 else x
+    if x.ndim == 2:
+        return x[None]
+    return x
 
 
 def load_init_batch(path: str, device: str, max_inits: int) -> torch.Tensor:
@@ -131,11 +134,11 @@ def outer_monotonic_penalty(y_norm: torch.Tensor, thetas: np.ndarray) -> torch.T
     return (p1 + p2).mean()
 
 
-def rcwa_physics_kwargs(target_lambda: float, theta: float) -> dict:
+def rcwa_physics_kwargs(theta: float) -> dict:
     return {
         "periodicity": 500.0,
         "h": 500.0,
-        "lam": float(target_lambda),
+        "lam": TARGET_LAMBDA_NM,
         "tet": float(theta),
         "phi": 0.0,
         "angle_unit": "deg",
@@ -146,14 +149,14 @@ def rcwa_physics_kwargs(target_lambda: float, theta: float) -> dict:
     }
 
 
-def rcwa_tpp_tss_row(x: torch.Tensor, target_lambda: float, device: str, rcwa_orders: int) -> tuple[torch.Tensor, torch.Tensor]:
+def rcwa_tpp_tss_row(x: torch.Tensor, device: str, rcwa_orders: int) -> tuple[torch.Tensor, torch.Tensor]:
     thetas = theta_grid()
     layer = x.squeeze(0).squeeze(0)
     tpp_vals = []
     tss_vals = []
     for theta in thetas:
         out = torcwa_simulation(
-            rcwa_physics_kwargs(target_lambda, float(theta)),
+            rcwa_physics_kwargs(float(theta)),
             layer,
             rcwa_orders=rcwa_orders,
             project=False,
@@ -218,7 +221,7 @@ def plot_candidate_summary(
 def evaluate_binary_candidate(x_cont: torch.Tensor, args) -> tuple[torch.Tensor, dict]:
     thetas = theta_grid()
     x_bin = finalize_binary(x_cont)
-    tpp_row, tss_row = rcwa_tpp_tss_row(x_bin, args.target_lambda, args.device, args.rcwa_orders)
+    tpp_row, tss_row = rcwa_tpp_tss_row(x_bin, args.device, args.rcwa_orders)
     tpp_np = tpp_row.detach().cpu().numpy()
     tss_np = tss_row.detach().cpu().numpy()
     score = second_order_score_row(tpp_np, thetas)
@@ -279,7 +282,7 @@ def optimize_one(init: torch.Tensor, args, candidate_idx: int) -> tuple[torch.Te
         rho_f = density_filter(rho, args.filter_radius)
         x = project_density(rho_f, beta=beta, eta=args.proj_eta)
 
-        tpp_row, tss_row = rcwa_tpp_tss_row(x, args.target_lambda, args.device, args.rcwa_orders)
+        tpp_row, tss_row = rcwa_tpp_tss_row(x, args.device, args.rcwa_orders)
         main_pack = second_order_score_row_torch(tpp_row, thetas)
         row_max = tpp_row.amax(dim=-1, keepdim=True).clamp_min(1e-8)
         y_norm = tpp_row / row_max
@@ -371,12 +374,10 @@ def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, sa
     bin_tpp_np = best_rcwa_bin["tpp_row"]
     bin_tss_np = best_rcwa_bin["tss_row"]
 
-    lambdas, _ = lambda_theta_grid()
-    lam_idx = int(np.argmin(np.abs(lambdas - float(args.target_lambda))))
-    target_row = target_raw[0, 0, lam_idx]
+    target_row = target_raw[0, 0]
     out = {
         "candidate_idx": idx,
-        "target_lambda_nm": float(args.target_lambda),
+        "target_lambda_nm": TARGET_LAMBDA_NM,
         "optimization_time_sec": float(opt_elapsed),
         "rcwa_second_order_score": float(best_rcwa_bin["score"]),
         "rcwa_center_score": float(best_rcwa_bin["center"]),
@@ -405,7 +406,7 @@ def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, sa
         best_bin.cpu().numpy(),
         bin_tpp_np,
         thetas,
-        f"Candidate {idx:02d} @ {args.target_lambda:.0f}nm",
+        f"Candidate {idx:02d} @ {TARGET_LAMBDA_NM:.0f}nm",
         float(best_rcwa_bin["score"]),
         float(bin_tpp_np[t40_idx]),
     )
@@ -444,11 +445,7 @@ def _optimization_worker(indices, init_np, target_raw, args_dict, save_dir_str, 
 
 
 def _run_with_args(args) -> None:
-    """Core execution logic; accepts a pre-parsed args namespace.
-
-    Called both by main() (direct execution) and by band-specific wrapper
-    scripts (e.g. band_900nm/optimization.py) that only override default values.
-    """
+    """Core execution logic; accepts a pre-parsed args namespace."""
     if args.target:
         args.target = str(resolve_from_root(args.target))
     if args.init:
@@ -539,7 +536,6 @@ def main():
     p.add_argument("--save_dir", default=str(ROOT / "samples" / "optimized"))
     p.add_argument("--device", default=None, help="单设备模式；默认自动使用全部可见 GPU")
     p.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
-    p.add_argument("--target_lambda", type=float, default=1000.0)
     p.add_argument("--rcwa_orders", type=int, default=7)
     p.add_argument("--binary_eval_every", type=int, default=10)
     p.add_argument("--max_inits", type=int, default=5)

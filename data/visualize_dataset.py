@@ -67,8 +67,10 @@ def load_tpp_mag(path: Path) -> np.ndarray:
         raise ValueError(f"{path} 不包含 tpp_mag 或 tpp_real/tpp_imag 字段")
 
     tpp = np.asarray(tpp)
-    if tpp.ndim != 3:
-        raise ValueError(f"tpp 应为 [N,H,W]，实际得到 {tpp.shape}")
+    if tpp.ndim == 2:
+        tpp = tpp[:, None, :]
+    elif tpp.ndim != 3:
+        raise ValueError(f"tpp 应为 [N,H,W] 或 [N,W]，实际得到 {tpp.shape}")
     return tpp.astype(np.float32)
 
 
@@ -79,8 +81,10 @@ def load_tpp_component(path: Path, key: str) -> np.ndarray:
     if key not in data.files:
         raise ValueError(f"{path} 不包含 {key} 字段")
     arr = np.asarray(data[key], dtype=np.float32)
-    if arr.ndim != 3:
-        raise ValueError(f"{key} 应为 [N,H,W]，实际得到 {arr.shape}")
+    if arr.ndim == 2:
+        arr = arr[:, None, :]
+    elif arr.ndim != 3:
+        raise ValueError(f"{key} 应为 [N,H,W] 或 [N,W]，实际得到 {arr.shape}")
     return arr
 
 
@@ -89,15 +93,22 @@ def load_required_spectrum(path: Path, key: str) -> np.ndarray:
     if not hasattr(data, "files") or key not in data.files:
         raise ValueError(f"{path} 不包含 {key} 字段。当前字段: {list(getattr(data, 'files', []))}")
     arr = np.asarray(data[key], dtype=np.float32)
-    if arr.ndim != 3:
-        raise ValueError(f"{key} 应为 [N,H,W]，实际得到 {arr.shape}")
+    if arr.ndim == 2:
+        arr = arr[:, None, :]
+    elif arr.ndim != 3:
+        raise ValueError(f"{key} 应为 [N,H,W] 或 [N,W]，实际得到 {arr.shape}")
     return arr
 
 
 def load_lambda_theta(path: Path, tpp_shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
     data = np.load(path)
-    if hasattr(data, "files") and "lambdas" in data.files and "thetas" in data.files:
-        lambdas = np.asarray(data["lambdas"], dtype=np.float32)
+    if hasattr(data, "files") and "thetas" in data.files:
+        if "lambdas" in data.files:
+            lambdas = np.asarray(data["lambdas"], dtype=np.float32)
+        elif "target_lambda" in data.files:
+            lambdas = np.asarray([float(data["target_lambda"])], dtype=np.float32)
+        else:
+            lambdas = np.arange(tpp_shape[0], dtype=np.float32)
         thetas = np.asarray(data["thetas"], dtype=np.float32)
         return lambdas, thetas
 

@@ -73,16 +73,14 @@ def score_with_surrogate(
     mean: np.ndarray,
     std: np.ndarray,
     device: str,
-    target_lambda: float = 1000.0,
     batch_size: int = 512,
 ) -> np.ndarray:
     """
-    批量推理并打分，返回每个结构在 target_lambda 处的二阶得分 [N]。
+    批量推理并打分，返回每个结构在 1000nm 处的二阶得分 [N]。
 
     代理模型输出归一化频谱，先反归一化再打分，保证物理量纲正确。
     """
-    lambdas, thetas = lambda_theta_grid()
-    lam_idx = int(np.argmin(np.abs(lambdas - float(target_lambda))))
+    _, thetas = lambda_theta_grid()
     n = len(structures)
     scores = np.zeros(n, dtype=np.float32)
 
@@ -95,11 +93,11 @@ def score_with_surrogate(
                 .unsqueeze(1)   # [B, 1, 64, 64]，值域 0/1
                 .to(device)
             )
-            pred_norm = surrogate(batch).cpu().numpy()          # [B, 2, 11, 17]
+            pred_norm = surrogate(batch).cpu().numpy()          # [B, 2, 17]
             pred_raw = pred_norm * std + mean                   # 反归一化
 
             for i in range(end - start):
-                tpp_row = pred_raw[i, 0, lam_idx]              # [17] tpp @ target_lambda
+                tpp_row = pred_raw[i, 0]                       # [17] tpp @ target_lambda
                 s = second_order_score_row(tpp_row, thetas)
                 scores[start + i] = float(s["score"])
 
@@ -153,8 +151,6 @@ def main():
                    help="保留的高分结构数，默认 2000")
     p.add_argument("--num_random",   type=int,   default=1000,
                    help="混入的随机结构数（方案 B），默认 1000")
-    p.add_argument("--target_lambda",type=float, default=1000.0,
-                   help="打分目标波长（nm），默认 1000")
     p.add_argument("--batch_size",   type=int,   default=512,
                    help="代理模型推理 batch size，默认 512")
     p.add_argument("--skip_generate",action="store_true",
@@ -200,7 +196,6 @@ def main():
     # ── 3. 批量打分 ────────────────────────────────────────────────────────
     scores = score_with_surrogate(
         structures, surrogate, mean, std, args.device,
-        target_lambda=args.target_lambda,
         batch_size=args.batch_size,
     )
     np.save(scores_path, scores)

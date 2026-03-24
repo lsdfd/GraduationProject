@@ -50,7 +50,7 @@ DATA_PATH = PROJECT_ROOT / "data" / "train_data.npz"
 # ---------------------------------------------------------------------------
 # Physics
 # ---------------------------------------------------------------------------
-LAMBDAS = np.arange(800.0, 1300.1, 50.0)   # [11]
+LAMBDAS = np.asarray([1000.0])             # [1]
 THETAS  = np.arange(-40.0, 40.1,  5.0)     # [17]
 THETA_MAX = 40.0
 NA        = np.sin(np.radians(THETA_MAX))   # ≈ 0.6428
@@ -84,22 +84,27 @@ def make_output_paths(label: str, lambda_nm: float) -> tuple[Path, Path, Path]:
 def load_phi0_from_training(sample_idx: int, lambda_nm: float):
     """返回 t_ss_phi0, t_pp_phi0，shape [17]，对应 THETAS。"""
     data = np.load(DATA_PATH)
-    lam_idx = int(np.argmin(np.abs(LAMBDAS - lambda_nm)))
-    tpp = data["tpp_mag"][sample_idx, lam_idx, :].astype(np.float64)
-    tss = data["tss_mag"][sample_idx, lam_idx, :].astype(np.float64)
-    print(f"[phi=0] 从 train_data 加载 sample={sample_idx}, λ={LAMBDAS[lam_idx]:.0f}nm")
+    tpp_all = np.asarray(data["tpp_mag"], dtype=np.float64)
+    tss_all = np.asarray(data["tss_mag"], dtype=np.float64)
+    if tpp_all.ndim == 2:
+        tpp = tpp_all[sample_idx]
+        tss = tss_all[sample_idx]
+    else:
+        lam_idx = int(np.argmin(np.abs(LAMBDAS - lambda_nm)))
+        tpp = tpp_all[sample_idx, lam_idx, :]
+        tss = tss_all[sample_idx, lam_idx, :]
+    print(f"[phi=0] 从 train_data 加载 sample={sample_idx}, λ=1000nm")
     return tss, tpp
 
 
 def load_phi0_from_infer(infer_dir: Path, lambda_nm: float):
     """从 laplas 推理结果加载最优样本的 phi=0 数据。"""
-    lam_idx = int(np.argmin(np.abs(LAMBDAS - lambda_nm)))
-    pred = np.load(infer_dir / "all_pred_cond_raw.npy")   # [N, 2, 11, 17]
+    pred = np.load(infer_dir / "all_pred_cond_raw.npy")   # [N, 2, 17]
     errors = np.load(infer_dir / "all_errors.npy")
     best = int(np.argmin(errors))
-    tss = pred[best, 1, lam_idx, :].astype(np.float64)
-    tpp = pred[best, 0, lam_idx, :].astype(np.float64)
-    print(f"[phi=0] 从推理结果加载 best={best}, error={errors[best]:.4f}, λ={LAMBDAS[lam_idx]:.0f}nm")
+    tss = pred[best, 1].astype(np.float64)
+    tpp = pred[best, 0].astype(np.float64)
+    print(f"[phi=0] 从推理结果加载 best={best}, error={errors[best]:.4f}, λ=1000nm")
     return tss, tpp
 
 

@@ -111,78 +111,47 @@ class SpectrumCrossAttention(nn.Module):
 
 class ConditionEncoderTokens(nn.Module):
     """
-    把 [B, C, 11, 17] 光谱条件展开成 187 个 token，用 Transformer 全局建模。
+    onelambda 条件编码器：
+      - 输入只保留一个目标波长下的角度响应 [B, C, 17]
+      - 每个 theta 格点一个 token
+      - 角度位置编码 + Transformer 全局建模
+      - CLS token 输出全局条件向量，17 个 angle token 用于 cross-attention
 
-    设计原则：
-      - 不做空间下采样，11×17 所有格点全部保留
-      - 波长轴 (11) 和角度轴 (17) 分别使用独立可学习位置编码
-      - CLS token 聚合全局语义 → cond_emb（用于 AdaGN scale/shift）
-      - 其余 187 个位置 token → cross-attention（精细频谱查询）
-      - Pre-LN Transformer 训练更稳定
-
-    输入: [B, C, 11, 17]
+    输入: [B, C, 17]
     输出:
       emb    [B, emb_dim]        → 全局条件向量
-      tokens [B, 187, emb_dim]   → 逐格点条件 token
+      tokens [B, 17, emb_dim]    → 逐角度条件 token
     """
 
-    N_LAMBDA = 11
-    N_THETA  = 17
-    N_TOKENS = 11 * 17  # 187
+    N_THETA = 17
+    N_TOKENS = 17
 
     def __init__(self, in_ch, emb_dim=256, n_layers=3, n_heads=4):
         super().__init__()
-        # 每个 (λ,θ) 格点的 (tpp, tss) 值映射到 emb_dim 维
         self.input_proj = nn.Linear(in_ch, emb_dim)
-
-        # 独立位置编码：波长轴 128维 + 角度轴 128维 = 256维
-        self.lambda_pe = nn.Embedding(self.N_LAMBDA, emb_dim // 2)
-        self.theta_pe  = nn.Embedding(self.N_THETA,  emb_dim // 2)
-
-        # Pre-LN Transformer：让所有 (λ,θ) 格点互相交流
+        self.theta_pe = nn.Embedding(self.N_THETA, emb_dim)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=emb_dim,
             nhead=n_heads,
             dim_feedforward=emb_dim * 2,
             batch_first=True,
             dropout=0.1,
-            norm_first=True,   # Pre-LN 比 Post-LN 训练更稳定
+            norm_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-
-        # 可学习 CLS token，聚合全局频谱信息
         self.cls = nn.Parameter(torch.zeros(1, 1, emb_dim))
-
-        # 预存位置索引（固定，不随输入变化）
-        li = torch.arange(self.N_LAMBDA).repeat_interleave(self.N_THETA)  # [187]
-        ti = torch.arange(self.N_THETA).repeat(self.N_LAMBDA)             # [187]
-        self.register_buffer("lambda_idx", li)
-        self.register_buffer("theta_idx",  ti)
+        self.register_buffer("theta_idx", torch.arange(self.N_THETA))
 
     def encode(self, cond):
-        B, C, L, T = cond.shape          # C=in_ch, L=11波长, T=17角度
-
-        # 展开成 token 序列 [B, 187, C] → [B, 187, emb_dim]
-        x = cond.permute(0, 2, 3, 1).reshape(B, L * T, C)
+        B, C, T = cond.shape
+        x = cond.transpose(1, 2)
         x = self.input_proj(x)
-
-        # 加物理位置编码：知道哪个 token 是 1000nm、哪个是 ±40°
-        pe = torch.cat(
-            [self.lambda_pe(self.lambda_idx),   # [187, emb_dim//2]
-             self.theta_pe(self.theta_idx)],    # [187, emb_dim//2]
-            dim=-1,
-        )                                        # [187, emb_dim]
-        x = x + pe                              # broadcast over batch
-
-        # 拼 CLS token，Transformer 编码
+        x = x + self.theta_pe(self.theta_idx)[None]
         cls = self.cls.expand(B, -1, -1)
-        x = self.transformer(torch.cat([cls, x], dim=1))   # [B, 188, emb_dim]
-
-        emb    = x[:, 0]    # [B, emb_dim]   — 全局频谱语义
-        tokens = x[:, 1:]   # [B, 187, emb_dim] — 逐格点 token
-
-        # 兼容旧接口：cond_feats 全为 None（不再做空间插值注入）
-        return emb, {"11x17": None, "6x9": None, "3x5": None}, tokens
+        x = self.transformer(torch.cat([cls, x], dim=1))
+        emb = x[:, 0]
+        tokens = x[:, 1:]
+        return emb, {"1x17": None}, tokens
 
     def forward(self, cond):
         emb, _, _ = self.encode(cond)
@@ -265,10 +234,7 @@ class UNetUpBlock(nn.Module):
 
 class SpectralAxisBlock(nn.Module):
     """
-    在小尺寸谱图上分别沿 theta / lambda 轴建模。
-
-    11x17 的输出很小，不适合重型 decoder；这里用深度可分离卷积
-    显式建模二维局部关系，以及沿两条物理轴的相关性。
+    历史遗留模块。onelambda 主流程不再使用二维谱图 refine。
     """
 
     def __init__(self, ch):
@@ -295,16 +261,11 @@ class SpectralAxisBlock(nn.Module):
 class ForwardSurrogate(nn.Module):
     """
     输入:  [B,1,64,64]，值域 0~1
-    输出:  [B,C,11,17]，归一化空间
+    输出:  [B,C,17]，归一化空间
 
-    一个更重型的前向代理：
-      - CNN encoder 提取 16x16 / 8x8 / 4x4 空间特征
-      - 8x8 / 4x4 特征展开为空间 token，作为 memory
-      - 11x17 个光谱 query token 通过 Transformer decoder 读取空间 token
-      - 最后再在 11x17 网格上做轻量谱图细化
-
-    目的：显式建模“输出谱图格点如何从结构空间特征中读取信息”，
-    用更强的 token 交互测试复杂模型上限。
+    onelambda 版本只预测目标波长下的角度响应。
+    仍保留“结构 memory token -> angle query token”的 decoder 形式，
+    但输出不再展开为 11x17 小图，而是直接预测 17 个 theta 点。
     """
 
     def __init__(self, out_ch):
@@ -344,14 +305,9 @@ class ForwardSurrogate(nn.Module):
         self.mem_coord_proj = nn.Linear(2, model_dim)
         self.mem_level_embed = nn.Parameter(torch.zeros(2, 1, model_dim))
 
-        # ── 谱图 query：每个 (lambda, theta) 一个 token ──
-        self.query_base = nn.Parameter(torch.zeros(1, 11 * 17, model_dim))
-        self.query_lambda = nn.Embedding(11, model_dim // 2)
-        self.query_theta = nn.Embedding(17, model_dim // 2)
-        li = torch.arange(11).repeat_interleave(17)
-        ti = torch.arange(17).repeat(11)
-        self.register_buffer("query_lambda_idx", li, persistent=False)
-        self.register_buffer("query_theta_idx", ti, persistent=False)
+        self.query_base = nn.Parameter(torch.zeros(1, 17, model_dim))
+        self.query_theta = nn.Embedding(17, model_dim)
+        self.register_buffer("query_theta_idx", torch.arange(17), persistent=False)
 
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=model_dim,
@@ -363,26 +319,27 @@ class ForwardSurrogate(nn.Module):
         )
         self.spec_decoder = nn.TransformerDecoder(decoder_layer, num_layers=3)
 
-        self.token_to_grid = nn.Sequential(
+        self.token_head = nn.Sequential(
             nn.Linear(model_dim, model_dim),
             nn.SiLU(),
-            nn.Linear(model_dim, base_ch * 4),
+            nn.Linear(model_dim, base_ch * 2),
         )
-        self.grid_fuse = ConvNormAct(base_ch * 4 + 2, base_ch * 4, 3)
-        self.spec_refine = nn.Sequential(
-            SpectralAxisBlock(base_ch * 4),
-            SpectralAxisBlock(base_ch * 4),
-            ConvNormAct(base_ch * 4, base_ch * 2, 3),
-            SpectralAxisBlock(base_ch * 2),
-            nn.Dropout2d(p=0.1),
-        )
-        self.spec_out = nn.Sequential(
-            nn.Conv2d(base_ch * 2, base_ch * 2, 1),
+        self.row_refine = nn.Sequential(
+            nn.Conv1d(base_ch * 2, base_ch * 2, 5, padding=2, groups=base_ch * 2),
+            nn.Conv1d(base_ch * 2, base_ch * 2, 1),
+            nn.GroupNorm(_groups(base_ch * 2), base_ch * 2),
             nn.SiLU(),
-            nn.Conv2d(base_ch * 2, out_ch, 1),
+            nn.Conv1d(base_ch * 2, base_ch, 3, padding=1),
+            nn.GroupNorm(_groups(base_ch), base_ch),
+            nn.SiLU(),
+            nn.Dropout(p=0.1),
+        )
+        self.row_out = nn.Sequential(
+            nn.Conv1d(base_ch, base_ch, 1),
+            nn.SiLU(),
+            nn.Conv1d(base_ch, out_ch, 1),
         )
         self.register_buffer("coord_64", _coord_grid(64, 64), persistent=False)
-        self.register_buffer("coord_11x17", _coord_grid(11, 17), persistent=False)
         self.register_buffer("coord_8", _coord_grid(8, 8), persistent=False)
         self.register_buffer("coord_4", _coord_grid(4, 4), persistent=False)
 
@@ -394,13 +351,7 @@ class ForwardSurrogate(nn.Module):
         return mem
 
     def _query_tokens(self, batch_size, dtype, device):
-        query_pe = torch.cat(
-            [
-                self.query_lambda(self.query_lambda_idx),
-                self.query_theta(self.query_theta_idx),
-            ],
-            dim=-1,
-        ).to(device=device, dtype=dtype)
+        query_pe = self.query_theta(self.query_theta_idx).to(device=device, dtype=dtype)
         return self.query_base.to(device=device, dtype=dtype).expand(batch_size, -1, -1) + query_pe[None]
 
     def forward(self, x):
@@ -417,38 +368,30 @@ class ForwardSurrogate(nn.Module):
         memory = torch.cat([mem8, mem4], dim=1)
 
         queries = self._query_tokens(x.shape[0], x.dtype, x.device)
-        spec_tokens = self.spec_decoder(tgt=queries, memory=memory)
-
-        grid = self.token_to_grid(spec_tokens).transpose(1, 2).reshape(x.shape[0], -1, 11, 17)
-        spec_coord = self.coord_11x17[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
-        fused = self.grid_fuse(torch.cat([grid, spec_coord], dim=1))
-        fused = self.spec_refine(fused)
-        return self.spec_out(fused)
+        row_tokens = self.spec_decoder(tgt=queries, memory=memory)
+        row_feat = self.token_head(row_tokens).transpose(1, 2)
+        row_feat = self.row_refine(row_feat)
+        return self.row_out(row_feat)
 
 
 class ConditionalUNet(nn.Module):
     """
     输入:
       x_t:   [B,1,64,64]
-      cond:  [B,C,11,17]
+      cond:  [B,C,17]
       t:     [B]
     输出:
       v_pred [B,1,64,64]
 
-    条件注入改进（v3）：
-      - ConditionEncoderTokens: 把光谱展成 187 个 token，保留所有 (λ,θ) 信息
-      - AdaGN (scale+shift): 全局语义注入每个 ResBlock
-      - Cross-Attention: 16×16, 8×8(×2), 16×16(解码器), 32×32(解码器，新增)
-      - 去掉了语义错位的空间插值注入（cond_feats → 全 None）
+    onelambda 版本只接收目标波长的一维角度响应条件。
     """
 
     def __init__(self, cond_in_ch, base_ch=64, time_dim=256, cond_dim=256):
         super().__init__()
 
-        # ── 条件编码器：Token 化，187 个 (λ,θ) 格点 ──
         self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim)
         self.null_cond    = nn.Parameter(torch.zeros(1, cond_dim))
-        self.null_tokens  = nn.Parameter(torch.zeros(1, 187, cond_dim))
+        self.null_tokens  = nn.Parameter(torch.zeros(1, 17, cond_dim))
 
         # ── 时间嵌入 ──
         self.time_mlp = nn.Sequential(

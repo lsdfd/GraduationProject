@@ -169,9 +169,19 @@ def main() -> None:
     }
 
     if "tpp_mag" in data.files and "tss_mag" in data.files:
-        summary["pair_checks"].append(compare_pair(data["tpp_mag"], data["tss_mag"], "tpp_mag", "tss_mag"))
-        lambdas = np.asarray(data["lambdas"], dtype=np.float64) if "lambdas" in data.files else np.arange(data["tpp_mag"].shape[1], dtype=np.float64)
-        summary["polarization_independence"] = compare_theta_curves_per_lambda(data["tpp_mag"], data["tss_mag"], lambdas)
+        tpp = np.asarray(data["tpp_mag"])
+        tss = np.asarray(data["tss_mag"])
+        if tpp.ndim == 2:
+            tpp = tpp[:, None, :]
+            tss = tss[:, None, :]
+        summary["pair_checks"].append(compare_pair(tpp, tss, "tpp_mag", "tss_mag"))
+        if "lambdas" in data.files:
+            lambdas = np.asarray(data["lambdas"], dtype=np.float64)
+        elif "target_lambda" in data.files:
+            lambdas = np.asarray([float(data["target_lambda"])], dtype=np.float64)
+        else:
+            lambdas = np.arange(tpp.shape[1], dtype=np.float64)
+        summary["polarization_independence"] = compare_theta_curves_per_lambda(tpp, tss, lambdas)
     else:
         summary["notes"].append("tpp_mag/tss_mag pair is unavailable in this npz.")
 

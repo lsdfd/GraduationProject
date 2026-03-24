@@ -26,6 +26,7 @@ def main():
 
     cfg = {
         "data_path": args.data_path,
+        "target_lambda": 1000.0,
         "batch_size": 64,
         "epochs": 150,
         "lr": 1e-4,
@@ -57,12 +58,12 @@ def main():
     cfg["run_dir"] = str(run_dir)
     print(f"[Forward] run_dir={run_dir}")
 
-    dataset = RCWADataset(cfg["data_path"])
+    dataset = RCWADataset(cfg["data_path"], target_lambda=cfg["target_lambda"])
     cond_channels = dataset[0][1].shape[0]
 
     # 用于反归一化，计算物理单位下的误差
-    cond_mean_t = torch.from_numpy(dataset.cond_mean).float()  # [1,2,11,17]
-    cond_std_t  = torch.from_numpy(dataset.cond_std).float()   # [1,2,11,17]
+    cond_mean_t = torch.from_numpy(dataset.cond_mean).float()
+    cond_std_t  = torch.from_numpy(dataset.cond_std).float()
     mean_dev = cond_mean_t.to(cfg["device"])
     std_dev  = cond_std_t.to(cfg["device"])
 

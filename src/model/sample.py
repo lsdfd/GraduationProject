@@ -7,7 +7,7 @@ from diffusion import GaussianDiffusion
 
 
 def load_target_cond(target_path, stats_path, device):
-    target = np.load(target_path).astype(np.float32)   # [C,11,17], C order: [tpp_mag, tss_mag]
+    target = np.load(target_path).astype(np.float32)   # [C,17], C order: [tpp_mag, tss_mag]
     stats = np.load(stats_path)
     target = (target[None, ...] - stats["mean"].astype(np.float32)) / stats["std"].astype(np.float32)
     return torch.from_numpy(target).to(device)
@@ -40,10 +40,10 @@ def main():
     diffusion = GaussianDiffusion(ConditionalUNet(cond_channels).to(cfg["device"]), timesteps=1000, image_size=64).to(cfg["device"])
     diffusion = load_model(cfg["diffusion_ckpt"], diffusion, "diffusion", cfg["device"])
 
-    cond_batch = target_cond.repeat(cfg["num_samples"], 1, 1, 1)   # [K,C,11,17]
+    cond_batch = target_cond.repeat(cfg["num_samples"], 1, 1)   # [K,C,17]
     samples = diffusion.sample(cond_batch, cfg_scale=cfg["cfg_scale"])  # [K,1,64,64]
-    pred_cond = surrogate(samples)                                     # [K,C,11,17]
-    err = F.l1_loss(pred_cond, cond_batch, reduction="none").mean(dim=(1, 2, 3))
+    pred_cond = surrogate(samples)                                     # [K,C,17]
+    err = F.l1_loss(pred_cond, cond_batch, reduction="none").mean(dim=(1, 2))
     topk = torch.topk(err, k=min(5, cfg["num_samples"]), largest=False).indices
 
     np.save(os.path.join(cfg["save_dir"], "all_samples.npy"), samples.cpu().numpy())

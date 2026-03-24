@@ -45,6 +45,7 @@ def main():
     args = parse_args()
     cfg = {
         "data_path": "data/train_data.npz",
+        "target_lambda": 1000.0,
         "forward_ckpt": None,
         "batch_size": 32,
         "epochs": 100,
@@ -113,7 +114,7 @@ def main():
     print(f"[Diffusion] run_dir={run_dir}")
     print(f"[Diffusion] using forward_ckpt={cfg['forward_ckpt']}")
 
-    dataset = RCWADataset(cfg["data_path"])
+    dataset = RCWADataset(cfg["data_path"], target_lambda=cfg["target_lambda"])
     cond_channels = dataset[0][1].shape[0]
 
     n_train = int(len(dataset) * cfg["train_ratio"])

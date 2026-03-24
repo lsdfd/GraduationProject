@@ -29,12 +29,19 @@ def load_bundle(npz_path: Path, field: str) -> tuple[np.ndarray, np.ndarray, np.
     spec = np.asarray(data[field], dtype=np.float32)
     if structures.ndim != 3 or structures.shape[1:] != (64, 64):
         raise ValueError(f"structures should be [N,64,64], got {structures.shape}")
-    if spec.ndim != 3:
-        raise ValueError(f"{field} should be [N,L,T], got {spec.shape}")
+    if spec.ndim == 2:
+        spec = spec[:, None, :]
+    elif spec.ndim != 3:
+        raise ValueError(f"{field} should be [N,T] or [N,L,T], got {spec.shape}")
     if structures.shape[0] != spec.shape[0]:
         raise ValueError(f"structures/spec sample mismatch: {structures.shape[0]} vs {spec.shape[0]}")
 
-    lambdas = np.asarray(data["lambdas"], dtype=np.float32) if "lambdas" in data.files else np.arange(spec.shape[1], dtype=np.float32)
+    if "lambdas" in data.files:
+        lambdas = np.asarray(data["lambdas"], dtype=np.float32)
+    elif "target_lambda" in data.files:
+        lambdas = np.asarray([float(data["target_lambda"])], dtype=np.float32)
+    else:
+        lambdas = np.arange(spec.shape[1], dtype=np.float32)
     thetas = np.asarray(data["thetas"], dtype=np.float32) if "thetas" in data.files else np.arange(spec.shape[2], dtype=np.float32)
     if spec.shape[1] != len(lambdas) or spec.shape[2] != len(thetas):
         raise ValueError("spec shape and lambdas/thetas mismatch")

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""读取 structures.npy，批量做 RCWA 仿真并输出 |tpp|、|tss|。"""
+"""读取 structures.npy，批量做 1000nm 单波长 RCWA 仿真并输出 |tpp|、|tss|。"""
 
 import argparse
 import json
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_STRUCTURES = ROOT / "data" / "structures" / "structures.npy"
 DEFAULT_OUT = ROOT / "data" / "train_data.npz"
 DEFAULT_LOG = ROOT / "data" / "rcwa.log"
-LAMBDAS = np.arange(800.0, 1300.1, 50.0, dtype=np.float32)
+TARGET_LAMBDA = np.float32(1000.0)
 THETAS = np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
 
 
@@ -50,24 +50,23 @@ def phy_kwargs(lam, theta):
 
 def simulate_one(structure, device, orders):
     layer = torch.from_numpy(structure.astype(np.float32)).to(device)
-    tpp_mag = np.full((len(LAMBDAS), len(THETAS)), np.nan, dtype=np.float32)
+    tpp_mag = np.full((len(THETAS),), np.nan, dtype=np.float32)
     tss_mag = np.full_like(tpp_mag, np.nan)
     failures = []
 
-    for i, lam in enumerate(LAMBDAS):
-        for j, theta in enumerate(THETAS):
-            try:
-                out = torcwa_simulation(
-                    phy_kwargs(lam, theta),
-                    layer,
-                    rcwa_orders=orders,
-                    project=False,
-                    device=device,
-                )
-                tpp_mag[i, j] = float(out["tpp_mag"].detach().cpu().item())
-                tss_mag[i, j] = float(out["tss_mag"].detach().cpu().item())
-            except Exception as exc:
-                failures.append({"lambda_nm": float(lam), "theta_deg": float(theta), "error": str(exc)})
+    for j, theta in enumerate(THETAS):
+        try:
+            out = torcwa_simulation(
+                phy_kwargs(TARGET_LAMBDA, theta),
+                layer,
+                rcwa_orders=orders,
+                project=False,
+                device=device,
+            )
+            tpp_mag[j] = float(out["tpp_mag"].detach().cpu().item())
+            tss_mag[j] = float(out["tss_mag"].detach().cpu().item())
+        except Exception as exc:
+            failures.append({"lambda_nm": float(TARGET_LAMBDA), "theta_deg": float(theta), "error": str(exc)})
 
     return tpp_mag, tss_mag, failures
 
@@ -78,7 +77,7 @@ def save_npz(path, structures, tpp_mag, tss_mag):
         structures=structures,
         tpp_mag=tpp_mag,
         tss_mag=tss_mag,
-        lambdas=LAMBDAS,
+        target_lambda=TARGET_LAMBDA,
         thetas=THETAS,
     )
 
@@ -99,7 +98,7 @@ def parse_devices(devices_arg, device_arg):
 
 
 def _run_indices(structures, indices, device, orders):
-    tpp_part = np.full((len(indices), len(LAMBDAS), len(THETAS)), np.nan, dtype=np.float32)
+    tpp_part = np.full((len(indices), len(THETAS)), np.nan, dtype=np.float32)
     tss_part = np.full_like(tpp_part, np.nan)
     failed = []
 
@@ -171,14 +170,14 @@ def main():
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    tpp_mag = np.full((len(structures), len(LAMBDAS), len(THETAS)), np.nan, dtype=np.float32)
+    tpp_mag = np.full((len(structures), len(THETAS)), np.nan, dtype=np.float32)
     tss_mag = np.full_like(tpp_mag, np.nan)
     failed = []
     devices = parse_devices(a.devices, a.device)
     num_workers = len(devices)
 
     if num_workers == 1:
-        log(log_path, f"开始 RCWA 批量仿真，样本数={len(structures)}，device={devices[0]}，orders={a.rcwa_orders}")
+        log(log_path, f"开始 RCWA 批量仿真，样本数={len(structures)}，lambda={float(TARGET_LAMBDA):.0f}nm，device={devices[0]}，orders={a.rcwa_orders}")
         for idx in range(len(structures)):
             t0 = time.perf_counter()
             tpp_mag[idx], tss_mag[idx], failures = simulate_one(structures[idx], devices[0], a.rcwa_orders)
@@ -201,7 +200,7 @@ def main():
 
         log(
             log_path,
-            f"开始 RCWA 多卡并行，样本数={len(structures)}，devices={active_devices}，orders={a.rcwa_orders}",
+            f"开始 RCWA 多卡并行，样本数={len(structures)}，lambda={float(TARGET_LAMBDA):.0f}nm，devices={active_devices}，orders={a.rcwa_orders}",
         )
         for dev, idxs in zip(active_devices, split_indices):
             log(log_path, f"分配 {dev}: {len(idxs)} 个样本（index {idxs[0]}..{idxs[-1]}）")

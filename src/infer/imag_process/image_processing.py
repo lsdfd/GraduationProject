@@ -45,7 +45,7 @@ DATA_PATH    = PROJECT_ROOT / "data" / "train_data.npz"
 # ---------------------------------------------------------------------------
 THETA_MAX = 40.0
 NA        = np.sin(np.radians(THETA_MAX))    # ≈ 0.6428
-LAMBDAS   = np.arange(800.0, 1300.1, 50.0)  # [11]
+LAMBDAS   = np.asarray([1000.0])            # [1]
 THETAS    = np.arange(-40.0, 40.1,  5.0)    # [17]
 NX, NY    = 502, 502
 
@@ -133,11 +133,16 @@ def load_from_training(sample_idx: int,
                        lam_idx: int) -> tuple[np.ndarray, np.ndarray]:
     """返回 (t_ss_1d, t_pp_1d)，shape [17]。"""
     data    = np.load(DATA_PATH)
-    tpp_all = data["tpp_mag"]   # [N, 11, 17]
+    tpp_all = data["tpp_mag"]   # [N, 17] or [N, 1, 17]
     tss_all = data["tss_mag"]
     n = tpp_all.shape[0]
     if not (0 <= sample_idx < n):
         raise IndexError(f"sample_idx={sample_idx} out of range [0, {n})")
+    if tpp_all.ndim == 2:
+        return (
+            tss_all[sample_idx].astype(np.float64),
+            tpp_all[sample_idx].astype(np.float64),
+        )
     return (
         tss_all[sample_idx, lam_idx, :].astype(np.float64),
         tpp_all[sample_idx, lam_idx, :].astype(np.float64),
@@ -152,13 +157,13 @@ def load_from_infer(infer_dir: Path,
         d = PROJECT_ROOT / d
     if not (d / "all_pred_cond_raw.npy").exists():
         raise FileNotFoundError(f"找不到 all_pred_cond_raw.npy in {d}")
-    pred   = np.load(d / "all_pred_cond_raw.npy")   # [N, 2, 11, 17]
+    pred   = np.load(d / "all_pred_cond_raw.npy")   # [N, 2, 17]
     errors = np.load(d / "all_errors.npy")
     best   = int(np.argmin(errors))
     print(f"[infer] best={best}, error={errors[best]:.4f}")
     return (
-        pred[best, 1, lam_idx, :].astype(np.float64),
-        pred[best, 0, lam_idx, :].astype(np.float64),
+        pred[best, 1].astype(np.float64),
+        pred[best, 0].astype(np.float64),
     )
 
 
