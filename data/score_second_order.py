@@ -260,7 +260,10 @@ def plot_per_lambda(
     vmax = float(np.quantile(finite, 0.99)) if finite.size else 1.0
     if vmax <= vmin:
         vmax = vmin + 1e-6
-    extent = [float(thetas[0]), float(thetas[-1]), float(lambdas[0]), float(lambdas[-1])]
+    if len(lambdas) == 1:
+        extent = [float(thetas[0]), float(thetas[-1]), float(lambdas[0] - 5.0), float(lambdas[0] + 5.0)]
+    else:
+        extent = [float(thetas[0]), float(thetas[-1]), float(lambdas[0]), float(lambdas[-1])]
     comp_vmin = comp_vmax = None
     if companion_spec is not None:
         comp_finite = companion_spec[np.isfinite(companion_spec)]

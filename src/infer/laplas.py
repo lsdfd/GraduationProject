@@ -105,7 +105,7 @@ def load_template_row(
         target = np.stack([tpp_row, tss_row], axis=0)
     else:
         target = tpp_row[None]
-    return target.astype(np.float32), np.asarray([lambdas[lam_idx]], dtype=np.float32), thetas, sample_idx
+    return target.astype(np.float32), lambdas.astype(np.float32), thetas, sample_idx
 
 
 def compute_second_order_metrics(
@@ -321,6 +321,7 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
         target_raw,
         cond_ch,
         devices,
+        target_lambda=1000.0,
         rcwa_orders=args.rcwa_orders,
     )
     metrics, rank_second = compute_second_order_metrics(pred_raw, err, thetas)
