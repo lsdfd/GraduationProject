@@ -188,11 +188,25 @@ conda activate metagen
 
 ### 3. 安装依赖
 
+公共依赖和 `torch` 已经拆开：
+
+- `requirements.txt`：公共依赖，不包含 `torch`
+- `requirements-cu124.txt`：适合 CUDA 12.4 驱动环境
+- `requirements-cu128.txt`：适合 CUDA 12.8 驱动环境
+- `requirements-cpu.txt`：纯 CPU 环境
+
+如果你的服务器 `nvidia-smi` 显示是 `CUDA Version: 12.8`，优先用：
+
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-cu128.txt
 ```
 
-如果你的服务器 CUDA 版本和默认 `torch` 轮子不匹配，建议先按官方方式安装对应版本的 `torch`，再安装剩余依赖。
+如果是其他环境，可按下面选：
+
+```bash
+pip install -r requirements-cu124.txt
+pip install -r requirements-cpu.txt
+```
 
 ### 4. 检查数据
 
@@ -221,7 +235,7 @@ git clone -b onelambda --single-branch https://ghfast.top/https://github.com/lsd
 cd GraduationProject
 conda create -n metagen python=3.10 -y
 conda activate metagen
-pip install -r requirements.txt
+pip install -r requirements-cu128.txt
 ```
 
 ### 第二步：准备 one-lambda 数据
