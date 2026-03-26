@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from model.diffusion import GaussianDiffusion  # noqa: E402
 from model.models import ConditionalUNet, ForwardSurrogate  # noqa: E402
+from model.parallel_utils import load_state_dict_flexible, maybe_wrap_data_parallel, parse_devices as parse_runtime_devices  # noqa: E402
 from model.train_utils import resolve_latest_run  # noqa: E402
 from infer.common import (  # noqa: E402
     lambda_theta_grid,
@@ -39,18 +40,7 @@ TARGET_SWEEP = [
 
 
 def parse_devices(devices_arg: str | None, device_arg: str | None) -> list[str]:
-    if devices_arg:
-        devices = [d.strip() for d in devices_arg.split(",") if d.strip()]
-        if not devices:
-            raise ValueError("--devices 为空，请传入类似 cuda:0,cuda:1")
-        return devices
-    if device_arg:
-        return [device_arg]
-    if torch.cuda.is_available():
-        count = torch.cuda.device_count()
-        if count > 0:
-            return [f"cuda:{i}" for i in range(count)]
-    return ["cpu"]
+    return parse_runtime_devices(devices_arg, device_arg, default_to_all_cuda=True)
 
 
 def resolve_from_root(path_like: str | Path) -> Path:
@@ -501,6 +491,7 @@ def _run_with_args(args) -> None:
     print(f"[laplas] stats={args.stats}")
     print(f"[laplas] diffusion_ckpt={args.diffusion_ckpt}")
     print(f"[laplas] forward_ckpt={args.forward_ckpt}")
+    print(f"[laplas] devices={devices} sample_parallel={'yes' if len(devices) > 1 and args.device.startswith('cuda') else 'no'} rcwa_parallel={'yes' if len(devices) > 1 else 'no'}")
 
     mean, std = load_stats(args.stats)
     cond_ch = int(mean.shape[1])
@@ -511,17 +502,19 @@ def _run_with_args(args) -> None:
         "diffusion",
         args.device,
     )
+    diffusion.model = maybe_wrap_data_parallel(diffusion.model, devices)
 
     surrogate = None
     if args.guidance_scale > 0:
         forward_path = Path(args.forward_ckpt)
         if forward_path.exists():
             surrogate = ForwardSurrogate(out_ch=cond_ch).to(args.device)
-            ckpt = torch.load(str(forward_path), map_location=args.device)
-            surrogate.load_state_dict(ckpt["model"])
+            ckpt = torch.load(str(forward_path), map_location=args.device, weights_only=False)
+            load_state_dict_flexible(surrogate, ckpt["model"])
             surrogate.eval()
             for param in surrogate.parameters():
                 param.requires_grad_(False)
+            surrogate = maybe_wrap_data_parallel(surrogate, devices)
             print(f"[laplas] 物理引导已启用: guidance_scale={args.guidance_scale}, guide_start_t={args.guide_start_t}, guide_every={args.guide_every}")
         else:
             print(f"[laplas] 警告: forward_ckpt 不存在 ({forward_path})，禁用物理引导")
@@ -538,7 +531,7 @@ def main():
     p.add_argument("--num_samples", type=int, default=32)
     p.add_argument("--cfg_scale", type=float, default=3.0)
     p.add_argument("--save_dir", default=str(ROOT / "samples" / "laplas"))
-    p.add_argument("--device", default=None, help="主设备；默认自动使用全部可见 GPU，并以首张卡做扩散采样")
+    p.add_argument("--device", default=None, help="主设备；默认自动使用全部可见 GPU")
     p.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
     p.add_argument("--target_lambda", type=float, default=1000.0)
     p.add_argument("--rcwa_orders", type=int, default=7)

@@ -26,6 +26,7 @@ except ModuleNotFoundError:
     # Avoid collisions with unrelated top-level `dataset` modules.
     sys.path.insert(0, str(ROOT / "src" / "dataset" / "rcwa"))
     from rcwa import torcwa_simulation  # type: ignore  # noqa: E402
+from model.parallel_utils import parse_devices as parse_runtime_devices  # noqa: E402
 from infer.common import (  # noqa: E402
     lambda_theta_grid,
     plot_structure,
@@ -36,18 +37,7 @@ from infer.common import (  # noqa: E402
 
 
 def parse_devices(devices_arg: str | None, device_arg: str | None) -> list[str]:
-    if devices_arg:
-        devices = [d.strip() for d in devices_arg.split(",") if d.strip()]
-        if not devices:
-            raise ValueError("--devices 为空，请传入类似 cuda:0,cuda:1")
-        return devices
-    if device_arg:
-        return [device_arg]
-    if torch.cuda.is_available():
-        count = torch.cuda.device_count()
-        if count > 0:
-            return [f"cuda:{i}" for i in range(count)]
-    return ["cpu"]
+    return parse_runtime_devices(devices_arg, device_arg, default_to_all_cuda=True)
 
 
 def resolve_from_root(path_like: str | Path) -> Path:
@@ -55,11 +45,25 @@ def resolve_from_root(path_like: str | Path) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
-def latest_laplas_file(name: str) -> str:
-    root = ROOT / "samples" / "laplas"
-    files = sorted([p for p in root.glob(f"**/{name}") if p.is_file()], key=lambda p: p.stat().st_mtime)
+def resolve_laplas_roots(laplas_root: str | Path | None) -> list[Path]:
+    roots: list[Path] = []
+    if laplas_root is not None:
+        roots.append(resolve_from_root(laplas_root))
+    fallback = ROOT / "samples" / "laplas"
+    if all(root != fallback for root in roots):
+        roots.append(fallback)
+    return roots
+
+
+def latest_laplas_file(name: str, roots: list[Path]) -> str:
+    files: list[Path] = []
+    for root in roots:
+        if root.exists():
+            files.extend([p for p in root.glob(f"**/{name}") if p.is_file()])
+    files = sorted(files, key=lambda p: p.stat().st_mtime)
     if not files:
-        raise FileNotFoundError("未找到 samples/laplas 下的推理结果，请先运行 python src/infer/laplas.py")
+        roots_str = ", ".join(str(p) for p in roots)
+        raise FileNotFoundError(f"未找到以下目录下的 {name}: {roots_str}")
     return str(files[-1])
 
 
@@ -453,21 +457,25 @@ def _run_with_args(args) -> None:
         args.target = str(resolve_from_root(args.target))
     if args.init:
         args.init = str(resolve_from_root(args.init))
+    laplas_roots = resolve_laplas_roots(getattr(args, "laplas_root", None))
+    args.laplas_root = str(laplas_roots[0]) if laplas_roots else None
     args.save_dir = str(resolve_from_root(args.save_dir))
     devices = parse_devices(args.devices, args.device)
     args.device = devices[0]
 
     save_dir = Path(args.save_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir.mkdir(parents=True, exist_ok=True)
-    args.target = args.target or latest_laplas_file("target_cond_raw.npy")
+    args.target = args.target or latest_laplas_file("target_cond_raw.npy", laplas_roots)
     try:
-        default_init = latest_laplas_file("topk_second_samples.npy")
+        default_init = latest_laplas_file("topk_second_samples.npy", laplas_roots)
     except FileNotFoundError:
-        default_init = latest_laplas_file("topk_samples.npy")
+        default_init = latest_laplas_file("topk_samples.npy", laplas_roots)
     args.init = args.init or default_init
 
     target_raw = load_target_raw(args.target)
     init_batch = load_init_batch(args.init, "cpu", args.max_inits)
+    print(f"[opt] laplas_roots={[str(p) for p in laplas_roots]}")
+    print(f"[opt] devices={devices} candidate_parallel={'yes' if len(devices) > 1 else 'no'}")
 
     rows = []
     total_start = time.perf_counter()
@@ -534,6 +542,7 @@ def main():
     p = argparse.ArgumentParser(description="Multi-start RCWA topology optimization from laplas top-k samples.")
     p.add_argument("--target")
     p.add_argument("--init")
+    p.add_argument("--laplas_root", default=None, help="优先从该 laplas 输出目录寻找 target/init；默认回退到 samples/laplas")
     p.add_argument("--steps", type=int, default=100)
     p.add_argument("--lr", type=float, default=0.005)
     p.add_argument("--save_dir", default=str(ROOT / "samples" / "optimized"))

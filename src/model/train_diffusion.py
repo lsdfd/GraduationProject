@@ -6,23 +6,8 @@ from torch.utils.data import DataLoader, random_split
 from dataset import RCWADataset
 from models import ConditionalUNet, ForwardSurrogate
 from diffusion import GaussianDiffusion
+from parallel_utils import load_state_dict_flexible, maybe_wrap_data_parallel, parse_devices, sanitize_state_dict_keys
 from train_utils import TrainLogger, prepare_run_dir, update_latest_run, resolve_latest_run, write_json
-
-
-def load_state_dict_flexible(model, state_dict):
-    try:
-        model.load_state_dict(state_dict)
-        return
-    except RuntimeError:
-        pass
-
-    stripped = {}
-    for key, value in state_dict.items():
-        if key.startswith("module."):
-            stripped[key[len("module."):]] = value
-        else:
-            stripped[key] = value
-    model.load_state_dict(stripped)
 
 
 def parse_args():
@@ -34,6 +19,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size.")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate.")
     parser.add_argument("--device", type=str, default=None, help="Device, e.g. cuda:0 or cpu.")
+    parser.add_argument("--devices", type=str, default=None, help="Comma-separated devices, e.g. cuda:0,cuda:1")
     parser.add_argument("--lambda_diff", type=float, default=None, help="Weight for diffusion denoise loss.")
     parser.add_argument("--lambda_phys", type=float, default=None, help="Weight for physics surrogate loss.")
     parser.add_argument("--lambda_bin", type=float, default=None, help="Weight for binarization loss.")
@@ -67,6 +53,7 @@ def main():
         "min_lr": 1e-6,
         "early_stop_patience": 15,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "devices": None,
     }
 
     # Allow command-line overrides for quick experiment switching.
@@ -78,6 +65,7 @@ def main():
         "batch_size",
         "lr",
         "device",
+        "devices",
         "lambda_diff",
         "lambda_phys",
         "lambda_bin",
@@ -87,13 +75,12 @@ def main():
         if value is not None:
             cfg[key] = value
 
+    devices = parse_devices(cfg["devices"], cfg["device"])
+    cfg["devices"] = devices
+    cfg["device"] = devices[0]
     use_cuda = cfg["device"].startswith("cuda")
     if use_cuda:
-        device_name = cfg["device"]
-        if device_name == "cuda":
-            device_name = "cuda:0"
-            cfg["device"] = device_name
-        torch.cuda.set_device(device_name)
+        torch.cuda.set_device(cfg["device"])
 
     os.makedirs(cfg["save_dir"], exist_ok=True)
     run_dir = prepare_run_dir(cfg["save_dir"], "diffusion")
@@ -112,6 +99,7 @@ def main():
         cfg["forward_ckpt"] = str(latest_forward_run / "forward_best.pt")
     print(f"[Diffusion] run_dir={run_dir}")
     print(f"[Diffusion] using forward_ckpt={cfg['forward_ckpt']}")
+    print(f"[Diffusion] devices={devices} data_parallel={'yes' if len(devices) > 1 and use_cuda else 'no'}")
 
     dataset = RCWADataset(cfg["data_path"])
     cond_channels = dataset[0][1].shape[0]
@@ -141,8 +129,10 @@ def main():
     surrogate.eval()
     for p in surrogate.parameters():
         p.requires_grad = False
+    surrogate = maybe_wrap_data_parallel(surrogate, devices)
 
     unet = ConditionalUNet(cond_in_ch=cond_channels).to(cfg["device"])
+    unet = maybe_wrap_data_parallel(unet, devices)
     diffusion = GaussianDiffusion(unet, timesteps=cfg["timesteps"], image_size=64).to(cfg["device"])
 
     opt = torch.optim.AdamW(unet.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -248,7 +238,7 @@ def main():
         )
 
         ckpt = {
-            "diffusion": diffusion.state_dict(),
+            "diffusion": sanitize_state_dict_keys(diffusion.state_dict()),
             "cond_channels": cond_channels,
             "epoch": epoch,
             "best_val": best_val,

@@ -8,6 +8,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from model.parallel_utils import load_state_dict_flexible
 
 try:
     from dataset.rcwa.rcwa import torcwa_simulation
@@ -22,7 +23,8 @@ def lambda_theta_grid() -> tuple[np.ndarray, np.ndarray]:
 
 
 def load_model(path: str, model: torch.nn.Module, key: str, device: str) -> torch.nn.Module:
-    model.load_state_dict(torch.load(path, map_location=device)[key])
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    load_state_dict_flexible(model, ckpt[key])
     return model.eval()
 
 

@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from dataset import RCWADataset
 from models import ForwardSurrogate
+from parallel_utils import maybe_wrap_data_parallel, parse_devices, sanitize_state_dict_keys
 from train_utils import TrainLogger, prepare_run_dir, update_latest_run, write_json
 
 
@@ -22,8 +23,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", default="data/train_data.npz")
     parser.add_argument("--save_dir", default="checkpoints")
+    parser.add_argument("--device", default=None, help="主设备；默认自动使用全部可见 GPU")
+    parser.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
     args = parser.parse_args()
 
+    default_device = "cuda" if torch.cuda.is_available() else "cpu"
     cfg = {
         "data_path": args.data_path,
         "batch_size": 64,
@@ -39,23 +43,24 @@ def main():
         "lr_factor": 0.5,
         "min_lr": 1e-6,
         "early_stop_patience": 30,
-        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "device": args.device or default_device,
+        "devices": args.devices,
     }
 
+    devices = parse_devices(cfg["devices"], cfg["device"])
+    cfg["devices"] = devices
+    cfg["device"] = devices[0]
     use_cuda = cfg["device"].startswith("cuda")
     if use_cuda:
-        device_name = cfg["device"]
-        if device_name == "cuda":
-            device_name = "cuda:0"
-            cfg["device"] = device_name
-        torch.cuda.set_device(device_name)
+        torch.cuda.set_device(cfg["device"])
 
     os.makedirs(cfg["save_dir"], exist_ok=True)
     run_dir = prepare_run_dir(cfg["save_dir"], "forward")
     update_latest_run(cfg["save_dir"], "forward", run_dir)
-    logger = TrainLogger("forward", str(run_dir), ["epoch", "train_loss", "val_loss"])
+    logger = TrainLogger("forward", str(run_dir), ["epoch", "train_loss", "val_loss", "train_mae_phys", "val_mae_phys"])
     cfg["run_dir"] = str(run_dir)
     print(f"[Forward] run_dir={run_dir}")
+    print(f"[Forward] devices={devices} data_parallel={'yes' if len(devices) > 1 and use_cuda else 'no'}")
 
     dataset = RCWADataset(cfg["data_path"])
     cond_channels = dataset[0][1].shape[0]
@@ -92,6 +97,7 @@ def main():
     )
 
     model = ForwardSurrogate(out_ch=cond_channels).to(cfg["device"])
+    model = maybe_wrap_data_parallel(model, devices)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         opt,
@@ -157,12 +163,18 @@ def main():
         print(f"[Forward] epoch={epoch:03d} train_mae={train_mae_phys:.4f} val_mae={val_mae_phys:.4f} lr={current_lr:.2e}")
         logger.log_scalars(
             epoch,
-            [epoch, train_mae_phys, val_mae_phys],
-            {"mae_phys/train": train_mae_phys, "mae_phys/val": val_mae_phys, "lr": current_lr},
+            [epoch, train_loss, val_loss, train_mae_phys, val_mae_phys],
+            {
+                "loss/train": train_loss,
+                "loss/val": val_loss,
+                "mae_phys/train": train_mae_phys,
+                "mae_phys/val": val_mae_phys,
+                "lr": current_lr,
+            },
         )
 
         ckpt = {
-            "model": model.state_dict(),
+            "model": sanitize_state_dict_keys(model.state_dict()),
             "cond_channels": cond_channels,
             "epoch": epoch,
             "best_val": best_val,

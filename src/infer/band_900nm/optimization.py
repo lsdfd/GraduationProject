@@ -25,12 +25,14 @@ import infer.optimization as _opt  # noqa: E402
 
 _DEFAULT_TARGET_LAMBDA = 900.0
 _DEFAULT_SAVE_DIR = str(_ROOT / "samples" / "optimized_900nm")
+_DEFAULT_LAPLAS_ROOT = str(_ROOT / "samples" / "laplas_900nm")
 
 
 def main():
     p = argparse.ArgumentParser(description="Multi-start topology optimization targeting 900 nm.")
     p.add_argument("--target")
     p.add_argument("--init")
+    p.add_argument("--laplas_root",       default=_DEFAULT_LAPLAS_ROOT)
     p.add_argument("--steps",              type=int,   default=100)
     p.add_argument("--lr",                 type=float, default=0.005)
     p.add_argument("--save_dir",           default=_DEFAULT_SAVE_DIR)
