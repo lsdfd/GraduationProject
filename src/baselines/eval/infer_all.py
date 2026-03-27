@@ -25,7 +25,7 @@ for _p in [
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from models import ConditionalUNet, ForwardSurrogate
+from models import ForwardSurrogate, build_conditional_unet
 from diffusion import GaussianDiffusion
 from cvae import CVAE
 from cgan import Generator
@@ -208,8 +208,9 @@ def generate_cgan(cond_norm, n_samples: int = 16, device: str = "cpu",
 def load_diffusion(ckpt_path: str, device: str):
     ckpt     = torch.load(ckpt_path, map_location=device, weights_only=False)
     cond_ch  = ckpt["cond_channels"]
-    unet     = ConditionalUNet(cond_in_ch=cond_ch).to(device)
-    diffusion = GaussianDiffusion(unet, timesteps=1000, image_size=64).to(device)
+    cfg = ckpt.get("cfg", {})
+    unet = build_conditional_unet(cond_ch, cfg).to(device)
+    diffusion = GaussianDiffusion(unet, timesteps=int(cfg.get("timesteps", 1000)), image_size=64).to(device)
 
     state = ckpt["diffusion"]
     diffusion.load_state_dict(state)

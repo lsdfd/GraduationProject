@@ -189,6 +189,42 @@ class ConditionEncoderTokens(nn.Module):
         return emb
 
 
+class ConditionEncoderConv(nn.Module):
+    """
+    更轻量的条件编码器：
+      - 直接在 11x17 频谱网格上做卷积
+      - 输出全局 cond_emb 供 FiLM 使用
+      - 同时输出 11x17 token 供可选 cross-attn 使用
+    """
+
+    def __init__(self, in_ch, emb_dim=192, hidden_ch=96):
+        super().__init__()
+        self.net = nn.Sequential(
+            ConvNormAct(in_ch, hidden_ch, 3),
+            ResidualConvBlock(hidden_ch, hidden_ch),
+            ResidualConvBlock(hidden_ch, hidden_ch),
+            nn.Dropout2d(0.05),
+        )
+        self.to_emb = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(hidden_ch, emb_dim),
+            nn.SiLU(),
+            nn.Linear(emb_dim, emb_dim),
+        )
+        self.to_tokens = nn.Conv2d(hidden_ch, emb_dim, 1)
+
+    def encode(self, cond):
+        h = self.net(cond)
+        emb = self.to_emb(h)
+        tokens = self.to_tokens(h).flatten(2).transpose(1, 2)
+        return emb, {"11x17": h, "6x9": None, "3x5": None}, tokens
+
+    def forward(self, cond):
+        emb, _, _ = self.encode(cond)
+        return emb
+
+
 class ResBlock(nn.Module):
     def __init__(self, in_ch, out_ch, time_dim, cond_dim):
         super().__init__()
@@ -442,11 +478,43 @@ class ConditionalUNet(nn.Module):
       - 去掉了语义错位的空间插值注入（cond_feats → 全 None）
     """
 
-    def __init__(self, cond_in_ch, base_ch=64, time_dim=256, cond_dim=256):
+    def __init__(self, cond_in_ch, base_ch=64, time_dim=256, cond_dim=256, arch="token_cross_v3"):
         super().__init__()
+        self.arch = arch
+        token_heads = 4 if cond_dim % 4 == 0 else (2 if cond_dim % 2 == 0 else 1)
 
-        # ── 条件编码器：Token 化，187 个 (λ,θ) 格点 ──
-        self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim)
+        if arch == "token_cross_v3":
+            self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim, n_layers=3, n_heads=token_heads)
+            use_cross3 = True
+            use_cross4 = True
+            use_mid_cross = True
+            use_up_cross1 = True
+            use_up_cross2 = True
+        elif arch == "token_cross_lite":
+            self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim, n_layers=1, n_heads=token_heads)
+            use_cross3 = True
+            use_cross4 = False
+            use_mid_cross = True
+            use_up_cross1 = True
+            use_up_cross2 = False
+        elif arch == "cnn_cross_v1":
+            self.cond_encoder = ConditionEncoderConv(cond_in_ch, emb_dim=cond_dim, hidden_ch=max(64, cond_dim // 2))
+            use_cross3 = True
+            use_cross4 = False
+            use_mid_cross = True
+            use_up_cross1 = True
+            use_up_cross2 = False
+        elif arch == "cnn_film_v1":
+            self.cond_encoder = ConditionEncoderConv(cond_in_ch, emb_dim=cond_dim, hidden_ch=max(64, cond_dim // 2))
+            use_cross3 = False
+            use_cross4 = False
+            use_mid_cross = False
+            use_up_cross1 = False
+            use_up_cross2 = False
+        else:
+            raise ValueError(f"Unsupported ConditionalUNet arch: {arch}")
+
+        # ── 条件编码器 ──
         self.null_cond    = nn.Parameter(torch.zeros(1, cond_dim))
         self.null_tokens  = nn.Parameter(torch.zeros(1, 187, cond_dim))
 
@@ -469,26 +537,26 @@ class ConditionalUNet(nn.Module):
 
         self.res3   = ResBlock(base_ch * 2, base_ch * 4, time_dim, cond_dim)  # 16×16
         self.attn3  = AttentionBlock(base_ch * 4)
-        self.cross3 = SpectrumCrossAttention(base_ch * 4, cond_dim)           # ← cross-attn
+        self.cross3 = SpectrumCrossAttention(base_ch * 4, cond_dim) if use_cross3 else None
         self.down3  = Downsample(base_ch * 4)
 
         self.res4   = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)  # 8×8
-        self.cross4 = SpectrumCrossAttention(base_ch * 4, cond_dim)           # ← cross-attn
+        self.cross4 = SpectrumCrossAttention(base_ch * 4, cond_dim) if use_cross4 else None
 
         # ── Bottleneck 8×8 ──
         self.mid1      = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)
         self.mid_attn  = AttentionBlock(base_ch * 4)
-        self.mid_cross = SpectrumCrossAttention(base_ch * 4, cond_dim)        # ← cross-attn
+        self.mid_cross = SpectrumCrossAttention(base_ch * 4, cond_dim) if use_mid_cross else None
         self.mid2      = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)
 
         # ── 解码器 ──
         self.up1       = Upsample(base_ch * 4)
         self.up_res1   = ResBlock(base_ch * 8, base_ch * 4, time_dim, cond_dim)  # 16×16
-        self.up_cross1 = SpectrumCrossAttention(base_ch * 4, cond_dim)            # ← cross-attn
+        self.up_cross1 = SpectrumCrossAttention(base_ch * 4, cond_dim) if use_up_cross1 else None
 
         self.up2       = Upsample(base_ch * 4)
         self.up_res2   = ResBlock(base_ch * 6, base_ch * 2, time_dim, cond_dim)  # 32×32
-        self.up_cross2 = SpectrumCrossAttention(base_ch * 2, cond_dim)            # ← cross-attn 新增
+        self.up_cross2 = SpectrumCrossAttention(base_ch * 2, cond_dim) if use_up_cross2 else None
 
         self.up3       = Upsample(base_ch * 2)
         self.up_res3   = ResBlock(base_ch * 3, base_ch,     time_dim, cond_dim)  # 64×64
@@ -515,6 +583,12 @@ class ConditionalUNet(nn.Module):
 
         return cond_emb, cond_tokens
 
+    @staticmethod
+    def _apply_cross(module, x, cond_tokens):
+        if module is None:
+            return x
+        return module(x, cond_tokens)
+
     def forward(self, x, t, cond=None, cond_drop_prob=0.0, force_uncond=False):
         b = x.shape[0]
         t_emb            = self.time_mlp(t)
@@ -525,25 +599,36 @@ class ConditionalUNet(nn.Module):
         x1 = self.res1(x0, t_emb, c_emb)                                   # 64×64
         x2 = self.res2(self.down1(x1), t_emb, c_emb)                       # 32×32
         x3 = self.res3(self.down2(x2), t_emb, c_emb)                       # 16×16
-        x3 = self.cross3(self.attn3(x3), c_tokens)                         # ← cross-attn
+        x3 = self._apply_cross(self.cross3, self.attn3(x3), c_tokens)
         x4 = self.res4(self.down3(x3), t_emb, c_emb)                       # 8×8
-        x4 = self.cross4(x4, c_tokens)                                     # ← cross-attn
+        x4 = self._apply_cross(self.cross4, x4, c_tokens)
 
         # Bottleneck
         h = self.mid1(x4, t_emb, c_emb)
-        h = self.mid_cross(self.mid_attn(h), c_tokens)                     # ← cross-attn
+        h = self._apply_cross(self.mid_cross, self.mid_attn(h), c_tokens)
         h = self.mid2(h, t_emb, c_emb)
 
         # 解码器
         h = self.up1(h)
         h = self.up_res1(torch.cat([h, x3], dim=1), t_emb, c_emb)         # 16×16
-        h = self.up_cross1(h, c_tokens)                                    # ← cross-attn
+        h = self._apply_cross(self.up_cross1, h, c_tokens)
 
         h = self.up2(h)
         h = self.up_res2(torch.cat([h, x2], dim=1), t_emb, c_emb)         # 32×32
-        h = self.up_cross2(h, c_tokens)                                    # ← cross-attn 新增
+        h = self._apply_cross(self.up_cross2, h, c_tokens)
 
         h = self.up3(h)
         h = self.up_res3(torch.cat([h, x1], dim=1), t_emb, c_emb)         # 64×64
 
         return self.out_conv(F.silu(self.out_norm(h)))
+
+
+def build_conditional_unet(cond_in_ch, cfg: dict | None = None):
+    cfg = cfg or {}
+    return ConditionalUNet(
+        cond_in_ch=cond_in_ch,
+        base_ch=int(cfg.get("base_ch", 64)),
+        time_dim=int(cfg.get("time_dim", 256)),
+        cond_dim=int(cfg.get("cond_dim", 256)),
+        arch=str(cfg.get("unet_arch", "token_cross_v3")),
+    )

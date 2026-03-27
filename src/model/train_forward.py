@@ -1,9 +1,16 @@
 import os
 import argparse
+import sys
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
+
+THIS_DIR = Path(__file__).resolve().parent
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
+
 from dataset import RCWADataset
 from models import ForwardSurrogate
 from parallel_utils import maybe_wrap_data_parallel, parse_devices, sanitize_state_dict_keys
@@ -23,7 +30,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", default="data/train_data.npz")
     parser.add_argument("--save_dir", default="checkpoints")
-    parser.add_argument("--device", default=None, help="主设备；默认自动使用全部可见 GPU")
+    parser.add_argument("--runs_dir", default="runs")
+    parser.add_argument("--device", default=None, help="主设备；默认使用 cuda:0")
     parser.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
     args = parser.parse_args()
 
@@ -35,6 +43,7 @@ def main():
         "lr": 1e-4,
         "weight_decay": 1e-4,
         "save_dir": args.save_dir,
+        "runs_dir": args.runs_dir,
         "train_ratio": 0.9,
         "num_workers": 4,
         "split_seed": 20260315,
@@ -47,7 +56,7 @@ def main():
         "devices": args.devices,
     }
 
-    devices = parse_devices(cfg["devices"], cfg["device"])
+    devices = parse_devices(cfg["devices"], cfg["device"], default_to_all_cuda=False)
     cfg["devices"] = devices
     cfg["device"] = devices[0]
     use_cuda = cfg["device"].startswith("cuda")
@@ -55,8 +64,9 @@ def main():
         torch.cuda.set_device(cfg["device"])
 
     os.makedirs(cfg["save_dir"], exist_ok=True)
-    run_dir = prepare_run_dir(cfg["save_dir"], "forward")
-    update_latest_run(cfg["save_dir"], "forward", run_dir)
+    os.makedirs(cfg["runs_dir"], exist_ok=True)
+    run_dir = prepare_run_dir(cfg["runs_dir"], "forward")
+    update_latest_run(cfg["runs_dir"], "forward", run_dir)
     logger = TrainLogger("forward", str(run_dir), ["epoch", "train_loss", "val_loss", "train_mae_phys", "val_mae_phys"])
     cfg["run_dir"] = str(run_dir)
     print(f"[Forward] run_dir={run_dir}")
@@ -180,7 +190,7 @@ def main():
             "best_val": best_val,
             "cfg": cfg,
         }
-        torch.save(ckpt, os.path.join(run_dir, "forward_last.pt"))
+        torch.save(ckpt, os.path.join(cfg["save_dir"], "forward_last.pt"))
 
         if val_loss < best_val:
             best_val = val_loss
@@ -188,7 +198,7 @@ def main():
             best_epoch = epoch
             stale_epochs = 0
             ckpt["best_val"] = best_val
-            torch.save(ckpt, os.path.join(run_dir, "forward_best.pt"))
+            torch.save(ckpt, os.path.join(cfg["save_dir"], "forward_best.pt"))
         else:
             stale_epochs += 1
 

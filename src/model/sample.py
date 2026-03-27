@@ -1,9 +1,18 @@
 import os
+import sys
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from models import ConditionalUNet, ForwardSurrogate
+
+THIS_DIR = Path(__file__).resolve().parent
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
+
+from models import ForwardSurrogate, build_conditional_unet
 from diffusion import GaussianDiffusion
+from parallel_utils import load_state_dict_flexible
+from train_utils import resolve_latest_run
 
 
 def load_target_cond(target_path, stats_path, device):
@@ -14,15 +23,25 @@ def load_target_cond(target_path, stats_path, device):
 
 
 def load_model(ckpt_path, model, key, device):
-    model.load_state_dict(torch.load(ckpt_path, map_location=device)[key])
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    load_state_dict_flexible(model, ckpt[key])
     return model.eval()
+
+
+def resolve_default_stats_path():
+    latest_forward_run = resolve_latest_run("runs", "forward")
+    if latest_forward_run is not None:
+        stats_path = os.path.join(latest_forward_run, "cond_stats.npz")
+        if os.path.exists(stats_path):
+            return stats_path
+    return "runs/forward_runs/cond_stats.npz"
 
 
 @torch.no_grad()
 def main():
     cfg = {
         "target_cond_path": "data/target_cond.npy",
-        "stats_path": "checkpoints/cond_stats.npz",
+        "stats_path": resolve_default_stats_path(),
         "forward_ckpt": "checkpoints/forward_best.pt",
         "diffusion_ckpt": "checkpoints/diffusion_best.pt",
         "num_samples": 32,
@@ -37,8 +56,15 @@ def main():
     cond_channels = target_cond.shape[1]
 
     surrogate = load_model(cfg["forward_ckpt"], ForwardSurrogate(cond_channels).to(cfg["device"]), "model", cfg["device"])
-    diffusion = GaussianDiffusion(ConditionalUNet(cond_channels).to(cfg["device"]), timesteps=1000, image_size=64).to(cfg["device"])
-    diffusion = load_model(cfg["diffusion_ckpt"], diffusion, "diffusion", cfg["device"])
+    diffusion_ckpt = torch.load(cfg["diffusion_ckpt"], map_location=cfg["device"], weights_only=False)
+    diffusion_cfg = diffusion_ckpt.get("cfg", {})
+    diffusion = GaussianDiffusion(
+        build_conditional_unet(cond_channels, diffusion_cfg).to(cfg["device"]),
+        timesteps=int(diffusion_cfg.get("timesteps", 1000)),
+        image_size=64,
+    ).to(cfg["device"])
+    load_state_dict_flexible(diffusion, diffusion_ckpt["diffusion"])
+    diffusion.eval()
 
     cond_batch = target_cond.repeat(cfg["num_samples"], 1, 1, 1)   # [K,C,11,17]
     samples = diffusion.sample(cond_batch, cfg_scale=cfg["cfg_scale"])  # [K,1,64,64]

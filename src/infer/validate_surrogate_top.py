@@ -18,11 +18,21 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from infer.common import denormalize_with_stats, lambda_theta_grid, load_model, load_stats, second_order_score_row, second_order_target  # noqa: E402
 from model.models import ForwardSurrogate  # noqa: E402
+from model.train_utils import resolve_latest_run  # noqa: E402
 
 
 def resolve_from_root(path_like: str | Path) -> Path:
     path = Path(path_like)
     return path if path.is_absolute() else ROOT / path
+
+
+def resolve_default_stats_path() -> Path:
+    latest_forward_run = resolve_latest_run(ROOT / "runs", "forward")
+    if latest_forward_run is not None:
+        stats = latest_forward_run / "cond_stats.npz"
+        if stats.exists():
+            return stats
+    return ROOT / "runs" / "forward_runs" / "cond_stats.npz"
 
 
 def load_top_sample_ids(csv_path: Path, target_lambda: float, topk: int) -> list[int]:
@@ -112,7 +122,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Validate surrogate predictions on top-ranked second-order samples at a given wavelength.")
     p.add_argument("--train_npz", default=str(ROOT / "data" / "train_data.npz"))
     p.add_argument("--topk_csv", default=str(ROOT / "data" / "second_order_scores" / "tpp_mag_top5_per_lambda.csv"))
-    p.add_argument("--stats", default=str(ROOT / "checkpoints" / "cond_stats.npz"))
+    p.add_argument("--stats", default=str(resolve_default_stats_path()))
     p.add_argument("--forward_ckpt", default=str(ROOT / "checkpoints" / "forward_best.pt"))
     p.add_argument("--target_lambda", type=float, default=1000.0)
     p.add_argument("--topk", type=int, default=5)

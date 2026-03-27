@@ -1,10 +1,17 @@
 import argparse
 import os
+import sys
+from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
+
+THIS_DIR = Path(__file__).resolve().parent
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
+
 from dataset import RCWADataset
-from models import ConditionalUNet, ForwardSurrogate
+from models import ForwardSurrogate, build_conditional_unet
 from diffusion import GaussianDiffusion
 from parallel_utils import load_state_dict_flexible, maybe_wrap_data_parallel, parse_devices, sanitize_state_dict_keys
 from train_utils import TrainLogger, prepare_run_dir, update_latest_run, resolve_latest_run, write_json
@@ -15,15 +22,22 @@ def parse_args():
     parser.add_argument("--data_path", type=str, default=None, help="Path to training npz file.")
     parser.add_argument("--forward_ckpt", type=str, default=None, help="Path to forward surrogate checkpoint.")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to save checkpoints/logs.")
+    parser.add_argument("--runs_dir", type=str, default=None, help="Directory to save per-run logs/metadata.")
     parser.add_argument("--epochs", type=int, default=None, help="Total training epochs.")
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size.")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate.")
-    parser.add_argument("--device", type=str, default=None, help="Device, e.g. cuda:0 or cpu.")
+    parser.add_argument("--device", type=str, default=None, help="Device, e.g. cuda:0 or cpu. Defaults to cuda:0.")
     parser.add_argument("--devices", type=str, default=None, help="Comma-separated devices, e.g. cuda:0,cuda:1")
     parser.add_argument("--lambda_diff", type=float, default=None, help="Weight for diffusion denoise loss.")
     parser.add_argument("--lambda_phys", type=float, default=None, help="Weight for physics surrogate loss.")
     parser.add_argument("--lambda_bin", type=float, default=None, help="Weight for binarization loss.")
     parser.add_argument("--cond_drop_prob", type=float, default=None, help="Condition dropout probability for CFG training.")
+    parser.add_argument("--unet_arch", type=str, default=None, help="Conditional UNet architecture.")
+    parser.add_argument("--base_ch", type=int, default=None, help="UNet base channels.")
+    parser.add_argument("--cond_dim", type=int, default=None, help="Condition embedding dimension.")
+    parser.add_argument("--time_dim", type=int, default=None, help="Time embedding dimension.")
+    parser.add_argument("--phys_start_t", type=int, default=None, help="Only apply physics loss when t <= phys_start_t.")
+    parser.add_argument("--phys_bin_mode", type=str, default=None, help="Physics surrogate input mode: ste or soft.")
     return parser.parse_args()
 
 
@@ -37,14 +51,20 @@ def main():
         "lr": 2e-4,
         "weight_decay": 2e-4,
         "save_dir": "checkpoints",
+        "runs_dir": "runs",
         "train_ratio": 0.7,
         "num_workers": 4,
         "timesteps": 1000,
-        # Emphasize physics consistency to improve RCWA-aligned inverse results.
+        "unet_arch": "cnn_cross_v1",
+        "base_ch": 64,
+        "cond_dim": 192,
+        "time_dim": 256,
         "lambda_diff": 0.6451612903,
         "lambda_phys": 0.3225806452,
         "lambda_bin": 0.0322580645,
         "cond_drop_prob": 0.10,
+        "phys_start_t": 300,
+        "phys_bin_mode": "soft",
         "preview_every": 20,
         "split_seed": 20260315,
         "grad_clip": 1.0,
@@ -61,6 +81,7 @@ def main():
         "data_path",
         "forward_ckpt",
         "save_dir",
+        "runs_dir",
         "epochs",
         "batch_size",
         "lr",
@@ -70,12 +91,18 @@ def main():
         "lambda_phys",
         "lambda_bin",
         "cond_drop_prob",
+        "unet_arch",
+        "base_ch",
+        "cond_dim",
+        "time_dim",
+        "phys_start_t",
+        "phys_bin_mode",
     ]:
         value = getattr(args, key)
         if value is not None:
             cfg[key] = value
 
-    devices = parse_devices(cfg["devices"], cfg["device"])
+    devices = parse_devices(cfg["devices"], cfg["device"], default_to_all_cuda=False)
     cfg["devices"] = devices
     cfg["device"] = devices[0]
     use_cuda = cfg["device"].startswith("cuda")
@@ -83,8 +110,9 @@ def main():
         torch.cuda.set_device(cfg["device"])
 
     os.makedirs(cfg["save_dir"], exist_ok=True)
-    run_dir = prepare_run_dir(cfg["save_dir"], "diffusion")
-    update_latest_run(cfg["save_dir"], "diffusion", run_dir)
+    os.makedirs(cfg["runs_dir"], exist_ok=True)
+    run_dir = prepare_run_dir(cfg["runs_dir"], "diffusion")
+    update_latest_run(cfg["runs_dir"], "diffusion", run_dir)
     logger = TrainLogger(
         "diffusion",
         str(run_dir),
@@ -93,13 +121,17 @@ def main():
     cfg["run_dir"] = str(run_dir)
 
     if cfg["forward_ckpt"] is None:
-        latest_forward_run = resolve_latest_run(cfg["save_dir"], "forward")
-        if latest_forward_run is None:
-            raise FileNotFoundError("未找到最新 forward 训练目录，请先运行 train_forward.py 或显式传入 --forward_ckpt")
-        cfg["forward_ckpt"] = str(latest_forward_run / "forward_best.pt")
+        default_forward_ckpt = os.path.join(cfg["save_dir"], "forward_best.pt")
+        if not os.path.exists(default_forward_ckpt):
+            raise FileNotFoundError("未找到 checkpoints/forward_best.pt，请先运行 train_forward.py 或显式传入 --forward_ckpt")
+        cfg["forward_ckpt"] = default_forward_ckpt
     print(f"[Diffusion] run_dir={run_dir}")
     print(f"[Diffusion] using forward_ckpt={cfg['forward_ckpt']}")
     print(f"[Diffusion] devices={devices} data_parallel={'yes' if len(devices) > 1 and use_cuda else 'no'}")
+    print(
+        f"[Diffusion] arch={cfg['unet_arch']} base_ch={cfg['base_ch']} cond_dim={cfg['cond_dim']} "
+        f"phys_start_t={cfg['phys_start_t']} phys_bin_mode={cfg['phys_bin_mode']}"
+    )
 
     dataset = RCWADataset(cfg["data_path"])
     cond_channels = dataset[0][1].shape[0]
@@ -131,7 +163,7 @@ def main():
         p.requires_grad = False
     surrogate = maybe_wrap_data_parallel(surrogate, devices)
 
-    unet = ConditionalUNet(cond_in_ch=cond_channels).to(cfg["device"])
+    unet = build_conditional_unet(cond_channels, cfg).to(cfg["device"])
     unet = maybe_wrap_data_parallel(unet, devices)
     diffusion = GaussianDiffusion(unet, timesteps=cfg["timesteps"], image_size=64).to(cfg["device"])
 
@@ -169,6 +201,8 @@ def main():
                 lambda_phys=cfg["lambda_phys"],
                 lambda_bin=cfg["lambda_bin"],
                 cond_drop_prob=cfg["cond_drop_prob"],
+                phys_start_t=cfg["phys_start_t"],
+                phys_bin_mode=cfg["phys_bin_mode"],
             )
 
             opt.zero_grad()
@@ -205,6 +239,8 @@ def main():
                     lambda_phys=cfg["lambda_phys"],
                     lambda_bin=cfg["lambda_bin"],
                     cond_drop_prob=0.0,
+                    phys_start_t=cfg["phys_start_t"],
+                    phys_bin_mode=cfg["phys_bin_mode"],
                 )
                 val_loss += loss.item() * x01.size(0)
                 val_diff += log_dict.get("loss_diff", 0.0) * x01.size(0)
@@ -244,7 +280,7 @@ def main():
             "best_val": best_val,
             "cfg": cfg,
         }
-        torch.save(ckpt, os.path.join(run_dir, "diffusion_last.pt"))
+        torch.save(ckpt, os.path.join(cfg["save_dir"], "diffusion_last.pt"))
 
         if (epoch + 1) % cfg["preview_every"] == 0:
             preview_cond = val_set[0][1].unsqueeze(0).to(cfg["device"])
@@ -256,7 +292,7 @@ def main():
             best_epoch = epoch
             stale_epochs = 0
             ckpt["best_val"] = best_val
-            torch.save(ckpt, os.path.join(run_dir, "diffusion_best.pt"))
+            torch.save(ckpt, os.path.join(cfg["save_dir"], "diffusion_best.pt"))
         else:
             stale_epochs += 1
 
@@ -278,6 +314,12 @@ def main():
             "lambda_phys": cfg["lambda_phys"],
             "lambda_bin": cfg["lambda_bin"],
             "cond_drop_prob": cfg["cond_drop_prob"],
+            "unet_arch": cfg["unet_arch"],
+            "base_ch": cfg["base_ch"],
+            "cond_dim": cfg["cond_dim"],
+            "time_dim": cfg["time_dim"],
+            "phys_start_t": cfg["phys_start_t"],
+            "phys_bin_mode": cfg["phys_bin_mode"],
             "run_dir": str(run_dir),
         },
     )

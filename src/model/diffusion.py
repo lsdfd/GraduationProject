@@ -72,7 +72,9 @@ class GaussianDiffusion(nn.Module):
         lambda_diff=1.0,
         lambda_phys=0.5,
         lambda_bin=0.05,
-        cond_drop_prob=0.1
+        cond_drop_prob=0.1,
+        phys_start_t=None,
+        phys_bin_mode="ste",
     ):
         b = x0.shape[0]
         device = x0.device
@@ -91,12 +93,29 @@ class GaussianDiffusion(nn.Module):
         total_loss = lambda_diff * loss_diff
         log_dict = {"loss_diff": loss_diff.item()}
 
-        if surrogate is not None:
+        apply_phys = surrogate is not None
+        if phys_start_t is not None:
+            apply_phys = apply_phys and bool((t <= int(phys_start_t)).any())
+
+        if apply_phys:
             x01_pred = (x0_pred + 1.0) / 2.0
-            x01_hard = (x01_pred > 0.5).float()
-            x01_ste = x01_pred + (x01_hard - x01_pred).detach()
-            pred_cond = surrogate(x01_ste)
-            loss_phys = F.l1_loss(pred_cond, cond)
+            if phys_bin_mode == "soft":
+                x01_in = x01_pred
+            elif phys_bin_mode == "ste":
+                x01_hard = (x01_pred > 0.5).float()
+                x01_in = x01_pred + (x01_hard - x01_pred).detach()
+            else:
+                raise ValueError(f"Unsupported phys_bin_mode: {phys_bin_mode}")
+
+            if phys_start_t is not None:
+                apply_mask = (t <= int(phys_start_t))
+                x01_in = x01_in[apply_mask]
+                cond_in = cond[apply_mask]
+            else:
+                cond_in = cond
+
+            pred_cond = surrogate(x01_in)
+            loss_phys = F.l1_loss(pred_cond, cond_in)
             total_loss = total_loss + lambda_phys * loss_phys
             log_dict["loss_phys"] = loss_phys.item()
 

@@ -18,8 +18,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from model.diffusion import GaussianDiffusion  # noqa: E402
+from model.parallel_utils import load_state_dict_flexible  # noqa: E402
 from model.train_utils import resolve_latest_run  # noqa: E402
-from model.models import ConditionalUNet  # noqa: E402
+from model.models import build_conditional_unet  # noqa: E402
 from infer.common import (  # noqa: E402
     lambda_theta_grid,
     load_model,
@@ -58,11 +59,11 @@ def resolve_infer_artifacts(
     diffusion_ckpt: str | Path | None,
 ) -> tuple[Path, Path]:
     ckpt_root = ROOT / "checkpoints"
-    latest_forward = resolve_latest_run(ckpt_root, "forward")
-    latest_diffusion = resolve_latest_run(ckpt_root, "diffusion")
+    runs_root = ROOT / "runs"
+    latest_forward = resolve_latest_run(runs_root, "forward")
 
-    default_stats = latest_forward / "cond_stats.npz" if latest_forward is not None else ckpt_root / "cond_stats.npz"
-    default_diffusion = latest_diffusion / "diffusion_best.pt" if latest_diffusion is not None else ckpt_root / "diffusion_best.pt"
+    default_stats = latest_forward / "cond_stats.npz" if latest_forward is not None else runs_root / "forward_runs" / "cond_stats.npz"
+    default_diffusion = ckpt_root / "diffusion_best.pt"
 
     stats = resolve_from_root(stats_path) if stats_path is not None else default_stats
     diffusion = resolve_from_root(diffusion_ckpt) if diffusion_ckpt is not None else default_diffusion
@@ -298,12 +299,15 @@ def main() -> None:
 
     target = normalize_with_stats(target_raw, mean, std, args.device)
     cond_batch = target.repeat(args.num_samples, 1, 1, 1)
-    diffusion = load_model(
-        args.diffusion_ckpt,
-        GaussianDiffusion(ConditionalUNet(cond_ch).to(args.device), timesteps=1000, image_size=64).to(args.device),
-        "diffusion",
-        args.device,
-    )
+    diffusion_ckpt = torch.load(args.diffusion_ckpt, map_location=args.device, weights_only=False)
+    diffusion_cfg = diffusion_ckpt.get("cfg", {})
+    diffusion = GaussianDiffusion(
+        build_conditional_unet(cond_ch, diffusion_cfg).to(args.device),
+        timesteps=int(diffusion_cfg.get("timesteps", 1000)),
+        image_size=64,
+    ).to(args.device)
+    load_state_dict_flexible(diffusion, diffusion_ckpt["diffusion"])
+    diffusion.eval()
 
     samples = diffusion.sample(cond_batch, cfg_scale=args.cfg_scale)
     pred_raw, err = evaluate_rcwa_candidates(samples, target_raw, cond_ch, devices, args.rcwa_orders)

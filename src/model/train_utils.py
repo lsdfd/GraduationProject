@@ -64,8 +64,8 @@ class TrainLogger:
         os.makedirs(save_dir, exist_ok=True)
         self.csv_path = os.path.join(save_dir, f"{name}_log.csv")
         self.preview_dir = os.path.join(save_dir, f"{name}_preview")
-        run_dir = f"runs/{name}/{time.strftime('%m%d_%H%M%S')}"
-        self.writer = SummaryWriter(run_dir) if SummaryWriter is not None else None
+        tb_dir = os.path.join(save_dir, "tensorboard")
+        self.writer = SummaryWriter(tb_dir) if SummaryWriter is not None else None
         if not os.path.exists(self.csv_path):
             append_csv(self.csv_path, headers)
 

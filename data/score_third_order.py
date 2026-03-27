@@ -3,70 +3,57 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from score_common import load_bundle, load_companion_spec, topk_per_lambda
 
 
 def resolve_from_root(path_like: Path) -> Path:
     return path_like if path_like.is_absolute() else ROOT / path_like
 
 
-def load_bundle(npz_path: Path, field: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    if not npz_path.exists():
-        raise FileNotFoundError(f"Input file not found: {npz_path}")
-
-    data = np.load(npz_path)
-    if "structures" not in data.files:
-        raise ValueError(f"structures not found in {npz_path}")
-    if field not in data.files:
-        raise ValueError(f"{field} not found. available: {list(data.files)}")
-
-    structures = np.asarray(data["structures"], dtype=np.float32)
-    spec = np.asarray(data[field], dtype=np.float32)
-    if structures.ndim != 3 or structures.shape[1:] != (64, 64):
-        raise ValueError(f"structures should be [N,64,64], got {structures.shape}")
-    if spec.ndim != 3:
-        raise ValueError(f"{field} should be [N,L,T], got {spec.shape}")
-    if structures.shape[0] != spec.shape[0]:
-        raise ValueError(f"structures/spec sample mismatch: {structures.shape[0]} vs {spec.shape[0]}")
-
-    lambdas = np.asarray(data["lambdas"], dtype=np.float32) if "lambdas" in data.files else np.arange(spec.shape[1], dtype=np.float32)
-    thetas = np.asarray(data["thetas"], dtype=np.float32) if "thetas" in data.files else np.arange(spec.shape[2], dtype=np.float32)
-    if spec.shape[1] != len(lambdas) or spec.shape[2] != len(thetas):
-        raise ValueError("spec shape and lambdas/thetas mismatch")
-
-    return structures, spec, lambdas, thetas
-
-
-def load_companion_spec(npz_path: Path, field: str) -> tuple[np.ndarray | None, str | None]:
-    if field == "tpp_mag":
-        other = "tss_mag"
-    elif field == "tss_mag":
-        other = "tpp_mag"
-    else:
-        return None, None
-
-    data = np.load(npz_path)
-    if other not in data.files:
-        return None, None
-    spec = np.asarray(data[other], dtype=np.float32)
-    if spec.ndim != 3:
-        return None, None
-    return spec, other
-
-
-def target_profile(thetas_deg: np.ndarray) -> np.ndarray:
+def third_order_target(thetas_deg: np.ndarray) -> np.ndarray:
     tmax = float(np.max(np.abs(thetas_deg)))
     if tmax <= 0:
         return np.zeros_like(thetas_deg, dtype=np.float32)
     kx = np.sin(np.deg2rad(thetas_deg)) / np.sin(np.deg2rad(tmax))
-    x = np.abs(kx) ** 2
+    x = np.abs(kx) ** 3
     x = (x - x.min()) / max(float(x.max() - x.min()), 1e-8)
     return x.astype(np.float32)
+
+
+def _row_3term_score(
+    y: np.ndarray,
+    x: np.ndarray,
+    denom: float,
+    center_idx: int,
+    edge_mask: np.ndarray,
+    global_scale: float,
+    w_center: float,
+    w_shape: float,
+    w_edge: float,
+) -> tuple[float, float, float, float, float, float]:
+    if not np.isfinite(y).all():
+        return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
+    y_norm = y / max(float(np.max(y)), 1e-8)
+    a = float(np.sum(x * y_norm) / denom)
+    y_fit = a * x
+    ss_res = float(np.sum((y_norm - y_fit) ** 2))
+    ss_tot = float(np.sum((y_norm - np.mean(y_norm)) ** 2))
+    this_r2 = 1.0 - ss_res / max(ss_tot, 1e-8)
+    edge_mean = float(np.mean(y[edge_mask]))
+    center_val = float(y[center_idx])
+    c = float(np.clip(1.0 - center_val / max(edge_mean, 1e-8), 0.0, 1.0))
+    s = float(np.clip(this_r2, 0.0, 1.0)) if a >= 0 else 0.0
+    e = float(np.clip(edge_mean / global_scale, 0.0, 1.0))
+    return w_center * c + w_shape * s + w_edge * e, c, s, e, a, this_r2
 
 
 def score_spectra(
@@ -75,9 +62,10 @@ def score_spectra(
     w_center: float,
     w_shape: float,
     w_edge: float,
+    w_bandwidth: float = 0.2,
 ) -> dict[str, np.ndarray]:
     n, l, _ = spec.shape
-    x = target_profile(thetas_deg).astype(np.float64)
+    x = third_order_target(thetas_deg).astype(np.float64)
     center_idx = int(np.argmin(np.abs(thetas_deg)))
     edge_mask = np.abs(thetas_deg) >= 0.85 * float(np.max(np.abs(thetas_deg)))
     if not edge_mask.any():
@@ -89,38 +77,42 @@ def score_spectra(
     center_s = np.full_like(score, np.nan)
     shape_s = np.full_like(score, np.nan)
     edge_s = np.full_like(score, np.nan)
+    bandwidth_s = np.full_like(score, np.nan)
     coef_a = np.full_like(score, np.nan)
     fit_mse = np.full_like(score, np.nan)
     r2 = np.full_like(score, np.nan)
 
     denom = max(float(np.sum(x * x)), 1e-8)
+    w3 = 1.0 - w_bandwidth
+
     for i in range(n):
         for j in range(l):
             y = spec[i, j].astype(np.float64)
-            if not np.isfinite(y).all():
+            main, c, s, e, a, this_r2 = _row_3term_score(
+                y, x, denom, center_idx, edge_mask, global_scale, w_center, w_shape, w_edge
+            )
+            if np.isnan(main):
                 continue
 
-            y_norm = y / max(float(np.max(y)), 1e-8)
-            a = float(np.sum(x * y_norm) / denom)  # y ~ a*|kx|^2
-            y_fit = a * x
+            bw_scores = []
+            for dj in (-1, 1):
+                jj = j + dj
+                if 0 <= jj < l:
+                    yy = spec[i, jj].astype(np.float64)
+                    nb, *_ = _row_3term_score(
+                        yy, x, denom, center_idx, edge_mask, global_scale, w_center, w_shape, w_edge
+                    )
+                    if np.isfinite(nb):
+                        bw_scores.append(nb)
+            bw = float(np.mean(bw_scores)) if bw_scores else main
 
-            mse = float(np.mean((y_norm - y_fit) ** 2))
-            ss_res = float(np.sum((y_norm - y_fit) ** 2))
-            ss_tot = float(np.sum((y_norm - np.mean(y_norm)) ** 2))
-            this_r2 = 1.0 - ss_res / max(ss_tot, 1e-8)
-
-            edge_mean = float(np.mean(y[edge_mask]))
-            center_val = float(y[center_idx])
-            c_score = float(np.clip(1.0 - center_val / max(edge_mean, 1e-8), 0.0, 1.0))
-            s_score = float(np.clip(this_r2, 0.0, 1.0)) if a >= 0 else 0.0
-            e_score = float(np.clip(edge_mean / global_scale, 0.0, 1.0))
-
-            score[i, j] = w_center * c_score + w_shape * s_score + w_edge * e_score
-            center_s[i, j] = c_score
-            shape_s[i, j] = s_score
-            edge_s[i, j] = e_score
+            score[i, j] = w3 * main + w_bandwidth * bw
+            center_s[i, j] = c
+            shape_s[i, j] = s
+            edge_s[i, j] = e
+            bandwidth_s[i, j] = bw
             coef_a[i, j] = a
-            fit_mse[i, j] = mse
+            fit_mse[i, j] = float(np.mean((y / max(float(np.max(y)), 1e-8) - a * x) ** 2))
             r2[i, j] = this_r2
 
     return {
@@ -128,31 +120,15 @@ def score_spectra(
         "center_score": center_s,
         "shape_score": shape_s,
         "edge_score": edge_s,
+        "bandwidth_score": bandwidth_s,
         "coef_a": coef_a,
         "fit_mse": fit_mse,
         "r2": r2,
     }
 
 
-def topk_per_lambda(score: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    n, l = score.shape
-    k = min(k, n)
-    idx = np.full((l, k), -1, dtype=np.int32)
-    val = np.full((l, k), np.nan, dtype=np.float32)
-    for j in range(l):
-        col = score[:, j]
-        valid = np.isfinite(col)
-        if not valid.any():
-            continue
-        order = np.argsort(col[valid])[::-1]
-        sel = np.where(valid)[0][order[:k]]
-        idx[j, : len(sel)] = sel
-        val[j, : len(sel)] = col[sel]
-    return idx, val
-
-
 def save_scores_csv(path: Path, lambdas: np.ndarray, pack: dict[str, np.ndarray]) -> None:
-    keys = ["score", "center_score", "shape_score", "edge_score", "coef_a", "fit_mse", "r2"]
+    keys = ["score", "center_score", "shape_score", "edge_score", "bandwidth_score", "coef_a", "fit_mse", "r2"]
     n, l = pack["score"].shape
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -174,11 +150,27 @@ def save_topk_csv(path: Path, lambdas: np.ndarray, top_idx: np.ndarray, top_scor
                     w.writerow([j, float(lam), r + 1, i, s])
 
 
-def summary_json(lambdas: np.ndarray, score: np.ndarray, top_idx: np.ndarray, top_score: np.ndarray) -> list[dict]:
+def summary_json(lambdas: np.ndarray, pack: dict[str, np.ndarray], top_idx: np.ndarray, top_score: np.ndarray) -> list[dict]:
     out = []
     for j, lam in enumerate(lambdas):
-        col = score[:, j]
+        col = pack["score"][:, j]
         valid = col[np.isfinite(col)]
+        top = []
+        for r in range(top_idx.shape[1]):
+            i = int(top_idx[j, r])
+            if i < 0:
+                continue
+            top.append(
+                {
+                    "rank": r + 1,
+                    "sample_idx": i,
+                    "score": float(top_score[j, r]),
+                    "center_score": float(pack["center_score"][i, j]),
+                    "shape_score": float(pack["shape_score"][i, j]),
+                    "edge_score": float(pack["edge_score"][i, j]),
+                    "bandwidth_score": float(pack["bandwidth_score"][i, j]),
+                }
+            )
         out.append(
             {
                 "lambda_idx": int(j),
@@ -186,8 +178,8 @@ def summary_json(lambdas: np.ndarray, score: np.ndarray, top_idx: np.ndarray, to
                 "num_valid": int(len(valid)),
                 "score_mean": float(np.mean(valid)) if len(valid) else None,
                 "score_p90": float(np.quantile(valid, 0.9)) if len(valid) else None,
-                "top_indices": [int(x) for x in top_idx[j] if x >= 0],
-                "top_scores": [float(x) for x in top_score[j] if np.isfinite(x)],
+                "score_max": float(np.max(valid)) if len(valid) else None,
+                "top": top,
             }
         )
     return out
@@ -200,7 +192,7 @@ def plot_per_lambda(
     companion_spec: np.ndarray | None,
     companion_label: str | None,
     field_label: str,
-    score: np.ndarray,
+    pack: dict[str, np.ndarray],
     lambdas: np.ndarray,
     thetas: np.ndarray,
     top_idx: np.ndarray,
@@ -209,7 +201,7 @@ def plot_per_lambda(
     theta_ref: float,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    target = target_profile(thetas)
+    target = third_order_target(thetas)
     t_ref_idx = int(np.argmin(np.abs(thetas - theta_ref)))
     t_ref_actual = float(thetas[t_ref_idx])
 
@@ -240,6 +232,7 @@ def plot_per_lambda(
         axes = np.atleast_2d(axes)
         hm = None
         hm_comp = None
+
         for r in range(topk):
             if companion_spec is not None:
                 a_struct, a_hm, a_curve, a_hm_comp, a_curve_comp = axes[r]
@@ -270,7 +263,7 @@ def plot_per_lambda(
             y = spec[i, j].astype(np.float64)
             yn = y / max(float(np.max(y)), 1e-8)
             t_ref_val = float(y[t_ref_idx])
-            a_curve.plot(thetas, target, "k--", lw=1.7, label="target ~ |sin(theta)|^2")
+            a_curve.plot(thetas, target, "k--", lw=1.7, label="target ~ |sin(theta)|^3")
             a_curve.plot(thetas, yn, lw=1.9, color="#1f77b4", label="candidate (normalized)")
             a_curve.set_ylim(-0.05, 1.05)
             a_curve.set_xlabel("theta (deg)")
@@ -281,10 +274,25 @@ def plot_per_lambda(
 
             tag = f"|t|@{t_ref_actual:.1f}deg={t_ref_val:.3f}"
             a_hm.text(
-                0.98, 0.03, tag, transform=a_hm.transAxes, ha="right", va="bottom", fontsize=8, color="white",
+                0.98,
+                0.03,
+                tag,
+                transform=a_hm.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=8,
+                color="white",
                 bbox={"facecolor": "black", "alpha": 0.45, "pad": 1.5, "edgecolor": "none"},
             )
-            a_curve.text(0.02, 0.03, tag, transform=a_curve.transAxes, ha="left", va="bottom", fontsize=8)
+            a_curve.text(
+                0.02,
+                0.03,
+                f"{tag}\nR2={float(pack['r2'][i, j]):.3f}",
+                transform=a_curve.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize=8,
+            )
 
             if companion_spec is not None:
                 full_comp = companion_spec[i].astype(np.float64)
@@ -316,15 +324,26 @@ def plot_per_lambda(
                     a_curve_comp.legend(fontsize=8, loc="lower right")
                 tag_comp = f"|{companion_label}|@{t_ref_actual:.1f}deg={t_ref_val_comp:.3f}"
                 a_hm_comp.text(
-                    0.98, 0.03, tag_comp, transform=a_hm_comp.transAxes, ha="right", va="bottom", fontsize=8, color="white",
+                    0.98,
+                    0.03,
+                    tag_comp,
+                    transform=a_hm_comp.transAxes,
+                    ha="right",
+                    va="bottom",
+                    fontsize=8,
+                    color="white",
                     bbox={"facecolor": "black", "alpha": 0.45, "pad": 1.5, "edgecolor": "none"},
                 )
                 a_curve_comp.text(0.02, 0.03, tag_comp, transform=a_curve_comp.transAxes, ha="left", va="bottom", fontsize=8)
 
-        valid = score[:, j][np.isfinite(score[:, j])]
-        stats = f"lambda={float(lam):.1f} nm | valid={len(valid)} | mean={float(np.mean(valid)):.3f} | p90={float(np.quantile(valid, 0.9)):.3f}" if len(valid) else f"lambda={float(lam):.1f} nm | valid=0"
+        valid = pack["score"][:, j][np.isfinite(pack["score"][:, j])]
+        stats = (
+            f"lambda={float(lam):.1f} nm | valid={len(valid)} | mean={float(np.mean(valid)):.3f} | p90={float(np.quantile(valid, 0.9)):.3f}"
+            if len(valid)
+            else f"lambda={float(lam):.1f} nm | valid=0"
+        )
         extra = f" + {companion_label}" if companion_spec is not None else ""
-        fig.suptitle(f"Top-{topk}: {field_label}{extra} ({stats})", fontsize=12)
+        fig.suptitle(f"Top-{topk}: third-order {field_label}{extra} ({stats})", fontsize=12)
         if hm is not None:
             fig.colorbar(hm, ax=axes[:, 1].tolist(), shrink=0.9, pad=0.01, label="|t|")
         if hm_comp is not None:
@@ -342,7 +361,7 @@ def plot_overview(
     top_score: np.ndarray,
     topk: int,
 ) -> None:
-    target = target_profile(thetas)
+    target = third_order_target(thetas)
     n_lambda = len(lambdas)
     ncol = 4
     nrow = int(np.ceil(n_lambda / ncol))
@@ -368,20 +387,21 @@ def plot_overview(
     for ax in axes[n_lambda:]:
         ax.axis("off")
 
-    fig.suptitle(f"Per-lambda Top-{topk} spectra (higher score is better)", fontsize=14)
+    fig.suptitle("Per-lambda Top spectra for third-order target", fontsize=14)
     fig.savefig(out_png, dpi=180)
     plt.close(fig)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Per-lambda second-order scoring (higher is better)")
+    p = argparse.ArgumentParser(description="Per-lambda third-order scoring with target ~ |sin(theta)|^3 (higher is better)")
     p.add_argument("--in_npz", type=Path, default=ROOT / "data" / "train_data.npz")
     p.add_argument("--field", default="tpp_mag")
-    p.add_argument("--out_dir", type=Path, default=ROOT / "data" / "second_order_scores")
+    p.add_argument("--out_dir", type=Path, default=ROOT / "data" / "third_order_scores")
     p.add_argument("--topk", type=int, default=20)
     p.add_argument("--w_center", type=float, default=0.6)
     p.add_argument("--w_shape", type=float, default=0.3)
     p.add_argument("--w_edge", type=float, default=0.1)
+    p.add_argument("--w_bandwidth", type=float, default=0.2)
     p.add_argument("--plot_topk", type=int, default=5)
     p.add_argument("--theta_ref", type=float, default=40.0)
     args = p.parse_args()
@@ -391,20 +411,25 @@ def main() -> None:
 
     structures, spec, lambdas, thetas = load_bundle(args.in_npz, args.field)
     companion_spec, companion_label = load_companion_spec(args.in_npz, args.field)
-    pack = score_spectra(spec, thetas, args.w_center, args.w_shape, args.w_edge)
+    pack = score_spectra(spec, thetas, args.w_center, args.w_shape, args.w_edge, args.w_bandwidth)
     top_idx, top_score = topk_per_lambda(pack["score"], args.topk)
-    summary = summary_json(lambdas, pack["score"], top_idx, top_score)
+    summary = summary_json(lambdas, pack, top_idx[:, : max(1, args.plot_topk)], top_score[:, : max(1, args.plot_topk)])
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    np.savez(args.out_dir / f"{args.field}_scores.npz", lambdas=lambdas, thetas=thetas, top_indices=top_idx, top_scores=top_score, **pack)
-    save_scores_csv(args.out_dir / f"{args.field}_scores.csv", lambdas, pack)
-    save_topk_csv(args.out_dir / f"{args.field}_top{args.plot_topk}_per_lambda.csv", lambdas, top_idx[:, : max(1, args.plot_topk)], top_score[:, : max(1, args.plot_topk)])
-    with (args.out_dir / f"{args.field}_summary.json").open("w", encoding="utf-8") as f:
+    np.savez(args.out_dir / f"{args.field}_third_order_scores.npz", lambdas=lambdas, thetas=thetas, top_indices=top_idx, top_scores=top_score, **pack)
+    save_scores_csv(args.out_dir / f"{args.field}_third_order_scores.csv", lambdas, pack)
+    save_topk_csv(
+        args.out_dir / f"{args.field}_third_order_top{args.plot_topk}_per_lambda.csv",
+        lambdas,
+        top_idx[:, : max(1, args.plot_topk)],
+        top_score[:, : max(1, args.plot_topk)],
+    )
+    with (args.out_dir / f"{args.field}_third_order_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     if args.plot_topk > 0:
         k = min(args.plot_topk, spec.shape[0])
-        plot_dir = args.out_dir / f"{args.field}_top{k}_plots"
+        plot_dir = args.out_dir / f"{args.field}_third_order_top{k}_plots"
         plot_per_lambda(
             plot_dir,
             structures,
@@ -412,7 +437,7 @@ def main() -> None:
             companion_spec,
             companion_label,
             args.field,
-            pack["score"],
+            pack,
             lambdas,
             thetas,
             top_idx[:, :k],
@@ -420,12 +445,13 @@ def main() -> None:
             k,
             args.theta_ref,
         )
-        plot_overview(args.out_dir / f"{args.field}_top{k}_overview.png", spec, lambdas, thetas, top_idx[:, :k], top_score[:, :k], k)
+        plot_overview(args.out_dir / f"{args.field}_third_order_top{k}_overview.png", spec, lambdas, thetas, top_idx[:, :k], top_score[:, :k], k)
 
     print(f"input: {args.in_npz}")
     print(f"field: {args.field}")
     print(f"samples: {spec.shape[0]}, lambdas: {spec.shape[1]}, thetas: {spec.shape[2]}")
-    print(f"weights: center={args.w_center}, shape={args.w_shape}, edge={args.w_edge}")
+    print(f"weights: center={args.w_center}, shape={args.w_shape}, edge={args.w_edge}, bandwidth={args.w_bandwidth} (3-term scaled by {1-args.w_bandwidth:.1f})")
+    print("target: normalized |sin(theta)|^3")
     print("score direction: higher is better")
     print(f"plot_topk: {args.plot_topk}, theta_ref: {args.theta_ref} deg")
     print(f"saved: {args.out_dir}")
