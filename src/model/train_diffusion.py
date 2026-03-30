@@ -13,6 +13,7 @@ if str(THIS_DIR) not in sys.path:
 from dataset import RCWADataset
 from models import ForwardSurrogate, build_conditional_unet
 from diffusion import GaussianDiffusion
+from diffusion_presets import apply_preset, DIFFUSION_PRESETS
 from parallel_utils import load_state_dict_flexible, maybe_wrap_data_parallel, parse_devices, sanitize_state_dict_keys
 from train_utils import TrainLogger, prepare_run_dir, update_latest_run, resolve_latest_run, write_json
 
@@ -23,6 +24,8 @@ def parse_args():
     parser.add_argument("--forward_ckpt", type=str, default=None, help="Path to forward surrogate checkpoint.")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to save checkpoints/logs.")
     parser.add_argument("--runs_dir", type=str, default=None, help="Directory to save per-run logs/metadata.")
+    parser.add_argument("--experiment_name", type=str, default=None, help="Optional experiment subdir name to avoid overwriting checkpoints.")
+    parser.add_argument("--preset", type=str, default=None, help=f"Preset name. Available: {', '.join(sorted(DIFFUSION_PRESETS))}")
     parser.add_argument("--epochs", type=int, default=None, help="Total training epochs.")
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size.")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate.")
@@ -38,13 +41,33 @@ def parse_args():
     parser.add_argument("--time_dim", type=int, default=None, help="Time embedding dimension.")
     parser.add_argument("--phys_start_t", type=int, default=None, help="Only apply physics loss when t <= phys_start_t.")
     parser.add_argument("--phys_bin_mode", type=str, default=None, help="Physics surrogate input mode: ste or soft.")
+    parser.add_argument("--self_condition", action="store_true", help="Enable self-conditioning for diffusion UNet.")
+    parser.add_argument("--diff_loss_weight", type=str, default=None, help="Diffusion loss weighting: none | min_snr | p2.")
+    parser.add_argument("--min_snr_gamma", type=float, default=None, help="Gamma for min-SNR loss weighting.")
+    parser.add_argument("--p2_k", type=float, default=None, help="P2 weighting offset.")
+    parser.add_argument("--p2_gamma", type=float, default=None, help="P2 weighting exponent.")
+    parser.add_argument("--lambda_x0", type=float, default=None, help="Auxiliary x0 reconstruction loss weight.")
+    parser.add_argument("--ema_decay", type=float, default=None, help="EMA decay for evaluation/checkpoint weights. <=0 disables EMA.")
     return parser.parse_args()
+
+
+def _clone_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    return {k: v.detach().clone() for k, v in state_dict.items()}
+
+
+def _update_ema_state(ema_state: dict[str, torch.Tensor], state_dict: dict[str, torch.Tensor], decay: float) -> None:
+    one_minus = 1.0 - float(decay)
+    for key, value in state_dict.items():
+        if not torch.is_floating_point(value):
+            ema_state[key] = value.detach().clone()
+            continue
+        ema_state[key].mul_(decay).add_(value.detach(), alpha=one_minus)
 
 
 def main():
     args = parse_args()
     cfg = {
-        "data_path": "data/train_data.npz",
+        "data_path": "GraduationProject/data/train_data_3000.npz",
         "forward_ckpt": None,
         "batch_size": 32,
         "epochs": 100,
@@ -65,6 +88,13 @@ def main():
         "cond_drop_prob": 0.10,
         "phys_start_t": 300,
         "phys_bin_mode": "soft",
+        "self_condition": False,
+        "diff_loss_weight": "none",
+        "min_snr_gamma": 5.0,
+        "p2_k": 1.0,
+        "p2_gamma": 1.0,
+        "lambda_x0": 0.0,
+        "ema_decay": 0.0,
         "preview_every": 20,
         "split_seed": 20260315,
         "grad_clip": 1.0,
@@ -74,7 +104,12 @@ def main():
         "early_stop_patience": 15,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "devices": None,
+        "preset": None,
+        "experiment_name": None,
     }
+
+    cfg = apply_preset(cfg, args.preset)
+    cfg["preset"] = args.preset
 
     # Allow command-line overrides for quick experiment switching.
     for key in [
@@ -82,6 +117,7 @@ def main():
         "forward_ckpt",
         "save_dir",
         "runs_dir",
+        "experiment_name",
         "epochs",
         "batch_size",
         "lr",
@@ -97,10 +133,18 @@ def main():
         "time_dim",
         "phys_start_t",
         "phys_bin_mode",
+        "diff_loss_weight",
+        "min_snr_gamma",
+        "p2_k",
+        "p2_gamma",
+        "lambda_x0",
+        "ema_decay",
     ]:
         value = getattr(args, key)
         if value is not None:
             cfg[key] = value
+    if args.self_condition:
+        cfg["self_condition"] = True
 
     devices = parse_devices(cfg["devices"], cfg["device"], default_to_all_cuda=False)
     cfg["devices"] = devices
@@ -109,6 +153,10 @@ def main():
     if use_cuda:
         torch.cuda.set_device(cfg["device"])
 
+    if cfg["experiment_name"]:
+        cfg["save_dir"] = os.path.join(cfg["save_dir"], cfg["experiment_name"])
+        cfg["runs_dir"] = os.path.join(cfg["runs_dir"], cfg["experiment_name"])
+
     os.makedirs(cfg["save_dir"], exist_ok=True)
     os.makedirs(cfg["runs_dir"], exist_ok=True)
     run_dir = prepare_run_dir(cfg["runs_dir"], "diffusion")
@@ -116,21 +164,33 @@ def main():
     logger = TrainLogger(
         "diffusion",
         str(run_dir),
-        ["epoch", "train_loss", "val_loss", "train_diff", "train_phys", "train_bin", "val_diff", "val_phys", "val_bin"],
+        ["epoch", "train_loss", "val_loss", "train_diff", "train_phys", "train_bin", "train_x0", "val_diff", "val_phys", "val_bin", "val_x0"],
     )
     cfg["run_dir"] = str(run_dir)
 
     if cfg["forward_ckpt"] is None:
-        default_forward_ckpt = os.path.join(cfg["save_dir"], "forward_best.pt")
-        if not os.path.exists(default_forward_ckpt):
+        candidates = []
+        search_roots = ["checkpoints", cfg["save_dir"]]
+        if cfg["experiment_name"]:
+            search_roots.append(str(Path(cfg["save_dir"]).parent))
+        for root in search_roots:
+            root_path = Path(root)
+            if not root_path.exists():
+                continue
+            candidates.extend(root_path.rglob("forward_best.pt"))
+        candidates = [p for p in candidates if p.is_file()]
+        if not candidates:
             raise FileNotFoundError("未找到 checkpoints/forward_best.pt，请先运行 train_forward.py 或显式传入 --forward_ckpt")
-        cfg["forward_ckpt"] = default_forward_ckpt
+        latest_ckpt = max(candidates, key=lambda p: p.stat().st_mtime)
+        cfg["forward_ckpt"] = str(latest_ckpt)
     print(f"[Diffusion] run_dir={run_dir}")
     print(f"[Diffusion] using forward_ckpt={cfg['forward_ckpt']}")
     print(f"[Diffusion] devices={devices} data_parallel={'yes' if len(devices) > 1 and use_cuda else 'no'}")
     print(
         f"[Diffusion] arch={cfg['unet_arch']} base_ch={cfg['base_ch']} cond_dim={cfg['cond_dim']} "
-        f"phys_start_t={cfg['phys_start_t']} phys_bin_mode={cfg['phys_bin_mode']}"
+        f"phys_start_t={cfg['phys_start_t']} phys_bin_mode={cfg['phys_bin_mode']} "
+        f"self_condition={cfg['self_condition']} diff_loss_weight={cfg['diff_loss_weight']} "
+        f"lambda_x0={cfg['lambda_x0']} ema_decay={cfg['ema_decay']}"
     )
 
     dataset = RCWADataset(cfg["data_path"])
@@ -166,6 +226,9 @@ def main():
     unet = build_conditional_unet(cond_channels, cfg).to(cfg["device"])
     unet = maybe_wrap_data_parallel(unet, devices)
     diffusion = GaussianDiffusion(unet, timesteps=cfg["timesteps"], image_size=64).to(cfg["device"])
+    ema_state = None
+    if float(cfg["ema_decay"]) > 0.0:
+        ema_state = _clone_state_dict(sanitize_state_dict_keys(diffusion.state_dict()))
 
     opt = torch.optim.AdamW(unet.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -187,6 +250,7 @@ def main():
         train_diff = 0.0
         train_phys = 0.0
         train_bin = 0.0
+        train_x0 = 0.0
 
         for x01, cond in train_loader:
             x01 = x01.to(cfg["device"])   # [0,1]
@@ -200,31 +264,41 @@ def main():
                 lambda_diff=cfg["lambda_diff"],
                 lambda_phys=cfg["lambda_phys"],
                 lambda_bin=cfg["lambda_bin"],
+                lambda_x0=cfg["lambda_x0"],
                 cond_drop_prob=cfg["cond_drop_prob"],
                 phys_start_t=cfg["phys_start_t"],
                 phys_bin_mode=cfg["phys_bin_mode"],
+                diff_loss_weight=cfg["diff_loss_weight"],
+                min_snr_gamma=cfg["min_snr_gamma"],
+                p2_k=cfg["p2_k"],
+                p2_gamma=cfg["p2_gamma"],
             )
 
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(unet.parameters(), cfg["grad_clip"])
             opt.step()
+            if ema_state is not None:
+                _update_ema_state(ema_state, sanitize_state_dict_keys(diffusion.state_dict()), cfg["ema_decay"])
 
             train_loss += loss.item() * x01.size(0)
             train_diff += log_dict.get("loss_diff", 0.0) * x01.size(0)
             train_phys += log_dict.get("loss_phys", 0.0) * x01.size(0)
             train_bin += log_dict.get("loss_bin", 0.0) * x01.size(0)
+            train_x0 += log_dict.get("loss_x0", 0.0) * x01.size(0)
 
         train_loss /= len(train_loader.dataset)
         train_diff /= len(train_loader.dataset)
         train_phys /= len(train_loader.dataset)
         train_bin /= len(train_loader.dataset)
+        train_x0 /= len(train_loader.dataset)
 
         diffusion.eval()
         val_loss = 0.0
         val_diff = 0.0
         val_phys = 0.0
         val_bin = 0.0
+        val_x0 = 0.0
         with torch.no_grad():
             for x01, cond in val_loader:
                 x01 = x01.to(cfg["device"])
@@ -238,43 +312,56 @@ def main():
                     lambda_diff=cfg["lambda_diff"],
                     lambda_phys=cfg["lambda_phys"],
                     lambda_bin=cfg["lambda_bin"],
+                    lambda_x0=cfg["lambda_x0"],
                     cond_drop_prob=0.0,
                     phys_start_t=cfg["phys_start_t"],
                     phys_bin_mode=cfg["phys_bin_mode"],
+                    diff_loss_weight=cfg["diff_loss_weight"],
+                    min_snr_gamma=cfg["min_snr_gamma"],
+                    p2_k=cfg["p2_k"],
+                    p2_gamma=cfg["p2_gamma"],
                 )
                 val_loss += loss.item() * x01.size(0)
                 val_diff += log_dict.get("loss_diff", 0.0) * x01.size(0)
                 val_phys += log_dict.get("loss_phys", 0.0) * x01.size(0)
                 val_bin += log_dict.get("loss_bin", 0.0) * x01.size(0)
+                val_x0 += log_dict.get("loss_x0", 0.0) * x01.size(0)
 
         val_loss /= len(val_loader.dataset)
         val_diff /= len(val_loader.dataset)
         val_phys /= len(val_loader.dataset)
         val_bin /= len(val_loader.dataset)
+        val_x0 /= len(val_loader.dataset)
         scheduler.step(val_loss)
         current_lr = opt.param_groups[0]["lr"]
 
         print(f"[Diffusion] epoch={epoch:03d} train={train_loss:.4f} val={val_loss:.4f} "
               f"diff={train_diff:.4f} phys={train_phys:.4f} bin={train_bin:.4f} "
-              f"val_diff={val_diff:.4f} val_phys={val_phys:.4f} val_bin={val_bin:.4f} lr={current_lr:.2e}")
+              f"x0={train_x0:.4f} val_diff={val_diff:.4f} val_phys={val_phys:.4f} "
+              f"val_bin={val_bin:.4f} val_x0={val_x0:.4f} lr={current_lr:.2e}")
         logger.log_scalars(
             epoch,
-            [epoch, train_loss, val_loss, train_diff, train_phys, train_bin, val_diff, val_phys, val_bin],
+            [epoch, train_loss, val_loss, train_diff, train_phys, train_bin, train_x0, val_diff, val_phys, val_bin, val_x0],
             {
                 "loss/train": train_loss,
                 "loss/val": val_loss,
                 "loss_diff/train": train_diff,
                 "loss_phys/train": train_phys,
                 "loss_bin/train": train_bin,
+                "loss_x0/train": train_x0,
                 "loss_diff/val": val_diff,
                 "loss_phys/val": val_phys,
                 "loss_bin/val": val_bin,
+                "loss_x0/val": val_x0,
                 "lr": current_lr,
             },
         )
 
+        eval_state = ema_state if ema_state is not None else sanitize_state_dict_keys(diffusion.state_dict())
         ckpt = {
-            "diffusion": sanitize_state_dict_keys(diffusion.state_dict()),
+            "diffusion": eval_state,
+            "diffusion_raw": sanitize_state_dict_keys(diffusion.state_dict()),
+            "diffusion_ema": ema_state,
             "cond_channels": cond_channels,
             "epoch": epoch,
             "best_val": best_val,
@@ -313,6 +400,7 @@ def main():
             "lambda_diff": cfg["lambda_diff"],
             "lambda_phys": cfg["lambda_phys"],
             "lambda_bin": cfg["lambda_bin"],
+            "lambda_x0": cfg["lambda_x0"],
             "cond_drop_prob": cfg["cond_drop_prob"],
             "unet_arch": cfg["unet_arch"],
             "base_ch": cfg["base_ch"],
@@ -320,6 +408,13 @@ def main():
             "time_dim": cfg["time_dim"],
             "phys_start_t": cfg["phys_start_t"],
             "phys_bin_mode": cfg["phys_bin_mode"],
+            "self_condition": cfg["self_condition"],
+            "diff_loss_weight": cfg["diff_loss_weight"],
+            "min_snr_gamma": cfg["min_snr_gamma"],
+            "p2_k": cfg["p2_k"],
+            "p2_gamma": cfg["p2_gamma"],
+            "ema_decay": cfg["ema_decay"],
+            "preset": cfg["preset"],
             "run_dir": str(run_dir),
         },
     )

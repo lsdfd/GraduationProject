@@ -61,6 +61,9 @@ def main() -> None:
         tpp_score = score_channel(
             tpp[args.sample_idx],
             ideal_map,
+            lambdas,
+            thetas,
+            actual_lambda,
             theta0_mask,
             lambda0_mask,
             work_mask,
@@ -68,6 +71,9 @@ def main() -> None:
         tss_score = score_channel(
             tss[args.sample_idx],
             ideal_map,
+            lambdas,
+            thetas,
+            actual_lambda,
             theta0_mask,
             lambda0_mask,
             work_mask,

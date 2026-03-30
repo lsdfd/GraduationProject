@@ -59,6 +59,26 @@ def resolve_latest_run(base_dir, run_name):
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def resolve_latest_checkpoint(base_dir, prefix):
+    base = Path(base_dir)
+    if not base.exists():
+        return None
+
+    candidates = []
+    for pattern in (f"{prefix}_last.pt", f"{prefix}_best.pt"):
+        candidates.extend(p for p in base.rglob(pattern) if p.is_file())
+    if not candidates:
+        return None
+
+    # Prefer the most recently updated checkpoint overall; if timestamps tie,
+    # keep `_last.pt` ahead of `_best.pt` to match "latest training result".
+    def sort_key(path: Path):
+        is_last = path.name.endswith("_last.pt")
+        return (path.stat().st_mtime, 1 if is_last else 0)
+
+    return max(candidates, key=sort_key)
+
+
 class TrainLogger:
     def __init__(self, name, save_dir, headers):
         os.makedirs(save_dir, exist_ok=True)

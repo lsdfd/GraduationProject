@@ -139,6 +139,93 @@ def projection_coeff_in_window(
     return coeff, corr
 
 
+def expansion_weight_k2omega2(
+    spec_map: np.ndarray,
+    lambdas_nm: np.ndarray,
+    thetas_deg: np.ndarray,
+    lambda0_nm: float,
+    work_mask: np.ndarray,
+) -> dict[str, float]:
+    if not np.any(work_mask):
+        return {
+            "expansion_weight_k2omega2": 0.0,
+            "expansion_coeff_k2": 0.0,
+            "expansion_coeff_omega2": 0.0,
+            "expansion_coeff_k2omega2": 0.0,
+            "expansion_weight_k2": 0.0,
+            "expansion_weight_omega2": 0.0,
+        }
+
+    lam_m = np.asarray(lambdas_nm, dtype=np.float64)[:, None] * 1e-9
+    th = np.deg2rad(np.asarray(thetas_deg, dtype=np.float64))[None, :]
+    kx2 = ((2.0 * np.pi / np.maximum(lam_m, 1e-20)) * np.sin(th)) ** 2
+    omega = 2.0 * np.pi * C0 / np.maximum(lam_m, 1e-20)
+    omega0 = 2.0 * np.pi * C0 / max(float(lambda0_nm) * 1e-9, 1e-20)
+    om2 = (omega - omega0) ** 2
+    om2 = np.broadcast_to(om2, kx2.shape)
+    k2om2 = kx2 * om2
+
+    basis_raw = {
+        "k2": kx2,
+        "omega2": om2,
+        "k2omega2": k2om2,
+    }
+
+    basis = []
+    names = []
+    for name, arr in basis_raw.items():
+        vec = np.asarray(arr[work_mask], dtype=np.float64)
+        scale = float(np.max(np.abs(vec)))
+        if scale > 1e-12:
+            vec = vec / scale
+        basis.append(vec)
+        names.append(name)
+
+    # Paper-style “weight” is best interpreted as basis-expansion share rather than a raw projection scale.
+    # We remove the flat background first, then compute energy weights in an orthonormalized basis.
+    y = robust_norm(spec_map)[work_mask]
+    y = y - float(np.mean(y))
+
+    q_list: list[np.ndarray] = []
+    active_names: list[str] = []
+    for name, vec in zip(names, basis):
+        u = vec.copy()
+        for q in q_list:
+            u = u - np.dot(u, q) * q
+        norm_u = float(np.linalg.norm(u))
+        if norm_u > 1e-12:
+            q_list.append(u / norm_u)
+            active_names.append(name)
+
+    if not q_list:
+        return {
+            "expansion_weight_k2omega2": 0.0,
+            "expansion_coeff_k2": 0.0,
+            "expansion_coeff_omega2": 0.0,
+            "expansion_coeff_k2omega2": 0.0,
+            "expansion_weight_k2": 0.0,
+            "expansion_weight_omega2": 0.0,
+        }
+
+    coeffs = np.asarray([float(np.dot(y, q)) for q in q_list], dtype=np.float64)
+    energies = coeffs ** 2
+    total_energy = float(np.sum(energies))
+    if total_energy <= 1e-12:
+        weights = {name: 0.0 for name in active_names}
+    else:
+        weights = {name: float(e / total_energy) for name, e in zip(active_names, energies)}
+    coeff_map = {name: float(c) for name, c in zip(active_names, coeffs)}
+
+    return {
+        "expansion_weight_k2omega2": float(weights.get("k2omega2", 0.0)),
+        "expansion_coeff_k2": float(coeff_map.get("k2", 0.0)),
+        "expansion_coeff_omega2": float(coeff_map.get("omega2", 0.0)),
+        "expansion_coeff_k2omega2": float(coeff_map.get("k2omega2", 0.0)),
+        "expansion_weight_k2": float(weights.get("k2", 0.0)),
+        "expansion_weight_omega2": float(weights.get("omega2", 0.0)),
+    }
+
+
 def cosine_similarity(a: np.ndarray, b: np.ndarray, eps: float = 1e-12) -> float:
     aa = np.asarray(a, dtype=np.float64).ravel()
     bb = np.asarray(b, dtype=np.float64).ravel()
@@ -260,6 +347,9 @@ def score_corners(
 def score_channel(
     spec_map: np.ndarray,
     ideal_map: np.ndarray,
+    lambdas_nm: np.ndarray,
+    thetas_deg: np.ndarray,
+    lambda0_nm: float,
     theta0_mask: np.ndarray,
     lambda0_mask: np.ndarray,
     work_mask: np.ndarray,
@@ -273,7 +363,8 @@ def score_channel(
         work_mask,
     )
     proj_coeff, proj_corr = projection_coeff_in_window(spec_map, ideal_map, work_mask)
-    proj_score = 0.5 * float(np.clip(proj_coeff, 0.0, 1.0)) + 0.5 * proj_corr
+    expansion = expansion_weight_k2omega2(spec_map, lambdas_nm, thetas_deg, lambda0_nm, work_mask)
+    proj_score = 0.5 * float(expansion["expansion_weight_k2omega2"]) + 0.5 * proj_corr
     total = 0.65 * zero_score + 0.25 * weighted_error_score + 0.10 * proj_score
     return {
         "score_total": total,
@@ -282,6 +373,7 @@ def score_channel(
         "score_projection": proj_score,
         "projection_coeff_k2omega2": proj_coeff,
         "projection_corr_k2omega2": proj_corr,
+        **expansion,
         **zero_details,
         **weighted_error_details,
     }
@@ -506,8 +598,8 @@ def main() -> None:
 
         ranking_rows: list[dict[str, float | int | str]] = []
         for sample_idx in range(structures.shape[0]):
-            tpp_score = score_channel(tpp[sample_idx], ideal_map, theta0_mask, lambda0_mask, work_mask)
-            tss_score = score_channel(tss[sample_idx], ideal_map, theta0_mask, lambda0_mask, work_mask)
+            tpp_score = score_channel(tpp[sample_idx], ideal_map, lambdas, thetas, actual_lambda, theta0_mask, lambda0_mask, work_mask)
+            tss_score = score_channel(tss[sample_idx], ideal_map, lambdas, thetas, actual_lambda, theta0_mask, lambda0_mask, work_mask)
             merged = merge_channel_scores(tpp_score, tss_score)
             merged["sample_idx"] = int(sample_idx)
             merged["target_lambda_nm"] = actual_lambda

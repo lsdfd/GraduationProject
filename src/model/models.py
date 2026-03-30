@@ -225,6 +225,43 @@ class ConditionEncoderConv(nn.Module):
         return emb
 
 
+class ConditionEncoderHybrid(nn.Module):
+    """
+    融合 token 和 conv 两条条件支路：
+      - token 支路保留精确的 (lambda, theta) 位置语义
+      - conv 支路提供局部平滑与邻域归纳偏置
+
+    适合当前 11x17 小谱图条件：既不想丢物理位置，又希望模型更容易学到
+    邻近波长 / 邻近角度之间的相关性。
+    """
+
+    def __init__(self, in_ch, emb_dim=192, hidden_ch=96, token_layers=2, n_heads=4):
+        super().__init__()
+        self.token_encoder = ConditionEncoderTokens(in_ch, emb_dim=emb_dim, n_layers=token_layers, n_heads=n_heads)
+        self.conv_encoder = ConditionEncoderConv(in_ch, emb_dim=emb_dim, hidden_ch=hidden_ch)
+        self.emb_fuse = nn.Sequential(
+            nn.Linear(emb_dim * 2, emb_dim * 2),
+            nn.SiLU(),
+            nn.Linear(emb_dim * 2, emb_dim),
+        )
+        self.token_fuse = nn.Sequential(
+            nn.Linear(emb_dim * 2, emb_dim * 2),
+            nn.SiLU(),
+            nn.Linear(emb_dim * 2, emb_dim),
+        )
+
+    def encode(self, cond):
+        tok_emb, _, tok_tokens = self.token_encoder.encode(cond)
+        conv_emb, _, conv_tokens = self.conv_encoder.encode(cond)
+        emb = self.emb_fuse(torch.cat([tok_emb, conv_emb], dim=-1))
+        tokens = self.token_fuse(torch.cat([tok_tokens, conv_tokens], dim=-1))
+        return emb, {"11x17": None, "6x9": None, "3x5": None}, tokens
+
+    def forward(self, cond):
+        emb, _, _ = self.encode(cond)
+        return emb
+
+
 class ResBlock(nn.Module):
     def __init__(self, in_ch, out_ch, time_dim, cond_dim):
         super().__init__()
@@ -478,9 +515,10 @@ class ConditionalUNet(nn.Module):
       - 去掉了语义错位的空间插值注入（cond_feats → 全 None）
     """
 
-    def __init__(self, cond_in_ch, base_ch=64, time_dim=256, cond_dim=256, arch="token_cross_v3"):
+    def __init__(self, cond_in_ch, base_ch=64, time_dim=256, cond_dim=256, arch="token_cross_v3", self_condition=False):
         super().__init__()
         self.arch = arch
+        self.self_condition = bool(self_condition)
         token_heads = 4 if cond_dim % 4 == 0 else (2 if cond_dim % 2 == 0 else 1)
 
         if arch == "token_cross_v3":
@@ -504,12 +542,52 @@ class ConditionalUNet(nn.Module):
             use_mid_cross = True
             use_up_cross1 = True
             use_up_cross2 = False
+        elif arch == "cnn_cross_v2":
+            self.cond_encoder = ConditionEncoderConv(cond_in_ch, emb_dim=cond_dim, hidden_ch=max(64, cond_dim // 2))
+            use_cross3 = True
+            use_cross4 = True
+            use_mid_cross = True
+            use_up_cross1 = True
+            use_up_cross2 = True
         elif arch == "cnn_film_v1":
             self.cond_encoder = ConditionEncoderConv(cond_in_ch, emb_dim=cond_dim, hidden_ch=max(64, cond_dim // 2))
             use_cross3 = False
             use_cross4 = False
             use_mid_cross = False
             use_up_cross1 = False
+            use_up_cross2 = False
+        elif arch == "token_film_v1":
+            self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim, n_layers=2, n_heads=token_heads)
+            use_cross3 = False
+            use_cross4 = False
+            use_mid_cross = False
+            use_up_cross1 = False
+            use_up_cross2 = False
+        elif arch == "hybrid_cross_v1":
+            self.cond_encoder = ConditionEncoderHybrid(
+                cond_in_ch,
+                emb_dim=cond_dim,
+                hidden_ch=max(64, cond_dim // 2),
+                token_layers=2,
+                n_heads=token_heads,
+            )
+            use_cross3 = True
+            use_cross4 = True
+            use_mid_cross = True
+            use_up_cross1 = True
+            use_up_cross2 = True
+        elif arch == "hybrid_cross_lite":
+            self.cond_encoder = ConditionEncoderHybrid(
+                cond_in_ch,
+                emb_dim=cond_dim,
+                hidden_ch=max(64, cond_dim // 2),
+                token_layers=1,
+                n_heads=token_heads,
+            )
+            use_cross3 = True
+            use_cross4 = False
+            use_mid_cross = True
+            use_up_cross1 = True
             use_up_cross2 = False
         else:
             raise ValueError(f"Unsupported ConditionalUNet arch: {arch}")
@@ -527,7 +605,8 @@ class ConditionalUNet(nn.Module):
         )
 
         # ── 编码器（条件只通过 AdaGN 和 cross-attn 进入，无空间插值注入）──
-        self.in_conv = ConvNormAct(1, base_ch, 3)
+        in_ch = 1 + (1 if self.self_condition else 0)
+        self.in_conv = ConvNormAct(in_ch, base_ch, 3)
 
         self.res1  = ResBlock(base_ch,     base_ch,     time_dim, cond_dim)   # 64×64
         self.down1 = Downsample(base_ch)
@@ -589,10 +668,14 @@ class ConditionalUNet(nn.Module):
             return x
         return module(x, cond_tokens)
 
-    def forward(self, x, t, cond=None, cond_drop_prob=0.0, force_uncond=False):
+    def forward(self, x, t, cond=None, cond_drop_prob=0.0, force_uncond=False, self_cond=None):
         b = x.shape[0]
         t_emb            = self.time_mlp(t)
         c_emb, c_tokens  = self.encode_cond(cond, b, x.device, cond_drop_prob, force_uncond)
+        if self.self_condition:
+            if self_cond is None:
+                self_cond = torch.zeros_like(x)
+            x = torch.cat([x, self_cond], dim=1)
 
         # 编码器
         x0 = self.in_conv(x)
@@ -631,4 +714,5 @@ def build_conditional_unet(cond_in_ch, cfg: dict | None = None):
         time_dim=int(cfg.get("time_dim", 256)),
         cond_dim=int(cfg.get("cond_dim", 256)),
         arch=str(cfg.get("unet_arch", "token_cross_v3")),
+        self_condition=bool(cfg.get("self_condition", False)),
     )

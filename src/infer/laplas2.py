@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from model.diffusion import GaussianDiffusion  # noqa: E402
 from model.parallel_utils import load_state_dict_flexible  # noqa: E402
-from model.train_utils import resolve_latest_run  # noqa: E402
+from model.train_utils import resolve_latest_checkpoint, resolve_latest_run  # noqa: E402
 from model.models import build_conditional_unet  # noqa: E402
 from infer.common import (  # noqa: E402
     lambda_theta_grid,
@@ -29,7 +29,9 @@ from infer.common import (  # noqa: E402
     plot_map,
     plot_structure,
     rcwa_eval_full_map,
+    rcwa_eval_target_lambda,
     second_order_score_map,
+    second_order_score_row,
     second_order_target,
 )
 
@@ -63,7 +65,7 @@ def resolve_infer_artifacts(
     latest_forward = resolve_latest_run(runs_root, "forward")
 
     default_stats = latest_forward / "cond_stats.npz" if latest_forward is not None else runs_root / "forward_runs" / "cond_stats.npz"
-    default_diffusion = ckpt_root / "diffusion_best.pt"
+    default_diffusion = resolve_latest_checkpoint(ckpt_root, "diffusion") or (ckpt_root / "diffusion_best.pt")
 
     stats = resolve_from_root(stats_path) if stats_path is not None else default_stats
     diffusion = resolve_from_root(diffusion_ckpt) if diffusion_ckpt is not None else default_diffusion
@@ -168,6 +170,33 @@ def compute_second_order_metrics(
     return metrics, rank
 
 
+def compute_second_order_metrics_rows(
+    pred_rows: np.ndarray,
+    err: np.ndarray,
+    thetas: np.ndarray,
+) -> tuple[list[dict], np.ndarray]:
+    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
+    metrics = []
+    for i in range(pred_rows.shape[0]):
+        s = second_order_score_row(pred_rows[i, 0], thetas)
+        metrics.append(
+            {
+                "sample_idx": int(i),
+                "rcwa_mae_raw": float(err[i]),
+                "second_order_score": float(s["score"]),
+                "main_second_order_score": float(s["score"]),
+                "bandwidth_second_order_score": float(s["score"]),
+                "center_score": float(s["center"]),
+                "shape_score": float(s["shape"]),
+                "edge_score": float(s["edge"]),
+                "r2": float(s["r2"]),
+                "tpp_at_40": float(pred_rows[i, 0, t40_idx]),
+            }
+        )
+    rank = np.array(sorted(range(len(metrics)), key=lambda i: metrics[i]["rcwa_mae_raw"]), dtype=np.int32)
+    return metrics, rank
+
+
 def _eval_worker(samples_np, target_raw, cond_ch, indices, device, rcwa_orders, queue):
     try:
         if str(device).startswith("cuda"):
@@ -188,6 +217,41 @@ def _eval_worker(samples_np, target_raw, cond_ch, indices, device, rcwa_orders, 
                 "ok": True,
                 "indices": np.asarray(indices, dtype=np.int64),
                 "maps": np.stack(maps, axis=0) if maps else np.empty((0, cond_ch, *target_raw.shape[-2:]), dtype=np.float32),
+                "errs": np.asarray(errs, dtype=np.float32),
+            }
+        )
+    except Exception as exc:
+        queue.put({"ok": False, "device": device, "error": str(exc)})
+
+
+def _eval_worker_target_only(samples_np, target_raw, cond_ch, indices, device, rcwa_orders, target_lambda, queue):
+    try:
+        if str(device).startswith("cuda"):
+            torch.cuda.set_device(device)
+        torch.set_num_threads(1)
+        rows = []
+        errs = []
+        for idx in indices:
+            print(f"[laplas2-rcwa-row {device}] sample {idx + 1}/{len(samples_np)}", flush=True)
+            sample_t = torch.from_numpy(samples_np[idx: idx + 1]).to(device)
+            out = rcwa_eval_target_lambda(
+                sample_t,
+                target_raw,
+                cond_ch,
+                device,
+                target_lambda=target_lambda,
+                rcwa_orders=rcwa_orders,
+            )
+            if out is None:
+                raise RuntimeError("RCWA backend unavailable during laplas2 evaluation.")
+            mae, pred = out
+            rows.append(pred.astype(np.float32))
+            errs.append(float(mae))
+        queue.put(
+            {
+                "ok": True,
+                "indices": np.asarray(indices, dtype=np.int64),
+                "maps": np.stack(rows, axis=0) if rows else np.empty((0, cond_ch, target_raw.shape[-1]), dtype=np.float32),
                 "errs": np.asarray(errs, dtype=np.float32),
             }
         )
@@ -249,6 +313,69 @@ def evaluate_rcwa_candidates(
     return pred_raw, err
 
 
+def evaluate_rcwa_candidates_target_only(
+    samples: torch.Tensor,
+    target_raw: np.ndarray,
+    cond_ch: int,
+    devices: list[str],
+    rcwa_orders: int,
+    target_lambda: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    samples_np = samples.cpu().numpy().astype(np.float32)
+    num_samples = samples_np.shape[0]
+    if len(devices) == 1:
+        pred_rows = np.empty((num_samples, cond_ch, target_raw.shape[-1]), dtype=np.float32)
+        err = np.empty((num_samples,), dtype=np.float32)
+        for idx in range(num_samples):
+            print(f"[laplas2-rcwa-row {devices[0]}] sample {idx + 1}/{num_samples}", flush=True)
+            out = rcwa_eval_target_lambda(
+                samples[idx: idx + 1],
+                target_raw,
+                cond_ch,
+                devices[0],
+                target_lambda=target_lambda,
+                rcwa_orders=rcwa_orders,
+            )
+            if out is None:
+                raise RuntimeError("RCWA backend unavailable during laplas2 evaluation.")
+            mae, pred = out
+            pred_rows[idx] = pred.astype(np.float32)
+            err[idx] = float(mae)
+        return pred_rows, err
+
+    all_indices = np.arange(num_samples, dtype=np.int64)
+    split_indices = [chunk.tolist() for chunk in np.array_split(all_indices, len(devices)) if len(chunk) > 0]
+    active_devices = devices[: len(split_indices)]
+    ctx = get_context("spawn")
+    queue = ctx.Queue()
+    procs = []
+    for dev, idxs in zip(active_devices, split_indices):
+        proc = ctx.Process(target=_eval_worker_target_only, args=(samples_np, target_raw, cond_ch, idxs, dev, rcwa_orders, target_lambda, queue))
+        proc.start()
+        procs.append(proc)
+
+    pred_rows = np.empty((num_samples, cond_ch, target_raw.shape[-1]), dtype=np.float32)
+    err = np.empty((num_samples,), dtype=np.float32)
+    received = 0
+    while received < len(procs):
+        msg = queue.get()
+        received += 1
+        if not msg.get("ok", False):
+            for proc in procs:
+                if proc.is_alive():
+                    proc.terminate()
+            raise RuntimeError(f"laplas2 row worker {msg.get('device')} 失败: {msg.get('error')}")
+        idxs = msg["indices"]
+        pred_rows[idxs] = msg["maps"]
+        err[idxs] = msg["errs"]
+
+    for proc in procs:
+        proc.join()
+        if proc.exitcode != 0:
+            raise RuntimeError(f"laplas2 row worker 异常退出，exitcode={proc.exitcode}")
+    return pred_rows, err
+
+
 @torch.no_grad()
 def main() -> None:
     p = argparse.ArgumentParser(description="Run diffusion inference using the raw top-ranked dataset spectrum as target.")
@@ -265,6 +392,7 @@ def main() -> None:
     p.add_argument("--target_rank", type=int, default=1)
     p.add_argument("--rcwa_orders", type=int, default=7)
     p.add_argument("--band_sigma_nm", type=float, default=25.0, help="高斯扩散宽度(nm)，控制理想形状向周围波长的扩散范围")
+    p.add_argument("--eval_mode", choices=["full", "target_only"], default="full")
     args = p.parse_args()
 
     args.train_npz = str(resolve_from_root(args.train_npz))
@@ -310,8 +438,12 @@ def main() -> None:
     diffusion.eval()
 
     samples = diffusion.sample(cond_batch, cfg_scale=args.cfg_scale)
-    pred_raw, err = evaluate_rcwa_candidates(samples, target_raw, cond_ch, devices, args.rcwa_orders)
-    metrics, rank = compute_second_order_metrics(pred_raw, err, lambdas, thetas, args.target_lambda)
+    if args.eval_mode == "target_only":
+        pred_raw, err = evaluate_rcwa_candidates_target_only(samples, target_raw, cond_ch, devices, args.rcwa_orders, args.target_lambda)
+        metrics, rank = compute_second_order_metrics_rows(pred_raw, err, thetas)
+    else:
+        pred_raw, err = evaluate_rcwa_candidates(samples, target_raw, cond_ch, devices, args.rcwa_orders)
+        metrics, rank = compute_second_order_metrics(pred_raw, err, lambdas, thetas, args.target_lambda)
 
     best_idx = int(rank[0])
     info = {
@@ -336,13 +468,18 @@ def main() -> None:
     np.save(save_dir / "best_structure.npy", samples[best_idx:best_idx + 1].cpu().numpy())
     np.save(save_dir / "best_pred_cond_raw.npy", pred_raw[best_idx:best_idx + 1])
 
-    vmax_tpp = max(float(target_raw[0].max()), float(pred_raw[best_idx, 0].max()), 1e-6)
-    plot_map(save_dir / "target_tpp.png", target_raw, lambdas, thetas, "Target raw tpp_mag", vmax_tpp, channel_idx=0)
-    plot_map(save_dir / "best_tpp.png", pred_raw[best_idx], lambdas, thetas, "Best RCWA tpp_mag", vmax_tpp, channel_idx=0)
-    if cond_ch == 2:
-        vmax_tss = max(float(target_raw[1].max()), float(pred_raw[best_idx, 1].max()), 1e-6)
-        plot_map(save_dir / "target_tss.png", target_raw, lambdas, thetas, "Target raw tss_mag", vmax_tss, channel_idx=1)
-        plot_map(save_dir / "best_tss.png", pred_raw[best_idx], lambdas, thetas, "Best RCWA tss_mag", vmax_tss, channel_idx=1)
+    if args.eval_mode == "target_only":
+        target_row = target_raw[:, int(np.argmin(np.abs(lambdas - float(args.target_lambda))))]
+        np.save(save_dir / "target_row_raw.npy", target_row)
+        np.save(save_dir / "best_row_raw.npy", pred_raw[best_idx])
+    else:
+        vmax_tpp = max(float(target_raw[0].max()), float(pred_raw[best_idx, 0].max()), 1e-6)
+        plot_map(save_dir / "target_tpp.png", target_raw, lambdas, thetas, "Target raw tpp_mag", vmax_tpp, channel_idx=0)
+        plot_map(save_dir / "best_tpp.png", pred_raw[best_idx], lambdas, thetas, "Best RCWA tpp_mag", vmax_tpp, channel_idx=0)
+        if cond_ch == 2:
+            vmax_tss = max(float(target_raw[1].max()), float(pred_raw[best_idx, 1].max()), 1e-6)
+            plot_map(save_dir / "target_tss.png", target_raw, lambdas, thetas, "Target raw tss_mag", vmax_tss, channel_idx=1)
+            plot_map(save_dir / "best_tss.png", pred_raw[best_idx], lambdas, thetas, "Best RCWA tss_mag", vmax_tss, channel_idx=1)
     plot_structure(save_dir / "best_structure.png", samples[best_idx:best_idx + 1].cpu().numpy(), "Best binary structure")
 
     with (save_dir / "metrics.json").open("w", encoding="utf-8") as f:

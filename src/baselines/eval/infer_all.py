@@ -11,6 +11,7 @@
 import os
 import sys
 import time
+from pathlib import Path
 import numpy as np
 import torch
 
@@ -27,6 +28,7 @@ for _p in [
 
 from models import ForwardSurrogate, build_conditional_unet
 from diffusion import GaussianDiffusion
+from train_utils import resolve_latest_run
 from cvae import CVAE
 from cgan import Generator
 from generate_one import generate_structure
@@ -34,6 +36,36 @@ from generate_one import generate_structure
 METHODS = ("topo_opt", "cvae", "cgan", "diffusion", "diffusion+guide")
 
 _TOPO_OPT_FNS = None
+
+
+def _resolve_latest_ckpt(explicit_path: str | None, base_dir: str, run_name: str, ckpt_name: str) -> str:
+    if explicit_path:
+        return explicit_path
+
+    latest_run = resolve_latest_run(base_dir, run_name)
+    if latest_run is None:
+        return str(Path(base_dir) / ckpt_name)
+
+    candidate = Path(latest_run) / ckpt_name
+    if candidate.exists():
+        return str(candidate)
+    return str(Path(base_dir) / ckpt_name)
+
+
+def resolve_default_cvae_ckpt(explicit_path: str | None = None) -> str:
+    return _resolve_latest_ckpt(explicit_path, "checkpoints/cvae", "cvae", "cvae_best.pt")
+
+
+def resolve_default_cgan_ckpt(explicit_path: str | None = None) -> str:
+    return _resolve_latest_ckpt(explicit_path, "checkpoints/cgan", "cgan", "cgan_best.pt")
+
+
+def resolve_default_diffusion_ckpt(explicit_path: str | None = None) -> str:
+    if explicit_path:
+        return explicit_path
+    # 当前扩散训练仍把 best/last checkpoint 写在 checkpoints/ 根目录，
+    # runs/diffusion 里只保存日志和 summary，不保存可直接加载的权重。
+    return "checkpoints/diffusion_best.pt"
 
 
 def _get_topo_opt_fns():
@@ -256,9 +288,9 @@ def generate_diffusion_guided(cond_norm, n_samples: int = 16, device: str = "cpu
 # ══════════════════════════════════════════════════════════════════════
 
 def load_all_models(
-    cvae_ckpt:      str = "checkpoints/cvae/cvae_best.pt",
-    cgan_ckpt:      str = "checkpoints/cgan/cgan_best.pt",
-    diffusion_ckpt: str = "checkpoints/diffusion_best.pt",
+    cvae_ckpt:      str | None = None,
+    cgan_ckpt:      str | None = None,
+    diffusion_ckpt: str | None = None,
     device:         str = "cuda",
     methods:        list[str] | None = None,
 ) -> dict:
@@ -268,6 +300,9 @@ def load_all_models(
     """
     models = {}
     selected = list(methods) if methods else list(METHODS)
+    cvae_ckpt = resolve_default_cvae_ckpt(cvae_ckpt)
+    cgan_ckpt = resolve_default_cgan_ckpt(cgan_ckpt)
+    diffusion_ckpt = resolve_default_diffusion_ckpt(diffusion_ckpt)
 
     # 拓扑优化：无需模型，target_lambda 由 run_eval.py 填入
     if "topo_opt" in selected:

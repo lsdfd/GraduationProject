@@ -28,7 +28,7 @@ def augment_structure(x: torch.Tensor) -> torch.Tensor:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", default="data/train_data.npz")
+    parser.add_argument("--data_path", default="GraduationProject/data/train_data_3000.npz")
     parser.add_argument("--save_dir", default="checkpoints")
     parser.add_argument("--runs_dir", default="runs")
     parser.add_argument("--device", default=None, help="主设备；默认使用 cuda:0")

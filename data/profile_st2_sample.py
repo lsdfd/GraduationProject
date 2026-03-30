@@ -344,8 +344,8 @@ def main() -> None:
             args.theta_max_deg,
         )
 
-        tpp_scores = score_channel(tpp_map, ideal_map, theta0_mask, lambda0_mask, work_mask)
-        tss_scores = score_channel(tss_map, ideal_map, theta0_mask, lambda0_mask, work_mask)
+        tpp_scores = score_channel(tpp_map, ideal_map, lambdas, thetas, actual_lambda, theta0_mask, lambda0_mask, work_mask)
+        tss_scores = score_channel(tss_map, ideal_map, lambdas, thetas, actual_lambda, theta0_mask, lambda0_mask, work_mask)
         merged = merge_channel_scores(tpp_scores, tss_scores)
         merged["sample_idx"] = int(args.sample_idx)
         merged["target_lambda_nm"] = actual_lambda

@@ -12,7 +12,7 @@ if str(THIS_DIR) not in sys.path:
 from models import ForwardSurrogate, build_conditional_unet
 from diffusion import GaussianDiffusion
 from parallel_utils import load_state_dict_flexible
-from train_utils import resolve_latest_run
+from train_utils import resolve_latest_checkpoint, resolve_latest_run
 
 
 def load_target_cond(target_path, stats_path, device):
@@ -37,13 +37,20 @@ def resolve_default_stats_path():
     return "runs/forward_runs/cond_stats.npz"
 
 
+def resolve_default_ckpt_path(prefix):
+    latest = resolve_latest_checkpoint("checkpoints", prefix)
+    if latest is not None:
+        return str(latest)
+    return f"checkpoints/{prefix}_best.pt"
+
+
 @torch.no_grad()
 def main():
     cfg = {
         "target_cond_path": "data/target_cond.npy",
         "stats_path": resolve_default_stats_path(),
-        "forward_ckpt": "checkpoints/forward_best.pt",
-        "diffusion_ckpt": "checkpoints/diffusion_best.pt",
+        "forward_ckpt": resolve_default_ckpt_path("forward"),
+        "diffusion_ckpt": resolve_default_ckpt_path("diffusion"),
         "num_samples": 32,
         "cfg_scale": 3.0,
         "save_dir": "samples",

@@ -37,9 +37,38 @@ class GaussianDiffusion(nn.Module):
 
         self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod))
+        self.register_buffer("snr", alphas_cumprod / (1.0 - alphas_cumprod).clamp(min=1e-8))
 
         posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         self.register_buffer("posterior_variance", posterior_variance.clamp(min=1e-20))
+
+    def uses_self_condition(self):
+        model = getattr(self.model, "module", self.model)
+        return bool(getattr(model, "self_condition", False))
+
+    def _diffusion_loss(
+        self,
+        v_pred,
+        v_gt,
+        t,
+        loss_weight="none",
+        min_snr_gamma=5.0,
+        p2_k=1.0,
+        p2_gamma=1.0,
+    ):
+        per_sample = ((v_pred - v_gt) ** 2).reshape(v_pred.shape[0], -1).mean(dim=1)
+        scheme = str(loss_weight).lower()
+        if scheme == "none":
+            return per_sample.mean()
+
+        snr = extract(self.snr, t, per_sample.shape).reshape(-1)
+        if scheme == "min_snr":
+            weights = torch.clamp(snr, max=float(min_snr_gamma)) / snr.clamp_min(1e-8)
+        elif scheme == "p2":
+            weights = (float(p2_k) + snr).pow(-float(p2_gamma))
+        else:
+            raise ValueError(f"Unsupported diffusion loss weighting: {loss_weight}")
+        return (per_sample * weights).mean()
 
     def q_sample(self, x0, t, noise=None):
         if noise is None:
@@ -72,9 +101,14 @@ class GaussianDiffusion(nn.Module):
         lambda_diff=1.0,
         lambda_phys=0.5,
         lambda_bin=0.05,
+        lambda_x0=0.0,
         cond_drop_prob=0.1,
         phys_start_t=None,
         phys_bin_mode="ste",
+        diff_loss_weight="none",
+        min_snr_gamma=5.0,
+        p2_k=1.0,
+        p2_gamma=1.0,
     ):
         b = x0.shape[0]
         device = x0.device
@@ -84,14 +118,32 @@ class GaussianDiffusion(nn.Module):
         x_t = self.q_sample(x0, t, noise=noise)
 
         v_gt = self.v_target(x0, t, noise)
-        v_pred = self.model(x_t, t, cond=cond, cond_drop_prob=cond_drop_prob)
+        self_cond = None
+        if self.uses_self_condition() and torch.rand(()) < 0.5:
+            with torch.no_grad():
+                v_sc = self.model(x_t, t, cond=cond, cond_drop_prob=0.0)
+                self_cond = self.predict_x0_from_v(x_t, t, v_sc).clamp(-1.0, 1.0).detach()
+        v_pred = self.model(x_t, t, cond=cond, cond_drop_prob=cond_drop_prob, self_cond=self_cond)
 
-        loss_diff = F.mse_loss(v_pred, v_gt)
+        loss_diff = self._diffusion_loss(
+            v_pred,
+            v_gt,
+            t,
+            loss_weight=diff_loss_weight,
+            min_snr_gamma=min_snr_gamma,
+            p2_k=p2_k,
+            p2_gamma=p2_gamma,
+        )
 
         x0_pred = self.predict_x0_from_v(x_t, t, v_pred).clamp(-1.0, 1.0)
 
         total_loss = lambda_diff * loss_diff
         log_dict = {"loss_diff": loss_diff.item()}
+
+        if lambda_x0 > 0:
+            loss_x0 = F.l1_loss(x0_pred, x0)
+            total_loss = total_loss + lambda_x0 * loss_x0
+            log_dict["loss_x0"] = loss_x0.item()
 
         apply_phys = surrogate is not None
         if phys_start_t is not None:
@@ -127,18 +179,19 @@ class GaussianDiffusion(nn.Module):
         return total_loss, log_dict
 
     @torch.no_grad()
-    def p_sample(self, x, t_scalar, cond, cfg_scale=3.0):
+    def p_sample(self, x, t_scalar, cond, cfg_scale=3.0, self_cond=None, return_x0=False):
         b = x.shape[0]
         t = torch.full((b,), t_scalar, device=x.device, dtype=torch.long)
 
         if cfg_scale != 1.0:
-            v_cond = self.model(x, t, cond=cond, force_uncond=False)
-            v_uncond = self.model(x, t, cond=None, force_uncond=True)
+            v_cond = self.model(x, t, cond=cond, force_uncond=False, self_cond=self_cond)
+            v_uncond = self.model(x, t, cond=None, force_uncond=True, self_cond=self_cond)
             v = v_uncond + cfg_scale * (v_cond - v_uncond)
         else:
-            v = self.model(x, t, cond=cond)
+            v = self.model(x, t, cond=cond, self_cond=self_cond)
 
         eps = self.predict_eps_from_v(x, t, v)
+        x0_hat = self.predict_x0_from_v(x, t, v).clamp(-1.0, 1.0)
 
         beta_t = extract(self.betas, t, x.shape)
         alpha_t = extract(self.alphas, t, x.shape)
@@ -147,20 +200,23 @@ class GaussianDiffusion(nn.Module):
         model_mean = (1.0 / torch.sqrt(alpha_t)) * (x - (beta_t / sqrt_one_minus_ab) * eps)
 
         if t_scalar == 0:
-            return model_mean
+            return (model_mean, x0_hat.detach()) if return_x0 else model_mean
 
         noise = torch.randn_like(x)
         var = extract(self.posterior_variance, t, x.shape)
-        return model_mean + torch.sqrt(var) * noise
+        out = model_mean + torch.sqrt(var) * noise
+        return (out, x0_hat.detach()) if return_x0 else out
 
     @torch.no_grad()
     def sample(self, cond, cfg_scale=3.0):
         b = cond.shape[0]
         device = cond.device
         x = torch.randn(b, 1, self.image_size, self.image_size, device=device)
+        self_cond = None
 
         for t in reversed(range(self.timesteps)):
-            x = self.p_sample(x, t, cond, cfg_scale=cfg_scale)
+            x, x0_hat = self.p_sample(x, t, cond, cfg_scale=cfg_scale, self_cond=self_cond, return_x0=True)
+            self_cond = x0_hat if self.uses_self_condition() else None
 
         x = x.clamp(-1.0, 1.0)
         x = (x + 1.0) / 2.0
@@ -171,6 +227,7 @@ class GaussianDiffusion(nn.Module):
         self, x, t_scalar, cond, cfg_scale=3.0,
         surrogate=None, target_norm=None,
         guidance_scale=0.1, guide_start_t=300, guide_every=1,
+        self_cond=None, return_x0=False,
     ):
         b = x.shape[0]
         device = x.device
@@ -180,14 +237,15 @@ class GaussianDiffusion(nn.Module):
         v_uncond_saved = None
         with torch.no_grad():
             if cfg_scale != 1.0:
-                v_cond   = self.model(x, t, cond=cond, force_uncond=False)
-                v_uncond = self.model(x, t, cond=None,  force_uncond=True)
+                v_cond   = self.model(x, t, cond=cond, force_uncond=False, self_cond=self_cond)
+                v_uncond = self.model(x, t, cond=None,  force_uncond=True, self_cond=self_cond)
                 v_uncond_saved = v_uncond
                 v = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
-                v = self.model(x, t, cond=cond)
+                v = self.model(x, t, cond=cond, self_cond=self_cond)
 
             eps            = self.predict_eps_from_v(x, t, v)
+            x0_hat         = self.predict_x0_from_v(x, t, v).clamp(-1.0, 1.0)
             beta_t         = extract(self.betas, t, x.shape)
             alpha_t        = extract(self.alphas, t, x.shape)
             sqrt_one_minus = extract(self.sqrt_one_minus_alphas_cumprod, t, x.shape)
@@ -206,7 +264,7 @@ class GaussianDiffusion(nn.Module):
             x_in = x.detach().requires_grad_(True)
             with torch.enable_grad():
                 # 用完整 CFG v 估计 x0_hat，和 block ① 的去噪方向一致
-                v_g_cond = self.model(x_in, t, cond=cond, force_uncond=False)
+                v_g_cond = self.model(x_in, t, cond=cond, force_uncond=False, self_cond=self_cond)
                 if cfg_scale != 1.0 and v_uncond_saved is not None:
                     v_g = v_uncond_saved.detach() + cfg_scale * (v_g_cond - v_uncond_saved.detach())
                 else:
@@ -225,11 +283,12 @@ class GaussianDiffusion(nn.Module):
             model_mean = model_mean - guidance_scale * grad_normalized
 
         if t_scalar == 0:
-            return model_mean
+            return (model_mean, x0_hat.detach()) if return_x0 else model_mean
 
         noise = torch.randn_like(x)
         var   = extract(self.posterior_variance, t, x.shape)
-        return model_mean + torch.sqrt(var) * noise
+        out = model_mean + torch.sqrt(var) * noise
+        return (out, x0_hat.detach()) if return_x0 else out
 
     @torch.no_grad()
     def sample_guided(
@@ -240,15 +299,19 @@ class GaussianDiffusion(nn.Module):
         b = cond.shape[0]
         device = cond.device
         x = torch.randn(b, 1, self.image_size, self.image_size, device=device)
+        self_cond = None
 
         for t in reversed(range(self.timesteps)):
-            x = self.p_sample_guided(
+            x, x0_hat = self.p_sample_guided(
                 x, t, cond, cfg_scale=cfg_scale,
                 surrogate=surrogate, target_norm=target_norm,
                 guidance_scale=guidance_scale,
                 guide_start_t=guide_start_t,
                 guide_every=guide_every,
+                self_cond=self_cond,
+                return_x0=True,
             )
+            self_cond = x0_hat if self.uses_self_condition() else None
 
         x = x.clamp(-1.0, 1.0)
         x = (x + 1.0) / 2.0
