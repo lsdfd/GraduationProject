@@ -8,9 +8,7 @@ import json
 import sys
 import time
 from datetime import datetime
-from multiprocessing import get_context
 from pathlib import Path
-from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,13 +18,7 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-try:
-    from dataset.rcwa.rcwa import torcwa_simulation  # noqa: E402
-except ModuleNotFoundError:
-    # Avoid collisions with unrelated top-level `dataset` modules.
-    sys.path.insert(0, str(ROOT / "src" / "dataset" / "rcwa"))
-    from rcwa import torcwa_simulation  # type: ignore  # noqa: E402
-from model.parallel_utils import parse_devices as parse_runtime_devices  # noqa: E402
+from dataset.rcwa.rcwa import torcwa_simulation  # noqa: E402
 from infer.common import (  # noqa: E402
     lambda_theta_grid,
     plot_structure,
@@ -36,35 +28,58 @@ from infer.common import (  # noqa: E402
 )
 
 
-def parse_devices(devices_arg: str | None, device_arg: str | None) -> list[str]:
-    return parse_runtime_devices(devices_arg, device_arg, default_to_all_cuda=True)
-
-
 def resolve_from_root(path_like: str | Path) -> Path:
     path = Path(path_like)
     return path if path.is_absolute() else ROOT / path
 
 
-def resolve_laplas_roots(laplas_root: str | Path | None) -> list[Path]:
-    roots: list[Path] = []
-    if laplas_root is not None:
-        roots.append(resolve_from_root(laplas_root))
-    fallback = ROOT / "samples" / "laplas"
-    if all(root != fallback for root in roots):
-        roots.append(fallback)
-    return roots
+def iter_laplas_case_dirs() -> list[Path]:
+    samples_root = ROOT / "samples"
+    if not samples_root.exists():
+        return []
+    roots = []
+    for child in samples_root.iterdir():
+        if not child.is_dir():
+            continue
+        name = child.name
+        if name == "laplas" or (name.startswith("laplas_") and name != "laplas2"):
+            roots.append(child)
 
-
-def latest_laplas_file(name: str, roots: list[Path]) -> str:
-    files: list[Path] = []
+    case_dirs = []
     for root in roots:
-        if root.exists():
-            files.extend([p for p in root.glob(f"**/{name}") if p.is_file()])
-    files = sorted(files, key=lambda p: p.stat().st_mtime)
-    if not files:
-        roots_str = ", ".join(str(p) for p in roots)
-        raise FileNotFoundError(f"未找到以下目录下的 {name}: {roots_str}")
-    return str(files[-1])
+        for summary in root.glob("**/summary.json"):
+            case_dir = summary.parent
+            if (case_dir / "target_cond_raw.npy").exists():
+                case_dirs.append(case_dir)
+    return sorted(case_dirs, key=lambda p: p.stat().st_mtime)
+
+
+def latest_laplas_case_dir() -> Path:
+    case_dirs = iter_laplas_case_dirs()
+    if not case_dirs:
+        raise FileNotFoundError("未找到有效的 laplas 推理结果，请先运行 python src/infer/laplas.py")
+    return case_dirs[-1]
+
+
+def load_laplas_summary(case_dir: Path) -> dict:
+    summary_path = case_dir / "summary.json"
+    if not summary_path.exists():
+        return {}
+    with summary_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def resolve_laplas_artifacts(case_dir: Path) -> tuple[Path, Path, dict]:
+    target_path = case_dir / "target_cond_raw.npy"
+    topk_second = case_dir / "topk_second_samples.npy"
+    topk = case_dir / "topk_samples.npy"
+    if topk_second.exists():
+        init_path = topk_second
+    elif topk.exists():
+        init_path = topk
+    else:
+        raise FileNotFoundError(f"未找到初始化样本文件: {case_dir}")
+    return target_path, init_path, load_laplas_summary(case_dir)
 
 
 def load_target_raw(path: str) -> np.ndarray:
@@ -168,55 +183,22 @@ def rcwa_tpp_tss_row(x: torch.Tensor, target_lambda: float, device: str, rcwa_or
     return torch.stack(tpp_vals, dim=0), torch.stack(tss_vals, dim=0)
 
 
-def plot_candidate_summary(
-    path: Path,
-    x_bin: np.ndarray,
-    tpp_row: np.ndarray,
-    thetas: np.ndarray,
-    title: str,
-    score: float,
-    tpp_at_40: float,
-) -> None:
-    """合并结构图和 tpp 曲线到一张图，并标注 tpp@40° 值"""
+def plot_tpp_row(path: Path, row: np.ndarray, thetas: np.ndarray, title: str) -> None:
     target = second_order_target(thetas)
-    y = tpp_row.astype(np.float64)
+    y = row.astype(np.float64)
     yn = y / max(float(np.max(y)), 1e-8)
-    t40_idx = int(np.argmin(np.abs(thetas - 40.0)))
-
-    fig, (ax_struct, ax_curve) = plt.subplots(1, 2, figsize=(10, 4))
-
-    # 左：二值化结构
-    ax_struct.imshow(x_bin.squeeze(), cmap="gray_r", vmin=0, vmax=1, interpolation="nearest")
-    ax_struct.set_title("Binary structure", fontsize=10)
-    ax_struct.axis("off")
-
-    # 右：tpp 曲线
-    ax_curve.plot(thetas, target, "k--", lw=1.7, label="ideal ~ |sin(θ)|²")
-    ax_curve.plot(thetas, yn, lw=1.9, color="#1f77b4", label="optimized (normalized)")
-
-    # 标注 tpp@40°
-    ax_curve.axvline(x=float(thetas[t40_idx]), color="r", ls=":", lw=1.2, alpha=0.6)
-    ax_curve.annotate(
-        f"|tpp|@40°={tpp_at_40:.3f}",
-        xy=(float(thetas[t40_idx]), float(yn[t40_idx])),
-        xytext=(float(thetas[t40_idx]) - 12, float(yn[t40_idx]) + 0.15),
-        fontsize=9,
-        color="red",
-        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "red", "alpha": 0.8},
-        arrowprops={"arrowstyle": "->", "color": "red", "lw": 1.0},
-    )
-
-    ax_curve.set_xlabel("theta (deg)", fontsize=9)
-    ax_curve.set_ylabel("normalized |tpp|", fontsize=9)
-    ax_curve.set_ylim(-0.05, 1.15)
-    ax_curve.grid(alpha=0.25)
-    ax_curve.legend(fontsize=8, loc="lower right")
-    ax_curve.set_title(f"2nd-order score={score:.3f}", fontsize=10)
-
-    fig.suptitle(title, fontsize=11)
-    fig.tight_layout()
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
+    plt.figure(figsize=(5, 3.6))
+    plt.plot(thetas, target, "k--", lw=1.7, label="target ~ |sin(theta)|^2")
+    plt.plot(thetas, yn, lw=1.9, color="#1f77b4", label="candidate (normalized)")
+    plt.xlabel("theta (deg)")
+    plt.ylabel("normalized |tpp|")
+    plt.ylim(-0.05, 1.05)
+    plt.grid(alpha=0.25)
+    plt.legend(fontsize=8, loc="lower right")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(path, dpi=180)
+    plt.close()
 
 
 def evaluate_binary_candidate(x_cont: torch.Tensor, args) -> tuple[torch.Tensor, dict]:
@@ -404,20 +386,16 @@ def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, sa
     np.save(cand_dir / "optimized_rcwa_continuous_tpp_row.npy", best_rcwa_cont["tpp_row"])
     np.save(cand_dir / "optimized_rcwa_continuous_tss_row.npy", best_rcwa_cont["tss_row"])
     np.save(cand_dir / "target_cond_raw.npy", target_raw)
-    plot_candidate_summary(
-        cand_dir / "optimized_summary.png",
-        best_bin.cpu().numpy(),
-        bin_tpp_np,
-        thetas,
-        f"Candidate {idx:02d} @ {args.target_lambda:.0f}nm",
-        float(best_rcwa_bin["score"]),
-        float(bin_tpp_np[t40_idx]),
-    )
+    plot_structure(cand_dir / "optimized_continuous.png", best_x_cont.cpu().numpy(), f"Optimized continuous {idx:02d}")
+    plot_structure(cand_dir / "optimized_binary.png", best_bin.cpu().numpy(), f"Optimized binary {idx:02d}")
+    plot_tpp_row(cand_dir / "optimized_second_order_curve.png", bin_tpp_np, thetas, f"{args.target_lambda:.0f}nm fit {idx:02d}")
     with (cand_dir / "optimization_log.json").open("w", encoding="utf-8") as f:
         json.dump(
             {
                 "target": args.target,
                 "init": args.init,
+                "laplas_case_dir": args.laplas_case_dir,
+                "laplas_summary": args.laplas_summary,
                 "candidate_idx": idx,
                 "metrics": out,
                 "history_tail": hist[-40:],
@@ -429,101 +407,84 @@ def run_candidate(idx: int, init: torch.Tensor, target_raw: np.ndarray, args, sa
     return out
 
 
-def _optimization_worker(indices, init_np, target_raw, args_dict, save_dir_str, device, queue):
-    try:
-        if str(device).startswith("cuda"):
-            torch.cuda.set_device(device)
-        torch.set_num_threads(1)
-        args = SimpleNamespace(**args_dict)
-        args.device = device
-        save_dir = Path(save_dir_str)
-        rows = []
-        for idx in indices:
-            print(f"[opt {device}] candidate {idx + 1}/{len(init_np)}", flush=True)
-            init_t = torch.from_numpy(init_np[idx: idx + 1]).to(device)
-            rows.append(run_candidate(idx, init_t, target_raw, args, save_dir))
-        queue.put({"ok": True, "device": device, "rows": rows})
-    except Exception as exc:
-        queue.put({"ok": False, "device": device, "error": str(exc)})
+def main():
+    p = argparse.ArgumentParser(description="Multi-start RCWA topology optimization from laplas top-k samples.")
+    p.add_argument("--laplas_dir", help="指定某次 laplas 输出的 case 目录；不传则自动选最新有效结果")
+    p.add_argument("--target")
+    p.add_argument("--init")
+    p.add_argument("--steps", type=int, default=100)
+    p.add_argument("--lr", type=float, default=0.005)
+    p.add_argument("--save_dir", default=str(ROOT / "samples" / "optimized"))
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--target_lambda", type=float, default=None)
+    p.add_argument("--rcwa_orders", type=int, default=7)
+    p.add_argument("--binary_eval_every", type=int, default=10)
+    p.add_argument("--max_inits", type=int, default=5)
+    p.add_argument("--filter_radius", type=int, default=1)
+    p.add_argument("--proj_eta", type=float, default=0.5)
+    p.add_argument("--beta_start", type=float, default=4.0)
+    p.add_argument("--beta_end", type=float, default=16.0)
+    p.add_argument("--log_every", type=int, default=10)
+    args = p.parse_args()
 
+    laplas_summary: dict = {}
+    if args.laplas_dir:
+        laplas_case_dir = resolve_from_root(args.laplas_dir)
+    elif args.target or args.init:
+        laplas_case_dir = None
+    else:
+        laplas_case_dir = latest_laplas_case_dir()
 
-def _run_with_args(args) -> None:
-    """Core execution logic; accepts a pre-parsed args namespace.
+    if laplas_case_dir is not None:
+        auto_target, auto_init, laplas_summary = resolve_laplas_artifacts(laplas_case_dir)
+        args.target = args.target or str(auto_target)
+        args.init = args.init or str(auto_init)
 
-    Called both by main() (direct execution) and by band-specific wrapper
-    scripts (e.g. band_900nm/optimization.py) that only override default values.
-    """
     if args.target:
         args.target = str(resolve_from_root(args.target))
     if args.init:
         args.init = str(resolve_from_root(args.init))
-    laplas_roots = resolve_laplas_roots(getattr(args, "laplas_root", None))
-    args.laplas_root = str(laplas_roots[0]) if laplas_roots else None
     args.save_dir = str(resolve_from_root(args.save_dir))
-    devices = parse_devices(args.devices, args.device)
-    args.device = devices[0]
+    args.laplas_case_dir = None if laplas_case_dir is None else str(laplas_case_dir)
+    args.laplas_summary = laplas_summary
+
+    if args.target_lambda is None:
+        inferred_lambda = laplas_summary.get("target_lambda_nm")
+        args.target_lambda = float(inferred_lambda) if inferred_lambda is not None else 1000.0
 
     save_dir = Path(args.save_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir.mkdir(parents=True, exist_ok=True)
-    args.target = args.target or latest_laplas_file("target_cond_raw.npy", laplas_roots)
-    try:
-        default_init = latest_laplas_file("topk_second_samples.npy", laplas_roots)
-    except FileNotFoundError:
-        default_init = latest_laplas_file("topk_samples.npy", laplas_roots)
-    args.init = args.init or default_init
 
     target_raw = load_target_raw(args.target)
-    init_batch = load_init_batch(args.init, "cpu", args.max_inits)
-    print(f"[opt] laplas_roots={[str(p) for p in laplas_roots]}")
-    print(f"[opt] devices={devices} candidate_parallel={'yes' if len(devices) > 1 else 'no'}")
+    init_batch = load_init_batch(args.init, args.device, args.max_inits)
 
     rows = []
     total_start = time.perf_counter()
-    if len(devices) == 1:
-        init_batch = init_batch.to(args.device)
-        for idx in range(init_batch.shape[0]):
-            print(f"[opt] candidate {idx + 1}/{init_batch.shape[0]}", flush=True)
-            rows.append(run_candidate(idx, init_batch[idx: idx + 1], target_raw, args, save_dir))
-    else:
-        all_indices = np.arange(init_batch.shape[0], dtype=np.int64)
-        split_indices = [chunk.tolist() for chunk in np.array_split(all_indices, len(devices)) if len(chunk) > 0]
-        active_devices = devices[: len(split_indices)]
-        ctx = get_context("spawn")
-        queue = ctx.Queue()
-        procs = []
-        args_dict = vars(args).copy()
-        init_np = init_batch.cpu().numpy().astype(np.float32)
-        for dev, idxs in zip(active_devices, split_indices):
-            proc = ctx.Process(
-                target=_optimization_worker,
-                args=(idxs, init_np, target_raw, args_dict, str(save_dir), dev, queue),
-            )
-            proc.start()
-            procs.append(proc)
-
-        received = 0
-        while received < len(procs):
-            msg = queue.get()
-            received += 1
-            if not msg.get("ok", False):
-                for proc in procs:
-                    if proc.is_alive():
-                        proc.terminate()
-                raise RuntimeError(f"optimization worker {msg.get('device')} 失败: {msg.get('error')}")
-            rows.extend(msg["rows"])
-
-        for proc in procs:
-            proc.join()
-            if proc.exitcode != 0:
-                raise RuntimeError(f"optimization worker 异常退出，exitcode={proc.exitcode}")
+    for idx in range(init_batch.shape[0]):
+        print(f"[opt] candidate {idx + 1}/{init_batch.shape[0]}", flush=True)
+        rows.append(run_candidate(idx, init_batch[idx: idx + 1], target_raw, args, save_dir))
 
     rows = sorted(rows, key=lambda x: x["rcwa_second_order_score"], reverse=True)
     with (save_dir / "optimization_summary.json").open("w", encoding="utf-8") as f:
-        json.dump(rows, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "laplas_case_dir": args.laplas_case_dir,
+                "laplas_summary": args.laplas_summary,
+                "target": args.target,
+                "init": args.init,
+                "target_lambda_nm": float(args.target_lambda),
+                "candidates": rows,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
     print("saved_to:", save_dir)
+    print("laplas_case_dir:", args.laplas_case_dir)
     print("target_from:", args.target)
     print("init_from:", args.init)
+    print("target_lambda_nm:", args.target_lambda)
     print(f"total_time_sec: {time.perf_counter() - total_start:.2f}")
     print(
         "ranking:",
@@ -536,29 +497,6 @@ def _run_with_args(args) -> None:
             for r in rows
         ],
     )
-
-
-def main():
-    p = argparse.ArgumentParser(description="Multi-start RCWA topology optimization from laplas top-k samples.")
-    p.add_argument("--target")
-    p.add_argument("--init")
-    p.add_argument("--laplas_root", default=None, help="优先从该 laplas 输出目录寻找 target/init；默认回退到 samples/laplas")
-    p.add_argument("--steps", type=int, default=100)
-    p.add_argument("--lr", type=float, default=0.005)
-    p.add_argument("--save_dir", default=str(ROOT / "samples" / "optimized"))
-    p.add_argument("--device", default=None, help="单设备模式；默认自动使用全部可见 GPU")
-    p.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
-    p.add_argument("--target_lambda", type=float, default=1000.0)
-    p.add_argument("--rcwa_orders", type=int, default=7)
-    p.add_argument("--binary_eval_every", type=int, default=10)
-    p.add_argument("--max_inits", type=int, default=5)
-    p.add_argument("--filter_radius", type=int, default=1)
-    p.add_argument("--proj_eta", type=float, default=0.5)
-    p.add_argument("--beta_start", type=float, default=4.0)
-    p.add_argument("--beta_end", type=float, default=16.0)
-    p.add_argument("--log_every", type=int, default=10)
-    args = p.parse_args()
-    _run_with_args(args)
 
 
 if __name__ == "__main__":

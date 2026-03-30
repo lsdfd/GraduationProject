@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Construct second-order targets at configurable wavelength and run diffusion inference."""
+"""Construct 1000nm second-order targets and run diffusion inference."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import csv
 import json
 import sys
 from datetime import datetime
-from multiprocessing import get_context
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -19,9 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from model.diffusion import GaussianDiffusion  # noqa: E402
-from model.models import ForwardSurrogate, build_conditional_unet  # noqa: E402
-from model.parallel_utils import load_state_dict_flexible, maybe_wrap_data_parallel, parse_devices as parse_runtime_devices  # noqa: E402
-from model.train_utils import resolve_latest_checkpoint, resolve_latest_run  # noqa: E402
+from model.models import ConditionalUNet  # noqa: E402
 from infer.common import (  # noqa: E402
     lambda_theta_grid,
     load_model,
@@ -31,6 +28,8 @@ from infer.common import (  # noqa: E402
     plot_structure,
     rcwa_eval_full_map,
     rcwa_eval_target_lambda,
+    resolve_default_diffusion_ckpt,
+    resolve_default_stats_path,
     second_order_score_map,
     second_order_score_row,
     second_order_target,
@@ -41,32 +40,9 @@ TARGET_SWEEP = [
 ]
 
 
-def parse_devices(devices_arg: str | None, device_arg: str | None) -> list[str]:
-    return parse_runtime_devices(devices_arg, device_arg, default_to_all_cuda=True)
-
-
 def resolve_from_root(path_like: str | Path) -> Path:
     path = Path(path_like)
     return path if path.is_absolute() else ROOT / path
-
-
-def resolve_infer_artifacts(
-    stats_path: str | Path | None,
-    diffusion_ckpt: str | Path | None,
-    forward_ckpt: str | Path | None,
-) -> tuple[Path, Path, Path]:
-    ckpt_root = ROOT / "checkpoints"
-    runs_root = ROOT / "runs"
-    latest_forward = resolve_latest_run(runs_root, "forward")
-
-    default_stats = latest_forward / "cond_stats.npz" if latest_forward is not None else runs_root / "forward_runs" / "cond_stats.npz"
-    default_forward = resolve_latest_checkpoint(ckpt_root, "forward") or (ckpt_root / "forward_best.pt")
-    default_diffusion = resolve_latest_checkpoint(ckpt_root, "diffusion") or (ckpt_root / "diffusion_best.pt")
-
-    stats = resolve_from_root(stats_path) if stats_path is not None else default_stats
-    diffusion = resolve_from_root(diffusion_ckpt) if diffusion_ckpt is not None else default_diffusion
-    forward = resolve_from_root(forward_ckpt) if forward_ckpt is not None else default_forward
-    return stats, diffusion, forward
 
 
 def smooth_lambda_axis(spec_map: np.ndarray) -> np.ndarray:
@@ -84,6 +60,7 @@ def load_template_spectrum(
     train_npz_path: Path,
     topk_csv_path: Path,
     target_lambda: float = 1000.0,
+    sample_idx: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     data = np.load(train_npz_path)
     if "tpp_mag" not in data.files:
@@ -95,20 +72,21 @@ def load_template_spectrum(
     thetas = np.asarray(data["thetas"], dtype=np.float32)
     tpp = np.asarray(data["tpp_mag"], dtype=np.float32)
     tss = np.asarray(data["tss_mag"], dtype=np.float32) if cond_ch == 2 else None
-    sample_idx = None
-    with topk_csv_path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if float(row["lambda_nm"]) == float(target_lambda) and int(row["rank"]) == 1:
-                sample_idx = int(row["sample_idx"])
-                break
+    if sample_idx is None:
+        with topk_csv_path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if float(row["lambda_nm"]) == float(target_lambda) and int(row["rank"]) == 1:
+                    sample_idx = int(row["sample_idx"])
+                    break
     if sample_idx is None:
         raise ValueError(f"rank-1 sample at {target_lambda} nm not found in {topk_csv_path}")
+    if sample_idx < 0 or sample_idx >= len(tpp):
+        raise ValueError(f"sample_idx out of range: {sample_idx}")
 
     template_tpp = tpp[sample_idx].copy()
     if cond_ch == 2:
-        template_tss = tss[sample_idx].copy()
-        template = np.stack([template_tpp, template_tss], axis=0)
+        template = np.stack([template_tpp, tss[sample_idx].copy()], axis=0)
     else:
         template = template_tpp[None]
     return template.astype(np.float32), lambdas, thetas, sample_idx
@@ -120,10 +98,10 @@ def build_target(
     off_target=0.90,
     edge_target=1.0,
     band_sigma_nm=55.0,
-    max_target_mix=0.50,
     target_lambda: float = 1000.0,
     train_npz_path: Path | None = None,
     topk_csv_path: Path | None = None,
+    sample_idx: int | None = None,
 ):
     lambdas, thetas = lambda_theta_grid()
     kx2 = second_order_target(thetas)
@@ -134,31 +112,24 @@ def build_target(
             train_npz_path,
             topk_csv_path,
             target_lambda=target_lambda,
+            sample_idx=sample_idx,
         )
-        # 直接用数据集最好样本的原始谱作为目标，不做任何混合修改
-        # 物理自洽：tpp 和 tss 来自同一真实结构
-        return target, lambdas, thetas, template_idx
+        tpp = target[0].copy()
     else:
         tpp = np.empty((len(lambdas), len(thetas)), dtype=np.float32)
-        tss = None
 
     # Build a smooth wavelength envelope so the target-lambda second-order row
     # gradually relaxes into the background/template spectrum instead of
     # switching abruptly to a flat constant map.
     lam_dist = lambdas.astype(np.float64) - float(target_lambda)
-    lam_weight = max(float(max_target_mix), 0.0) * np.exp(-0.5 * (lam_dist / max(float(band_sigma_nm), 1e-6)) ** 2)
+    lam_weight = np.exp(-0.5 * (lam_dist / max(float(band_sigma_nm), 1e-6)) ** 2)
 
     for i, w in enumerate(lam_weight):
+        target_row = center_floor * (1.0 - kx2) + edge_target * kx2
         if template_idx is not None:
             base_row = tpp[i].astype(np.float64)
-            # 用模板 ±40° 边界均值缩放理想目标，保持边界透过率不变
-            edge_val = (float(base_row[0]) + float(base_row[-1])) / 2.0
-            scaled_ideal = kx2 * edge_val
-            # theta 方向混合权重：kx2 在 ±40° 处=1，所以 (1-kx2) 在边界处=0，边界值完全保留
-            theta_mask = 1.0 - kx2
-            blend = w * theta_mask
-            row = (1.0 - blend) * base_row + blend * scaled_ideal
-            row = np.clip(row, 0.0, 1.0)
+            row = (1.0 - w) * base_row + w * target_row
+            row = np.clip(row, 0.0, max(edge_target, off_target))
             tpp[i] = row.astype(np.float32)
         else:
             row_floor = off_target * (1.0 - w)
@@ -170,9 +141,7 @@ def build_target(
     tpp = smooth_lambda_axis(tpp)
 
     if cond_ch == 2:
-        if tss is None:
-            return np.stack([tpp, tpp.copy()], axis=0), lambdas, thetas, template_idx
-        return np.stack([tpp, tss], axis=0), lambdas, thetas, template_idx
+        return np.stack([tpp, tpp.copy()], axis=0), lambdas, thetas, template_idx
     return tpp[None], lambdas, thetas, template_idx
 
 
@@ -319,217 +288,70 @@ def plot_target_curve(
     plt.close()
 
 
-def _laplas_eval_worker(samples_np, target_raw, cond_ch, indices, device, rcwa_orders, queue):
-    try:
-        if str(device).startswith("cuda"):
-            torch.cuda.set_device(device)
-        torch.set_num_threads(1)
-        maps = []
-        errs = []
-        for idx in indices:
-            print(f"[laplas-rcwa {device}] sample {idx + 1}/{len(samples_np)}", flush=True)
-            sample_t = torch.from_numpy(samples_np[idx: idx + 1]).to(device)
-            rcwa_map = rcwa_eval_full_map(sample_t, cond_ch, device, rcwa_orders=rcwa_orders)
-            if rcwa_map is None:
-                raise RuntimeError("RCWA backend unavailable during laplas evaluation.")
-            maps.append(rcwa_map.astype(np.float32))
-            errs.append(float(np.mean(np.abs(rcwa_map - target_raw))))
-        queue.put(
-            {
-                "ok": True,
-                "device": device,
-                "indices": np.asarray(indices, dtype=np.int64),
-                "maps": np.stack(maps, axis=0) if maps else np.empty((0, cond_ch, *target_raw.shape[-2:]), dtype=np.float32),
-                "errs": np.asarray(errs, dtype=np.float32),
-            }
+def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, weight: torch.Tensor, diffusion: torch.nn.Module, root_save_dir: Path):
+    save_dir = root_save_dir / case["name"]
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    train_npz_path = resolve_from_root(args.train_npz)
+    topk_csv_path = resolve_from_root(args.topk_csv)
+    if args.raw_target_only:
+        target_raw, lambdas, thetas, template_idx = load_template_spectrum(
+            cond_ch,
+            train_npz_path,
+            topk_csv_path,
+            target_lambda=args.target_lambda,
+            sample_idx=args.target_sample_idx,
         )
-    except Exception as exc:
-        queue.put({"ok": False, "device": device, "error": str(exc)})
-
-
-def _laplas_eval_worker_target_only(samples_np, target_raw, cond_ch, indices, device, rcwa_orders, target_lambda, queue):
-    try:
-        if str(device).startswith("cuda"):
-            torch.cuda.set_device(device)
-        torch.set_num_threads(1)
-        rows = []
-        errs = []
-        for idx in indices:
-            print(f"[laplas-rcwa-row {device}] sample {idx + 1}/{len(samples_np)}", flush=True)
-            sample_t = torch.from_numpy(samples_np[idx: idx + 1]).to(device)
-            out = rcwa_eval_target_lambda(
-                sample_t,
-                target_raw,
-                cond_ch,
-                device,
-                target_lambda=target_lambda,
-                rcwa_orders=rcwa_orders,
-            )
-            if out is None:
-                raise RuntimeError("RCWA backend unavailable during laplas evaluation.")
-            mae, pred = out
-            rows.append(pred.astype(np.float32))
-            errs.append(float(mae))
-        queue.put(
-            {
-                "ok": True,
-                "device": device,
-                "indices": np.asarray(indices, dtype=np.int64),
-                "maps": np.stack(rows, axis=0) if rows else np.empty((0, cond_ch, target_raw.shape[-1]), dtype=np.float32),
-                "errs": np.asarray(errs, dtype=np.float32),
-            }
+    else:
+        target_raw, lambdas, thetas, template_idx = build_target(
+            cond_ch,
+            center_floor=float(case["center_floor"]),
+            off_target=float(case["off_target"]),
+            edge_target=1.0,
+            target_lambda=args.target_lambda,
+            train_npz_path=train_npz_path,
+            topk_csv_path=topk_csv_path,
+            sample_idx=args.target_sample_idx,
         )
-    except Exception as exc:
-        queue.put({"ok": False, "device": device, "error": str(exc)})
-
-
-def evaluate_rcwa_candidates(samples: torch.Tensor, target_raw: np.ndarray, cond_ch: int, devices: list[str], rcwa_orders: int) -> tuple[np.ndarray, np.ndarray]:
-    samples_np = samples.cpu().numpy().astype(np.float32)
-    num_samples = samples_np.shape[0]
-    if len(devices) == 1:
-        pred_raw = np.empty((num_samples, cond_ch, *target_raw.shape[-2:]), dtype=np.float32)
-        err = np.empty((num_samples,), dtype=np.float32)
-        for idx in range(num_samples):
-            print(f"[laplas-rcwa {devices[0]}] sample {idx + 1}/{num_samples}", flush=True)
-            rcwa_map = rcwa_eval_full_map(samples[idx: idx + 1], cond_ch, devices[0], rcwa_orders=rcwa_orders)
-            if rcwa_map is None:
-                raise RuntimeError("RCWA backend unavailable during laplas evaluation.")
-            pred_raw[idx] = rcwa_map.astype(np.float32)
-            err[idx] = float(np.mean(np.abs(rcwa_map - target_raw)))
-        return pred_raw, err
-
-    all_indices = np.arange(num_samples, dtype=np.int64)
-    split_indices = [chunk.tolist() for chunk in np.array_split(all_indices, len(devices)) if len(chunk) > 0]
-    active_devices = devices[: len(split_indices)]
-    ctx = get_context("spawn")
-    queue = ctx.Queue()
-    procs = []
-    for dev, idxs in zip(active_devices, split_indices):
-        proc = ctx.Process(
-            target=_laplas_eval_worker,
-            args=(samples_np, target_raw, cond_ch, idxs, dev, rcwa_orders, queue),
-        )
-        proc.start()
-        procs.append(proc)
-
-    pred_raw = np.empty((num_samples, cond_ch, *target_raw.shape[-2:]), dtype=np.float32)
-    err = np.empty((num_samples,), dtype=np.float32)
-    received = 0
-    while received < len(procs):
-        msg = queue.get()
-        received += 1
-        if not msg.get("ok", False):
-            for proc in procs:
-                if proc.is_alive():
-                    proc.terminate()
-            raise RuntimeError(f"laplas worker {msg.get('device')} 失败: {msg.get('error')}")
-        idxs = msg["indices"]
-        pred_raw[idxs] = msg["maps"]
-        err[idxs] = msg["errs"]
-
-    for proc in procs:
-        proc.join()
-        if proc.exitcode != 0:
-            raise RuntimeError(f"laplas worker 异常退出，exitcode={proc.exitcode}")
-    return pred_raw, err
-
-
-def evaluate_rcwa_candidates_target_only(
-    samples: torch.Tensor,
-    target_raw: np.ndarray,
-    cond_ch: int,
-    devices: list[str],
-    rcwa_orders: int,
-    target_lambda: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    samples_np = samples.cpu().numpy().astype(np.float32)
-    num_samples = samples_np.shape[0]
-    if len(devices) == 1:
-        pred_rows = np.empty((num_samples, cond_ch, target_raw.shape[-1]), dtype=np.float32)
-        err = np.empty((num_samples,), dtype=np.float32)
-        for idx in range(num_samples):
-            print(f"[laplas-rcwa-row {devices[0]}] sample {idx + 1}/{num_samples}", flush=True)
+    target = normalize_with_stats(target_raw, mean, std, args.device)
+    cond_batch = target.repeat(args.num_samples, 1, 1, 1)
+    samples = diffusion.sample(cond_batch, cfg_scale=args.cfg_scale)
+    rcwa_maps = []
+    err = []
+    target_row = target_raw[:, int(np.argmin(np.abs(lambdas - float(args.target_lambda))))]
+    for idx in range(samples.shape[0]):
+        print(f"[laplas-rcwa] sample {idx + 1}/{samples.shape[0]}", flush=True)
+        if args.eval_mode == "target_only":
             out = rcwa_eval_target_lambda(
                 samples[idx: idx + 1],
                 target_raw,
                 cond_ch,
-                devices[0],
-                target_lambda=target_lambda,
-                rcwa_orders=rcwa_orders,
+                args.device,
+                target_lambda=args.target_lambda,
+                rcwa_orders=args.rcwa_orders,
             )
             if out is None:
                 raise RuntimeError("RCWA backend unavailable during laplas evaluation.")
-            mae, pred = out
-            pred_rows[idx] = pred.astype(np.float32)
-            err[idx] = float(mae)
-        return pred_rows, err
+            mae, rcwa_row = out
+            rcwa_maps.append(rcwa_row)
+            err.append(float(mae))
+        else:
+            rcwa_map = rcwa_eval_full_map(
+                samples[idx: idx + 1],
+                cond_ch,
+                args.device,
+                rcwa_orders=args.rcwa_orders,
+            )
+            if rcwa_map is None:
+                raise RuntimeError("RCWA backend unavailable during laplas evaluation.")
+            rcwa_maps.append(rcwa_map)
+            err.append(float(np.mean(np.abs(rcwa_map - target_raw))))
 
-    all_indices = np.arange(num_samples, dtype=np.int64)
-    split_indices = [chunk.tolist() for chunk in np.array_split(all_indices, len(devices)) if len(chunk) > 0]
-    active_devices = devices[: len(split_indices)]
-    ctx = get_context("spawn")
-    queue = ctx.Queue()
-    procs = []
-    for dev, idxs in zip(active_devices, split_indices):
-        proc = ctx.Process(
-            target=_laplas_eval_worker_target_only,
-            args=(samples_np, target_raw, cond_ch, idxs, dev, rcwa_orders, target_lambda, queue),
-        )
-        proc.start()
-        procs.append(proc)
-
-    pred_rows = np.empty((num_samples, cond_ch, target_raw.shape[-1]), dtype=np.float32)
-    err = np.empty((num_samples,), dtype=np.float32)
-    received = 0
-    while received < len(procs):
-        msg = queue.get()
-        received += 1
-        if not msg.get("ok", False):
-            for proc in procs:
-                if proc.is_alive():
-                    proc.terminate()
-            raise RuntimeError(f"laplas row worker {msg.get('device')} 失败: {msg.get('error')}")
-        idxs = msg["indices"]
-        pred_rows[idxs] = msg["maps"]
-        err[idxs] = msg["errs"]
-
-    for proc in procs:
-        proc.join()
-        if proc.exitcode != 0:
-            raise RuntimeError(f"laplas row worker 异常退出，exitcode={proc.exitcode}")
-    return pred_rows, err
-
-
-def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, weight: torch.Tensor, diffusion: torch.nn.Module, root_save_dir: Path, devices: list[str], surrogate: torch.nn.Module | None = None):
-    save_dir = root_save_dir / case["name"]
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    target_raw, lambdas, thetas, template_idx = build_target(
-        cond_ch,
-        center_floor=float(case["center_floor"]),
-        off_target=float(case["off_target"]),
-        edge_target=1.0,
-        target_lambda=args.target_lambda,
-        train_npz_path=ROOT / "data" / "train_data.npz",
-        topk_csv_path=ROOT / "data" / "second_order_scores" / "tpp_mag_top5_per_lambda.csv",
-    )
-    target = normalize_with_stats(target_raw, mean, std, args.device)
-    cond_batch = target.repeat(args.num_samples, 1, 1, 1)
-    if surrogate is not None:
-        samples = diffusion.sample_guided(
-            cond_batch, cfg_scale=args.cfg_scale,
-            surrogate=surrogate, target_norm=target,
-            guidance_scale=args.guidance_scale,
-            guide_start_t=args.guide_start_t,
-            guide_every=args.guide_every,
-        )
-    else:
-        samples = diffusion.sample(cond_batch, cfg_scale=args.cfg_scale)
+    pred_raw = np.stack(rcwa_maps, axis=0).astype(np.float32)
+    err = np.asarray(err, dtype=np.float32)
     if args.eval_mode == "target_only":
-        pred_raw, err = evaluate_rcwa_candidates_target_only(samples, target_raw, cond_ch, devices, args.rcwa_orders, args.target_lambda)
         metrics, rank_second = compute_second_order_metrics_rows(pred_raw, err, thetas)
     else:
-        pred_raw, err = evaluate_rcwa_candidates(samples, target_raw, cond_ch, devices, args.rcwa_orders)
         metrics, rank_second = compute_second_order_metrics(pred_raw, err, lambdas, thetas, args.target_lambda)
     topk_second = rank_second[: min(max(1, args.topk_second), len(rank_second))]
     topk_second_t = torch.from_numpy(topk_second).to(samples.device, dtype=torch.long)
@@ -542,6 +364,7 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
         "center_floor": float(case["center_floor"]),
         "off_target": float(case["off_target"]),
         "edge_target": 1.0,
+        "target_mode": "raw_dataset_sample" if args.raw_target_only else "laplas_shaped",
         "target_lambda_nm": float(args.target_lambda),
         "template_sample_idx": None if template_idx is None else int(template_idx),
         "best_rcwa_mae_raw": float(err[best_idx]),
@@ -566,33 +389,7 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
     np.save(save_dir / "topk_pred_cond_raw.npy", pred_raw[topk.cpu().numpy()])
     np.save(save_dir / "topk_second_samples.npy", samples[topk_second_t].cpu().numpy())
     np.save(save_dir / "topk_second_pred_cond_raw.npy", pred_raw[topk_second])
-    plot_structure(save_dir / "best_structure.png", best.cpu().numpy(), "Best binary structure")
-
     if args.eval_mode == "target_only":
-        target_row = target_raw[:, int(np.argmin(np.abs(lambdas - float(args.target_lambda))))]
-        plot_target_curve(
-            save_dir / "target_second_order_curve.png",
-            target_raw,
-            thetas,
-            lambdas,
-            f"Target {args.target_lambda:.0f}nm second-order curve",
-            args.target_lambda,
-        )
-        best_tpp = pred_raw[best_idx, 0].astype(np.float64)
-        best_tpp_n = best_tpp / max(float(np.max(best_tpp)), 1e-8)
-        target_curve = second_order_target(thetas)
-        plt.figure(figsize=(5, 3.6))
-        plt.plot(thetas, target_curve, "k--", lw=1.7, label="ideal ~ |sin(theta)|^2")
-        plt.plot(thetas, best_tpp_n, lw=1.9, color="#1f77b4", label="candidate (normalized)")
-        plt.xlabel("theta (deg)")
-        plt.ylabel("normalized |tpp|")
-        plt.ylim(-0.05, 1.05)
-        plt.grid(alpha=0.25)
-        plt.legend(fontsize=8, loc="lower right")
-        plt.title(f"Best RCWA row @{args.target_lambda:.0f}nm")
-        plt.tight_layout()
-        plt.savefig(save_dir / "best_second_order_curve.png", dpi=180)
-        plt.close()
         np.save(save_dir / "target_row_raw.npy", target_row)
         np.save(save_dir / "best_row_raw.npy", pred_raw[best_idx])
     else:
@@ -611,10 +408,11 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
             vmax_tss = max(float(target_raw[1].max()), float(pred_raw[best_idx, 1].max()), 1e-6)
             plot_map(save_dir / "target_tss.png", target_raw, lambdas, thetas, "Target tss_mag", vmax_tss, channel_idx=1)
             plot_map(save_dir / "best_tss.png", pred_raw[best_idx], lambdas, thetas, "Best RCWA tss_mag", vmax_tss, channel_idx=1)
+    plot_structure(save_dir / "best_structure.png", best.cpu().numpy(), "Best binary structure")
 
     with (save_dir / "second_order_metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
-    if args.eval_mode == "full":
+    if args.eval_mode != "target_only":
         plot_ranked_samples(
             save_dir / f"top{len(topk_second)}_second_order.png",
             samples.cpu().numpy(),
@@ -632,83 +430,45 @@ def run_case(case: dict, args, mean: np.ndarray, std: np.ndarray, cond_ch: int, 
 
 
 @torch.no_grad()
-def _run_with_args(args) -> None:
-    """Core execution logic; accepts a pre-parsed args namespace.
-
-    Called both by main() (direct execution) and by band-specific wrapper
-    scripts (e.g. band_900nm/laplas.py) that only override default values.
-    """
-    stats_path, diffusion_path, forward_path = resolve_infer_artifacts(
-        args.stats,
-        args.diffusion_ckpt,
-        args.forward_ckpt,
-    )
-    args.stats = str(stats_path)
-    args.diffusion_ckpt = str(diffusion_path)
-    args.forward_ckpt = str(forward_path)
-    args.save_dir = str(resolve_from_root(args.save_dir))
-    devices = parse_devices(args.devices, args.device)
-    args.device = devices[0]
-
-    root_save_dir = Path(args.save_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
-    root_save_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[laplas] stats={args.stats}")
-    print(f"[laplas] diffusion_ckpt={args.diffusion_ckpt}")
-    print(f"[laplas] forward_ckpt={args.forward_ckpt}")
-    print(f"[laplas] devices={devices} sample_parallel={'yes' if len(devices) > 1 and args.device.startswith('cuda') else 'no'} rcwa_parallel={'yes' if len(devices) > 1 else 'no'}")
-
-    mean, std = load_stats(args.stats)
-    cond_ch = int(mean.shape[1])
-    weight = torch.empty(0, device=args.device)
-    diffusion_ckpt = torch.load(args.diffusion_ckpt, map_location=args.device, weights_only=False)
-    diffusion_cfg = diffusion_ckpt.get("cfg", {})
-    diffusion = GaussianDiffusion(
-        build_conditional_unet(cond_ch, diffusion_cfg).to(args.device),
-        timesteps=int(diffusion_cfg.get("timesteps", 1000)),
-        image_size=64,
-    ).to(args.device)
-    load_state_dict_flexible(diffusion, diffusion_ckpt["diffusion"])
-    diffusion.eval()
-    diffusion.model = maybe_wrap_data_parallel(diffusion.model, devices)
-
-    surrogate = None
-    if args.guidance_scale > 0:
-        forward_path = Path(args.forward_ckpt)
-        if forward_path.exists():
-            surrogate = ForwardSurrogate(out_ch=cond_ch).to(args.device)
-            ckpt = torch.load(str(forward_path), map_location=args.device, weights_only=False)
-            load_state_dict_flexible(surrogate, ckpt["model"])
-            surrogate.eval()
-            for param in surrogate.parameters():
-                param.requires_grad_(False)
-            surrogate = maybe_wrap_data_parallel(surrogate, devices)
-            print(f"[laplas] 物理引导已启用: guidance_scale={args.guidance_scale}, guide_start_t={args.guide_start_t}, guide_every={args.guide_every}")
-        else:
-            print(f"[laplas] 警告: forward_ckpt 不存在 ({forward_path})，禁用物理引导")
-
-    for case in TARGET_SWEEP:
-        run_case(case, args, mean, std, cond_ch, weight, diffusion, root_save_dir, devices, surrogate=surrogate)
-
-
 def main():
     p = argparse.ArgumentParser(description="Run diffusion inference with swept second-order targets at 1000nm.")
     p.add_argument("--stats", default=None)
     p.add_argument("--diffusion_ckpt", default=None)
-    p.add_argument("--forward_ckpt", default=None)
     p.add_argument("--num_samples", type=int, default=32)
     p.add_argument("--cfg_scale", type=float, default=3.0)
     p.add_argument("--save_dir", default=str(ROOT / "samples" / "laplas"))
-    p.add_argument("--device", default=None, help="主设备；默认自动使用全部可见 GPU")
-    p.add_argument("--devices", default=None, help="逗号分隔设备列表，如: cuda:0,cuda:1")
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--train_npz", default=str(ROOT / "data" / "train_data.npz"))
+    p.add_argument("--topk_csv", default=str(ROOT / "data" / "second_order_scores" / "tpp_mag_top5_per_lambda.csv"))
     p.add_argument("--target_lambda", type=float, default=1000.0)
+    p.add_argument("--target_sample_idx", type=int, default=None, help="直接指定数据集 sample id；不传则按 topk_csv 取目标波长 rank-1")
+    p.add_argument("--raw_target_only", action="store_true", help="直接使用数据集原始样本谱作为目标，不做 laplas 目标修正")
     p.add_argument("--rcwa_orders", type=int, default=7)
     p.add_argument("--topk_second", type=int, default=5)
     p.add_argument("--eval_mode", choices=["full", "target_only"], default="full")
-    p.add_argument("--guidance_scale", type=float, default=0.1, help="物理引导强度，0 表示禁用")
-    p.add_argument("--guide_start_t", type=int, default=300, help="开始物理引导的时间步阈值（t < 此值才引导）")
-    p.add_argument("--guide_every", type=int, default=1, help="每隔几步做一次物理引导（1=每步，5=每5步）")
     args = p.parse_args()
-    _run_with_args(args)
+
+    args.stats = str(resolve_from_root(args.stats) if args.stats else resolve_default_stats_path(ROOT))
+    args.diffusion_ckpt = str(resolve_from_root(args.diffusion_ckpt) if args.diffusion_ckpt else resolve_default_diffusion_ckpt(ROOT))
+    args.train_npz = str(resolve_from_root(args.train_npz))
+    args.topk_csv = str(resolve_from_root(args.topk_csv))
+    args.save_dir = str(resolve_from_root(args.save_dir))
+
+    root_save_dir = Path(args.save_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
+    root_save_dir.mkdir(parents=True, exist_ok=True)
+
+    mean, std = load_stats(args.stats)
+    cond_ch = int(mean.shape[1])
+    weight = torch.empty(0, device=args.device)
+    diffusion = load_model(
+        args.diffusion_ckpt,
+        GaussianDiffusion(ConditionalUNet(cond_ch).to(args.device), timesteps=1000, image_size=64).to(args.device),
+        "diffusion",
+        args.device,
+    )
+
+    for case in TARGET_SWEEP:
+        run_case(case, args, mean, std, cond_ch, weight, diffusion, root_save_dir)
 
 
 if __name__ == "__main__":

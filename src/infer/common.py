@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from model.parallel_utils import load_state_dict_flexible
+from model.train_utils import resolve_latest_checkpoint, resolve_latest_run
 
 try:
     from dataset.rcwa.rcwa import torcwa_simulation
@@ -26,6 +27,35 @@ def load_model(path: str, model: torch.nn.Module, key: str, device: str) -> torc
     ckpt = torch.load(path, map_location=device, weights_only=False)
     load_state_dict_flexible(model, ckpt[key])
     return model.eval()
+
+
+def resolve_default_stats_path(root: str | Path) -> Path:
+    root = Path(root)
+    latest_forward_run = resolve_latest_run(root / "runs", "forward")
+    if latest_forward_run is not None:
+        stats = latest_forward_run / "cond_stats.npz"
+        if stats.exists():
+            return stats
+    fallback = root / "checkpoints" / "cond_stats.npz"
+    if fallback.exists():
+        return fallback
+    return root / "runs" / "forward_runs" / "cond_stats.npz"
+
+
+def resolve_default_forward_ckpt(root: str | Path) -> Path:
+    root = Path(root)
+    latest = resolve_latest_checkpoint(root / "checkpoints", "forward")
+    if latest is not None:
+        return latest
+    return root / "checkpoints" / "forward_best.pt"
+
+
+def resolve_default_diffusion_ckpt(root: str | Path) -> Path:
+    root = Path(root)
+    latest = resolve_latest_checkpoint(root / "checkpoints", "diffusion")
+    if latest is not None:
+        return latest
+    return root / "checkpoints" / "diffusion_best.pt"
 
 
 def load_stats(stats_path: str) -> tuple[np.ndarray, np.ndarray]:

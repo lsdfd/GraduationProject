@@ -109,153 +109,40 @@ class SpectrumCrossAttention(nn.Module):
         return x + self.to_out(out)
 
 
-class ConditionEncoderTokens(nn.Module):
+class ConditionEncoder2D(nn.Module):
     """
-    把 [B, C, 11, 17] 光谱条件展开成 187 个 token，用 Transformer 全局建模。
-
-    设计原则：
-      - 不做空间下采样，11×17 所有格点全部保留
-      - 波长轴 (11) 和角度轴 (17) 分别使用独立可学习位置编码
-      - CLS token 聚合全局语义 → cond_emb（用于 AdaGN scale/shift）
-      - 其余 187 个位置 token → cross-attention（精细频谱查询）
-      - Pre-LN Transformer 训练更稳定
-
-    输入: [B, C, 11, 17]
+    输入:
+      cond [B,C,11,17]
     输出:
-      emb    [B, emb_dim]        → 全局条件向量
-      tokens [B, 187, emb_dim]   → 逐格点条件 token
+      cond_emb [B,emb_dim]
     """
 
-    N_LAMBDA = 11
-    N_THETA  = 17
-    N_TOKENS = 11 * 17  # 187
-
-    def __init__(self, in_ch, emb_dim=256, n_layers=3, n_heads=4):
+    def __init__(self, in_ch, emb_dim=256, base_ch=64):
         super().__init__()
-        # 每个 (λ,θ) 格点的 (tpp, tss) 值映射到 emb_dim 维
-        self.input_proj = nn.Linear(in_ch, emb_dim)
-
-        # 独立位置编码：波长轴 128维 + 角度轴 128维 = 256维
-        self.lambda_pe = nn.Embedding(self.N_LAMBDA, emb_dim // 2)
-        self.theta_pe  = nn.Embedding(self.N_THETA,  emb_dim // 2)
-
-        # Pre-LN Transformer：让所有 (λ,θ) 格点互相交流
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=emb_dim,
-            nhead=n_heads,
-            dim_feedforward=emb_dim * 2,
-            batch_first=True,
-            dropout=0.1,
-            norm_first=True,   # Pre-LN 比 Post-LN 训练更稳定
+        self.stem = nn.Sequential(
+            ConvNormAct(in_ch + 2, base_ch, 3),
+            ResidualConvBlock(base_ch, base_ch),
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-
-        # 可学习 CLS token，聚合全局频谱信息
-        self.cls = nn.Parameter(torch.zeros(1, 1, emb_dim))
-
-        # 预存位置索引（固定，不随输入变化）
-        li = torch.arange(self.N_LAMBDA).repeat_interleave(self.N_THETA)  # [187]
-        ti = torch.arange(self.N_THETA).repeat(self.N_LAMBDA)             # [187]
-        self.register_buffer("lambda_idx", li)
-        self.register_buffer("theta_idx",  ti)
-
-    def encode(self, cond):
-        B, C, L, T = cond.shape          # C=in_ch, L=11波长, T=17角度
-
-        # 展开成 token 序列 [B, 187, C] → [B, 187, emb_dim]
-        x = cond.permute(0, 2, 3, 1).reshape(B, L * T, C)
-        x = self.input_proj(x)
-
-        # 加物理位置编码：知道哪个 token 是 1000nm、哪个是 ±40°
-        pe = torch.cat(
-            [self.lambda_pe(self.lambda_idx),   # [187, emb_dim//2]
-             self.theta_pe(self.theta_idx)],    # [187, emb_dim//2]
-            dim=-1,
-        )                                        # [187, emb_dim]
-        x = x + pe                              # broadcast over batch
-
-        # 拼 CLS token，Transformer 编码
-        cls = self.cls.expand(B, -1, -1)
-        x = self.transformer(torch.cat([cls, x], dim=1))   # [B, 188, emb_dim]
-
-        emb    = x[:, 0]    # [B, emb_dim]   — 全局频谱语义
-        tokens = x[:, 1:]   # [B, 187, emb_dim] — 逐格点 token
-
-        # 兼容旧接口：cond_feats 全为 None（不再做空间插值注入）
-        return emb, {"11x17": None, "6x9": None, "3x5": None}, tokens
-
-    def forward(self, cond):
-        emb, _, _ = self.encode(cond)
-        return emb
-
-
-class ConditionEncoderConv(nn.Module):
-    """
-    更轻量的条件编码器：
-      - 直接在 11x17 频谱网格上做卷积
-      - 输出全局 cond_emb 供 FiLM 使用
-      - 同时输出 11x17 token 供可选 cross-attn 使用
-    """
-
-    def __init__(self, in_ch, emb_dim=192, hidden_ch=96):
-        super().__init__()
-        self.net = nn.Sequential(
-            ConvNormAct(in_ch, hidden_ch, 3),
-            ResidualConvBlock(hidden_ch, hidden_ch),
-            ResidualConvBlock(hidden_ch, hidden_ch),
-            nn.Dropout2d(0.05),
-        )
-        self.to_emb = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
+        self.down1 = ResidualConvBlock(base_ch, base_ch * 2, stride=2)   # 11x17 -> 6x9
+        self.down2 = ResidualConvBlock(base_ch * 2, base_ch * 4, stride=2)  # 6x9 -> 3x5
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(hidden_ch, emb_dim),
+            nn.Linear(base_ch * 4, emb_dim),
             nn.SiLU(),
             nn.Linear(emb_dim, emb_dim),
         )
-        self.to_tokens = nn.Conv2d(hidden_ch, emb_dim, 1)
+        self.token_proj = nn.Linear(base_ch * 4, emb_dim)
+        self.register_buffer("coord_11x17", _coord_grid(11, 17), persistent=False)
 
     def encode(self, cond):
-        h = self.net(cond)
-        emb = self.to_emb(h)
-        tokens = self.to_tokens(h).flatten(2).transpose(1, 2)
-        return emb, {"11x17": h, "6x9": None, "3x5": None}, tokens
-
-    def forward(self, cond):
-        emb, _, _ = self.encode(cond)
-        return emb
-
-
-class ConditionEncoderHybrid(nn.Module):
-    """
-    融合 token 和 conv 两条条件支路：
-      - token 支路保留精确的 (lambda, theta) 位置语义
-      - conv 支路提供局部平滑与邻域归纳偏置
-
-    适合当前 11x17 小谱图条件：既不想丢物理位置，又希望模型更容易学到
-    邻近波长 / 邻近角度之间的相关性。
-    """
-
-    def __init__(self, in_ch, emb_dim=192, hidden_ch=96, token_layers=2, n_heads=4):
-        super().__init__()
-        self.token_encoder = ConditionEncoderTokens(in_ch, emb_dim=emb_dim, n_layers=token_layers, n_heads=n_heads)
-        self.conv_encoder = ConditionEncoderConv(in_ch, emb_dim=emb_dim, hidden_ch=hidden_ch)
-        self.emb_fuse = nn.Sequential(
-            nn.Linear(emb_dim * 2, emb_dim * 2),
-            nn.SiLU(),
-            nn.Linear(emb_dim * 2, emb_dim),
-        )
-        self.token_fuse = nn.Sequential(
-            nn.Linear(emb_dim * 2, emb_dim * 2),
-            nn.SiLU(),
-            nn.Linear(emb_dim * 2, emb_dim),
-        )
-
-    def encode(self, cond):
-        tok_emb, _, tok_tokens = self.token_encoder.encode(cond)
-        conv_emb, _, conv_tokens = self.conv_encoder.encode(cond)
-        emb = self.emb_fuse(torch.cat([tok_emb, conv_emb], dim=-1))
-        tokens = self.token_fuse(torch.cat([tok_tokens, conv_tokens], dim=-1))
-        return emb, {"11x17": None, "6x9": None, "3x5": None}, tokens
+        coord = self.coord_11x17[None].to(cond.dtype).expand(cond.shape[0], -1, -1, -1)
+        x0 = self.stem(torch.cat([cond, coord], dim=1))
+        x1 = self.down1(x0)
+        x2 = self.down2(x1)
+        emb = self.fc(self.pool(x2))
+        tokens = self.token_proj(x2.flatten(2).transpose(1, 2))
+        return emb, {"11x17": x0, "6x9": x1, "3x5": x2}, tokens
 
     def forward(self, cond):
         emb, _, _ = self.encode(cond)
@@ -263,7 +150,7 @@ class ConditionEncoderHybrid(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, time_dim, cond_dim):
+    def __init__(self, in_ch, out_ch, time_dim, cond_dim, cond_ch=None):
         super().__init__()
         self.norm1 = nn.GroupNorm(_groups(in_ch), in_ch)
         self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
@@ -273,10 +160,15 @@ class ResBlock(nn.Module):
             nn.SiLU(),
             nn.Linear(time_dim + cond_dim, out_ch * 2),
         )
+        self.cond_proj = nn.Conv2d(cond_ch, out_ch, 1) if cond_ch is not None else None
         self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
-    def forward(self, x, t_emb, c_emb):
+    def forward(self, x, t_emb, c_emb, cond_map=None):
         h = self.conv1(F.silu(self.norm1(x)))
+        if self.cond_proj is not None and cond_map is not None:
+            cond_resized = F.interpolate(cond_map, size=h.shape[-2:], mode="bilinear", align_corners=False)
+            h = h + self.cond_proj(cond_resized)
+
         scale, shift = self.emb_proj(torch.cat([t_emb, c_emb], dim=1)).chunk(2, dim=1)
         h = self.norm2(h)
         h = h * (1 + scale[:, :, None, None]) + shift[:, :, None, None]
@@ -320,183 +212,65 @@ class Upsample(nn.Module):
         return self.op(x)
 
 
-class UNetUpBlock(nn.Module):
-    def __init__(self, in_ch, skip_ch, out_ch):
-        super().__init__()
-        self.up = nn.ConvTranspose2d(in_ch, out_ch, 4, stride=2, padding=1)
-        self.fuse = nn.Sequential(
-            ResidualConvBlock(out_ch + skip_ch, out_ch),
-            ResidualConvBlock(out_ch, out_ch),
-        )
-
-    def forward(self, x, skip):
-        x = self.up(x)
-        if x.shape[-2:] != skip.shape[-2:]:
-            x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
-        return self.fuse(torch.cat([x, skip], dim=1))
-
-
-class SpectralAxisBlock(nn.Module):
-    """
-    在小尺寸谱图上分别沿 theta / lambda 轴建模。
-
-    11x17 的输出很小，不适合重型 decoder；这里用深度可分离卷积
-    显式建模二维局部关系，以及沿两条物理轴的相关性。
-    """
-
-    def __init__(self, ch):
-        super().__init__()
-        self.norm = nn.GroupNorm(_groups(ch), ch)
-        self.local = nn.Conv2d(ch, ch, 3, padding=1, groups=ch)
-        self.theta = nn.Conv2d(ch, ch, (1, 5), padding=(0, 2), groups=ch)
-        self.lam = nn.Conv2d(ch, ch, (5, 1), padding=(2, 0), groups=ch)
-        self.mix = nn.Sequential(
-            nn.Conv2d(ch * 3, ch * 2, 1),
-            nn.GroupNorm(_groups(ch * 2), ch * 2),
-            nn.SiLU(),
-            nn.Conv2d(ch * 2, ch, 1),
-        )
-        self.se = SqueezeExcite(ch)
-
-    def forward(self, x):
-        h = self.norm(x)
-        h = torch.cat([self.local(h), self.theta(h), self.lam(h)], dim=1)
-        h = self.mix(h)
-        h = self.se(h)
-        return F.silu(x + h)
-
 class ForwardSurrogate(nn.Module):
     """
     输入:  [B,1,64,64]，值域 0~1
-    输出:  [B,C,11,17]，归一化空间
-
-    一个更重型的前向代理：
-      - CNN encoder 提取 16x16 / 8x8 / 4x4 空间特征
-      - 8x8 / 4x4 特征展开为空间 token，作为 memory
-      - 11x17 个光谱 query token 通过 Transformer decoder 读取空间 token
-      - 最后再在 11x17 网格上做轻量谱图细化
-
-    目的：显式建模“输出谱图格点如何从结构空间特征中读取信息”，
-    用更强的 token 交互测试复杂模型上限。
+    输出:  [B,C,11,17]
     """
 
     def __init__(self, out_ch):
         super().__init__()
-        base_ch = 32
-        model_dim = 256
-        self.out_ch = out_ch
         self.stem = nn.Sequential(
-            ConvNormAct(1 + 2, base_ch, 3),
-            ResidualConvBlock(base_ch, base_ch),
+            ConvNormAct(1 + 2, 32, 3),
+            ResidualConvBlock(32, 32),
         )
-        self.enc1 = nn.Sequential(
-            ResidualConvBlock(base_ch, base_ch * 2, stride=2),    # 32x32
-            ResidualConvBlock(base_ch * 2, base_ch * 2),
+        self.enc1 = ResidualConvBlock(32, 64, stride=2)
+        self.enc2 = ResidualConvBlock(64, 128, stride=2)
+        self.enc3 = ResidualConvBlock(128, 256, stride=2)
+        self.latent = nn.Sequential(
+            ResidualConvBlock(256, 256),
+            ResidualConvBlock(256, 256),
         )
-        self.enc2 = nn.Sequential(
-            ResidualConvBlock(base_ch * 2, base_ch * 4, stride=2), # 16x16
-            ResidualConvBlock(base_ch * 4, base_ch * 4),
-        )
-        self.enc3 = nn.Sequential(
-            ResidualConvBlock(base_ch * 4, base_ch * 8, stride=2), # 8x8
-            ResidualConvBlock(base_ch * 8, base_ch * 8),
-        )
-        self.enc4 = nn.Sequential(
-            ResidualConvBlock(base_ch * 8, base_ch * 8, stride=2), # 4x4
-            ResidualConvBlock(base_ch * 8, base_ch * 8),
-        )
-        self.bottleneck = nn.Sequential(
-            ResidualConvBlock(base_ch * 8, base_ch * 8),
-            AttentionBlock(base_ch * 8),
-            ResidualConvBlock(base_ch * 8, base_ch * 8),
-        )
-
-        # ── 空间 token memory：从 8x8 / 4x4 特征图读出结构语义 ──
-        self.mem_proj8 = nn.Conv2d(base_ch * 8, model_dim, 1)
-        self.mem_proj4 = nn.Conv2d(base_ch * 8, model_dim, 1)
-        self.mem_coord_proj = nn.Linear(2, model_dim)
-        self.mem_level_embed = nn.Parameter(torch.zeros(2, 1, model_dim))
-
-        # ── 谱图 query：每个 (lambda, theta) 一个 token ──
-        self.query_base = nn.Parameter(torch.zeros(1, 11 * 17, model_dim))
-        self.query_lambda = nn.Embedding(11, model_dim // 2)
-        self.query_theta = nn.Embedding(17, model_dim // 2)
-        li = torch.arange(11).repeat_interleave(17)
-        ti = torch.arange(17).repeat(11)
-        self.register_buffer("query_lambda_idx", li, persistent=False)
-        self.register_buffer("query_theta_idx", ti, persistent=False)
-
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=model_dim,
-            nhead=8,
-            dim_feedforward=model_dim * 4,
-            dropout=0.1,
-            batch_first=True,
-            norm_first=True,
-        )
-        self.spec_decoder = nn.TransformerDecoder(decoder_layer, num_layers=3)
-
-        self.token_to_grid = nn.Sequential(
-            nn.Linear(model_dim, model_dim),
+        self.global_mlp = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(256, 256),
             nn.SiLU(),
-            nn.Linear(model_dim, base_ch * 4),
+            nn.Linear(256, 128),
         )
-        self.grid_fuse = ConvNormAct(base_ch * 4 + 2, base_ch * 4, 3)
-        self.spec_refine = nn.Sequential(
-            SpectralAxisBlock(base_ch * 4),
-            SpectralAxisBlock(base_ch * 4),
-            ConvNormAct(base_ch * 4, base_ch * 2, 3),
-            SpectralAxisBlock(base_ch * 2),
-            nn.Dropout2d(p=0.1),
+        self.fuse = nn.Sequential(
+            ConvNormAct(32 + 64 + 128 + 256 + 128 + 2, 192, 3),
+            ResidualConvBlock(192, 192),
+            ResidualConvBlock(192, 128),
         )
-        self.spec_out = nn.Sequential(
-            nn.Conv2d(base_ch * 2, base_ch * 2, 1),
-            nn.SiLU(),
-            nn.Conv2d(base_ch * 2, out_ch, 1),
+        self.head = nn.Sequential(
+            ConvNormAct(128, 128, 3),
+            nn.Conv2d(128, out_ch, 1),
         )
         self.register_buffer("coord_64", _coord_grid(64, 64), persistent=False)
-        self.register_buffer("coord_11x17", _coord_grid(11, 17), persistent=False)
-        self.register_buffer("coord_8", _coord_grid(8, 8), persistent=False)
-        self.register_buffer("coord_4", _coord_grid(4, 4), persistent=False)
-
-    def _memory_tokens(self, feat, coord, proj, level_idx):
-        b = feat.shape[0]
-        mem = proj(feat).flatten(2).transpose(1, 2)
-        mem_coord = coord.to(feat.dtype).permute(1, 2, 0).reshape(-1, 2)
-        mem = mem + self.mem_coord_proj(mem_coord)[None] + self.mem_level_embed[level_idx]
-        return mem
-
-    def _query_tokens(self, batch_size, dtype, device):
-        query_pe = torch.cat(
-            [
-                self.query_lambda(self.query_lambda_idx),
-                self.query_theta(self.query_theta_idx),
-            ],
-            dim=-1,
-        ).to(device=device, dtype=dtype)
-        return self.query_base.to(device=device, dtype=dtype).expand(batch_size, -1, -1) + query_pe[None]
+        self.register_buffer("coord_spec", _coord_grid(11, 17), persistent=False)
 
     def forward(self, x):
         coord = self.coord_64[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
-        f64 = self.stem(torch.cat([x, coord], dim=1))      # 64x64
-        f32 = self.enc1(f64)                               # 32x32
-        f16 = self.enc2(f32)                               # 16x16
-        f8 = self.enc3(f16)                                # 8x8
-        f4 = self.enc4(f8)                                 # 4x4
-        fb = self.bottleneck(f4)                           # 4x4
+        x0 = self.stem(torch.cat([x, coord], dim=1))
+        x1 = self.enc1(x0)
+        x2 = self.enc2(x1)
+        x3 = self.latent(self.enc3(x2))
 
-        mem8 = self._memory_tokens(f8, self.coord_8, self.mem_proj8, 0)
-        mem4 = self._memory_tokens(fb, self.coord_4, self.mem_proj4, 1)
-        memory = torch.cat([mem8, mem4], dim=1)
-
-        queries = self._query_tokens(x.shape[0], x.dtype, x.device)
-        spec_tokens = self.spec_decoder(tgt=queries, memory=memory)
-
-        grid = self.token_to_grid(spec_tokens).transpose(1, 2).reshape(x.shape[0], -1, 11, 17)
-        spec_coord = self.coord_11x17[None].to(x.dtype).expand(x.shape[0], -1, -1, -1)
-        fused = self.grid_fuse(torch.cat([grid, spec_coord], dim=1))
-        fused = self.spec_refine(fused)
-        return self.spec_out(fused)
+        target_size = (11, 17)
+        global_feat = self.global_mlp(x3)[:, :, None, None].expand(-1, -1, *target_size)
+        feat = torch.cat(
+            [
+                F.interpolate(x0, size=target_size, mode="bilinear", align_corners=False),
+                F.interpolate(x1, size=target_size, mode="bilinear", align_corners=False),
+                F.interpolate(x2, size=target_size, mode="bilinear", align_corners=False),
+                F.interpolate(x3, size=target_size, mode="bilinear", align_corners=False),
+                global_feat,
+                self.coord_spec[None].to(x.dtype).expand(x.shape[0], -1, -1, -1),
+            ],
+            dim=1,
+        )
+        return self.head(self.fuse(feat))
 
 
 class ConditionalUNet(nn.Module):
@@ -507,96 +281,14 @@ class ConditionalUNet(nn.Module):
       t:     [B]
     输出:
       v_pred [B,1,64,64]
-
-    条件注入改进（v3）：
-      - ConditionEncoderTokens: 把光谱展成 187 个 token，保留所有 (λ,θ) 信息
-      - AdaGN (scale+shift): 全局语义注入每个 ResBlock
-      - Cross-Attention: 16×16, 8×8(×2), 16×16(解码器), 32×32(解码器，新增)
-      - 去掉了语义错位的空间插值注入（cond_feats → 全 None）
     """
 
-    def __init__(self, cond_in_ch, base_ch=64, time_dim=256, cond_dim=256, arch="token_cross_v3", self_condition=False):
+    def __init__(self, cond_in_ch, base_ch=64, time_dim=256, cond_dim=256):
         super().__init__()
-        self.arch = arch
-        self.self_condition = bool(self_condition)
-        token_heads = 4 if cond_dim % 4 == 0 else (2 if cond_dim % 2 == 0 else 1)
+        self.cond_encoder = ConditionEncoder2D(cond_in_ch, emb_dim=cond_dim, base_ch=48)
+        self.null_cond = nn.Parameter(torch.zeros(1, cond_dim))
+        self.null_tokens = nn.Parameter(torch.zeros(1, 15, cond_dim))
 
-        if arch == "token_cross_v3":
-            self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim, n_layers=3, n_heads=token_heads)
-            use_cross3 = True
-            use_cross4 = True
-            use_mid_cross = True
-            use_up_cross1 = True
-            use_up_cross2 = True
-        elif arch == "token_cross_lite":
-            self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim, n_layers=1, n_heads=token_heads)
-            use_cross3 = True
-            use_cross4 = False
-            use_mid_cross = True
-            use_up_cross1 = True
-            use_up_cross2 = False
-        elif arch == "cnn_cross_v1":
-            self.cond_encoder = ConditionEncoderConv(cond_in_ch, emb_dim=cond_dim, hidden_ch=max(64, cond_dim // 2))
-            use_cross3 = True
-            use_cross4 = False
-            use_mid_cross = True
-            use_up_cross1 = True
-            use_up_cross2 = False
-        elif arch == "cnn_cross_v2":
-            self.cond_encoder = ConditionEncoderConv(cond_in_ch, emb_dim=cond_dim, hidden_ch=max(64, cond_dim // 2))
-            use_cross3 = True
-            use_cross4 = True
-            use_mid_cross = True
-            use_up_cross1 = True
-            use_up_cross2 = True
-        elif arch == "cnn_film_v1":
-            self.cond_encoder = ConditionEncoderConv(cond_in_ch, emb_dim=cond_dim, hidden_ch=max(64, cond_dim // 2))
-            use_cross3 = False
-            use_cross4 = False
-            use_mid_cross = False
-            use_up_cross1 = False
-            use_up_cross2 = False
-        elif arch == "token_film_v1":
-            self.cond_encoder = ConditionEncoderTokens(cond_in_ch, emb_dim=cond_dim, n_layers=2, n_heads=token_heads)
-            use_cross3 = False
-            use_cross4 = False
-            use_mid_cross = False
-            use_up_cross1 = False
-            use_up_cross2 = False
-        elif arch == "hybrid_cross_v1":
-            self.cond_encoder = ConditionEncoderHybrid(
-                cond_in_ch,
-                emb_dim=cond_dim,
-                hidden_ch=max(64, cond_dim // 2),
-                token_layers=2,
-                n_heads=token_heads,
-            )
-            use_cross3 = True
-            use_cross4 = True
-            use_mid_cross = True
-            use_up_cross1 = True
-            use_up_cross2 = True
-        elif arch == "hybrid_cross_lite":
-            self.cond_encoder = ConditionEncoderHybrid(
-                cond_in_ch,
-                emb_dim=cond_dim,
-                hidden_ch=max(64, cond_dim // 2),
-                token_layers=1,
-                n_heads=token_heads,
-            )
-            use_cross3 = True
-            use_cross4 = False
-            use_mid_cross = True
-            use_up_cross1 = True
-            use_up_cross2 = False
-        else:
-            raise ValueError(f"Unsupported ConditionalUNet arch: {arch}")
-
-        # ── 条件编码器 ──
-        self.null_cond    = nn.Parameter(torch.zeros(1, cond_dim))
-        self.null_tokens  = nn.Parameter(torch.zeros(1, 187, cond_dim))
-
-        # ── 时间嵌入 ──
         self.time_mlp = nn.Sequential(
             SinusoidalTimeEmbedding(base_ch),
             nn.Linear(base_ch, time_dim),
@@ -604,115 +296,97 @@ class ConditionalUNet(nn.Module):
             nn.Linear(time_dim, time_dim),
         )
 
-        # ── 编码器（条件只通过 AdaGN 和 cross-attn 进入，无空间插值注入）──
-        in_ch = 1 + (1 if self.self_condition else 0)
-        self.in_conv = ConvNormAct(in_ch, base_ch, 3)
-
-        self.res1  = ResBlock(base_ch,     base_ch,     time_dim, cond_dim)   # 64×64
+        self.in_conv = ConvNormAct(1, base_ch, 3)
+        self.res1 = ResBlock(base_ch, base_ch, time_dim, cond_dim, cond_ch=48)
         self.down1 = Downsample(base_ch)
 
-        self.res2  = ResBlock(base_ch,     base_ch * 2, time_dim, cond_dim)   # 32×32
+        self.res2 = ResBlock(base_ch, base_ch * 2, time_dim, cond_dim, cond_ch=96)
         self.down2 = Downsample(base_ch * 2)
 
-        self.res3   = ResBlock(base_ch * 2, base_ch * 4, time_dim, cond_dim)  # 16×16
-        self.attn3  = AttentionBlock(base_ch * 4)
-        self.cross3 = SpectrumCrossAttention(base_ch * 4, cond_dim) if use_cross3 else None
-        self.down3  = Downsample(base_ch * 4)
+        self.res3 = ResBlock(base_ch * 2, base_ch * 4, time_dim, cond_dim, cond_ch=192)
+        self.attn3 = AttentionBlock(base_ch * 4)
+        self.cross3 = SpectrumCrossAttention(base_ch * 4, cond_dim)
+        self.down3 = Downsample(base_ch * 4)
 
-        self.res4   = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)  # 8×8
-        self.cross4 = SpectrumCrossAttention(base_ch * 4, cond_dim) if use_cross4 else None
+        self.res4 = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim, cond_ch=192)
+        self.cross4 = SpectrumCrossAttention(base_ch * 4, cond_dim)
 
-        # ── Bottleneck 8×8 ──
-        self.mid1      = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)
-        self.mid_attn  = AttentionBlock(base_ch * 4)
-        self.mid_cross = SpectrumCrossAttention(base_ch * 4, cond_dim) if use_mid_cross else None
-        self.mid2      = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim)
+        self.mid1 = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim, cond_ch=192)
+        self.mid_attn = AttentionBlock(base_ch * 4)
+        self.mid_cross = SpectrumCrossAttention(base_ch * 4, cond_dim)
+        self.mid2 = ResBlock(base_ch * 4, base_ch * 4, time_dim, cond_dim, cond_ch=192)
 
-        # ── 解码器 ──
-        self.up1       = Upsample(base_ch * 4)
-        self.up_res1   = ResBlock(base_ch * 8, base_ch * 4, time_dim, cond_dim)  # 16×16
-        self.up_cross1 = SpectrumCrossAttention(base_ch * 4, cond_dim) if use_up_cross1 else None
+        self.up1 = Upsample(base_ch * 4)
+        self.up_res1 = ResBlock(base_ch * 8, base_ch * 4, time_dim, cond_dim, cond_ch=192)
+        self.up_cross1 = SpectrumCrossAttention(base_ch * 4, cond_dim)
 
-        self.up2       = Upsample(base_ch * 4)
-        self.up_res2   = ResBlock(base_ch * 6, base_ch * 2, time_dim, cond_dim)  # 32×32
-        self.up_cross2 = SpectrumCrossAttention(base_ch * 2, cond_dim) if use_up_cross2 else None
+        self.up2 = Upsample(base_ch * 4)
+        self.up_res2 = ResBlock(base_ch * 6, base_ch * 2, time_dim, cond_dim, cond_ch=96)
 
-        self.up3       = Upsample(base_ch * 2)
-        self.up_res3   = ResBlock(base_ch * 3, base_ch,     time_dim, cond_dim)  # 64×64
+        self.up3 = Upsample(base_ch * 2)
+        self.up_res3 = ResBlock(base_ch * 3, base_ch, time_dim, cond_dim, cond_ch=48)
 
         self.out_norm = nn.GroupNorm(_groups(base_ch), base_ch)
         self.out_conv = nn.Conv2d(base_ch, 1, 3, padding=1)
 
     def encode_cond(self, cond, batch_size, device, cond_drop_prob=0.0, force_uncond=False):
         if force_uncond or cond is None:
+            null_cond = self.null_cond.to(device=device)
+            null_tokens = self.null_tokens.to(device=device)
             return (
-                self.null_cond.expand(batch_size, -1),
-                self.null_tokens.expand(batch_size, -1, -1),
+                null_cond.expand(batch_size, -1),
+                {
+                    "11x17": None,
+                    "6x9": None,
+                    "3x5": None,
+                },
+                null_tokens.expand(batch_size, -1, -1),
             )
 
-        cond_emb, _, cond_tokens = self.cond_encoder.encode(cond)
+        cond_emb, cond_feats, cond_tokens = self.cond_encoder.encode(cond)
+        null_cond = self.null_cond.to(device=device, dtype=cond_emb.dtype)
+        null_tokens = self.null_tokens.to(device=device, dtype=cond_tokens.dtype)
 
         if self.training and cond_drop_prob > 0:
             drop_mask = torch.rand(batch_size, device=device) < cond_drop_prob
             if drop_mask.any():
-                cond_emb    = cond_emb.clone()
+                cond_emb = cond_emb.clone()
                 cond_tokens = cond_tokens.clone()
-                cond_emb[drop_mask]    = self.null_cond.expand(drop_mask.sum(), -1)
-                cond_tokens[drop_mask] = self.null_tokens.expand(drop_mask.sum(), -1, -1)
+                cond_emb[drop_mask] = null_cond.expand(drop_mask.sum(), -1)
+                cond_tokens[drop_mask] = null_tokens.expand(drop_mask.sum(), -1, -1)
+                for key in cond_feats:
+                    feat = cond_feats[key]
+                    if feat is not None:
+                        feat = feat.clone()
+                        feat[drop_mask] = 0.0
+                        cond_feats[key] = feat
 
-        return cond_emb, cond_tokens
+        return cond_emb, cond_feats, cond_tokens
 
-    @staticmethod
-    def _apply_cross(module, x, cond_tokens):
-        if module is None:
-            return x
-        return module(x, cond_tokens)
-
-    def forward(self, x, t, cond=None, cond_drop_prob=0.0, force_uncond=False, self_cond=None):
+    def forward(self, x, t, cond=None, cond_drop_prob=0.0, force_uncond=False):
         b = x.shape[0]
-        t_emb            = self.time_mlp(t)
-        c_emb, c_tokens  = self.encode_cond(cond, b, x.device, cond_drop_prob, force_uncond)
-        if self.self_condition:
-            if self_cond is None:
-                self_cond = torch.zeros_like(x)
-            x = torch.cat([x, self_cond], dim=1)
+        t_emb = self.time_mlp(t)
+        c_emb, c_feats, c_tokens = self.encode_cond(cond, b, x.device, cond_drop_prob, force_uncond)
 
-        # 编码器
         x0 = self.in_conv(x)
-        x1 = self.res1(x0, t_emb, c_emb)                                   # 64×64
-        x2 = self.res2(self.down1(x1), t_emb, c_emb)                       # 32×32
-        x3 = self.res3(self.down2(x2), t_emb, c_emb)                       # 16×16
-        x3 = self._apply_cross(self.cross3, self.attn3(x3), c_tokens)
-        x4 = self.res4(self.down3(x3), t_emb, c_emb)                       # 8×8
-        x4 = self._apply_cross(self.cross4, x4, c_tokens)
+        x1 = self.res1(x0, t_emb, c_emb, c_feats["11x17"])
+        x2 = self.res2(self.down1(x1), t_emb, c_emb, c_feats["6x9"])
+        x3 = self.res3(self.down2(x2), t_emb, c_emb, c_feats["3x5"])
+        x3 = self.cross3(self.attn3(x3), c_tokens)
+        x4 = self.cross4(self.res4(self.down3(x3), t_emb, c_emb, c_feats["3x5"]), c_tokens)
 
-        # Bottleneck
-        h = self.mid1(x4, t_emb, c_emb)
-        h = self._apply_cross(self.mid_cross, self.mid_attn(h), c_tokens)
-        h = self.mid2(h, t_emb, c_emb)
+        h = self.mid1(x4, t_emb, c_emb, c_feats["3x5"])
+        h = self.mid_cross(self.mid_attn(h), c_tokens)
+        h = self.mid2(h, t_emb, c_emb, c_feats["3x5"])
 
-        # 解码器
         h = self.up1(h)
-        h = self.up_res1(torch.cat([h, x3], dim=1), t_emb, c_emb)         # 16×16
-        h = self._apply_cross(self.up_cross1, h, c_tokens)
+        h = self.up_res1(torch.cat([h, x3], dim=1), t_emb, c_emb, c_feats["3x5"])
+        h = self.up_cross1(h, c_tokens)
 
         h = self.up2(h)
-        h = self.up_res2(torch.cat([h, x2], dim=1), t_emb, c_emb)         # 32×32
-        h = self._apply_cross(self.up_cross2, h, c_tokens)
+        h = self.up_res2(torch.cat([h, x2], dim=1), t_emb, c_emb, c_feats["6x9"])
 
         h = self.up3(h)
-        h = self.up_res3(torch.cat([h, x1], dim=1), t_emb, c_emb)         # 64×64
+        h = self.up_res3(torch.cat([h, x1], dim=1), t_emb, c_emb, c_feats["11x17"])
 
         return self.out_conv(F.silu(self.out_norm(h)))
-
-
-def build_conditional_unet(cond_in_ch, cfg: dict | None = None):
-    cfg = cfg or {}
-    return ConditionalUNet(
-        cond_in_ch=cond_in_ch,
-        base_ch=int(cfg.get("base_ch", 64)),
-        time_dim=int(cfg.get("time_dim", 256)),
-        cond_dim=int(cfg.get("cond_dim", 256)),
-        arch=str(cfg.get("unet_arch", "token_cross_v3")),
-        self_condition=bool(cfg.get("self_condition", False)),
-    )

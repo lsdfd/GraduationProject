@@ -14,21 +14,23 @@ import time
 from pathlib import Path
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 # ── 路径设置 ──────────────────────────────────────────────────────────
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+_SRC = os.path.join(_ROOT, "src")
 for _p in [
-    os.path.join(_ROOT, "src", "model"),
-    os.path.join(_ROOT, "src", "infer"),
+    _SRC,
     os.path.join(_ROOT, "src", "dataset", "structure"),
     os.path.join(_ROOT, "src", "baselines", "model"),
 ]:
     if _p not in sys.path:
-        sys.path.insert(0, _p)
+        sys.path.append(_p)
 
-from models import ForwardSurrogate, build_conditional_unet
-from diffusion import GaussianDiffusion
-from train_utils import resolve_latest_run
+from model.models import ForwardSurrogate, ConditionalUNet
+from model.diffusion import GaussianDiffusion
+from model.train_utils import resolve_latest_run
+from infer.task_library import build_case_weight
 from cvae import CVAE
 from cgan import Generator
 from generate_one import generate_structure
@@ -96,6 +98,61 @@ def _get_topo_opt_fns():
 # 1. 拓扑优化（multistart，每个起点随机初始化）
 # ══════════════════════════════════════════════════════════════════════
 
+def normalize_rows_torch(spec: torch.Tensor) -> torch.Tensor:
+    row_max = spec.amax(dim=-1, keepdim=True).clamp_min(1e-8)
+    return spec / row_max
+
+
+def task_guided_surrogate_loss(task_case, pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    denom = weight.sum().clamp_min(1e-8)
+    pred_norm = normalize_rows_torch(pred)
+    target_norm = normalize_rows_torch(target)
+    loss_fit = ((pred - target).abs() * weight).sum() / denom
+    loss_shape = ((pred_norm - target_norm).abs() * weight).sum() / denom
+
+    if task_case is None:
+        return loss_fit, {"fit": loss_fit, "shape": loss_shape}
+
+    if task_case.task_key == "p_second_order":
+        loss = 0.40 * loss_fit + 0.60 * loss_shape
+        return loss, {"fit": loss_fit, "shape": loss_shape}
+
+    if task_case.task_key == "polarization_independent":
+        loss_balance = (pred_norm[:, 0] - pred_norm[:, 1]).abs().mean()
+        loss = 0.35 * loss_fit + 0.40 * loss_shape + 0.25 * loss_balance
+        return loss, {"fit": loss_fit, "shape": loss_shape, "balance": loss_balance}
+
+    if task_case.task_key == "polarization_multiplexed":
+        active_weight = weight[:, 0:1]
+        passive_weight = weight[:, 1:2]
+        active_shape = ((pred_norm[:, 0:1] - target_norm[:, 0:1]).abs() * active_weight).sum() / active_weight.sum().clamp_min(1e-8)
+        passive_silent = (pred[:, 1:2] * passive_weight).sum() / passive_weight.sum().clamp_min(1e-8)
+        loss = 0.30 * loss_fit + 0.45 * active_shape + 0.25 * passive_silent
+        return loss, {"fit": loss_fit, "shape": active_shape, "silent": passive_silent}
+
+    if task_case.task_key == "fourth_order":
+        loss = 0.35 * loss_fit + 0.65 * loss_shape
+        return loss, {"fit": loss_fit, "shape": loss_shape}
+
+    if task_case.task_key == "lowpass":
+        center_idx = pred.shape[-1] // 2
+        loss_center = (pred[:, :, :, center_idx] - target[:, :, :, center_idx]).abs().mean()
+        loss = 0.35 * loss_fit + 0.40 * loss_shape + 0.25 * loss_center
+        return loss, {"fit": loss_fit, "shape": loss_shape, "center": loss_center}
+
+    if task_case.task_key == "st2":
+        theta_axis = torch.linspace(-40.0, 40.0, steps=pred.shape[-1], device=pred.device, dtype=pred.dtype)
+        lambda_axis = torch.linspace(800.0, 1300.0, steps=pred.shape[-2], device=pred.device, dtype=pred.dtype)
+        theta_zero_idx = torch.argmin(theta_axis.abs())
+        lambda_zero_idx = torch.argmin((lambda_axis - float(task_case.target_lambda_nm)).abs())
+        loss_zero_theta = pred[:, :, :, theta_zero_idx].abs().mean()
+        loss_zero_lambda = pred[:, :, lambda_zero_idx, :].abs().mean()
+        loss = 0.45 * loss_fit + 0.35 * loss_shape + 0.10 * loss_zero_theta + 0.10 * loss_zero_lambda
+        return loss, {"fit": loss_fit, "shape": loss_shape, "zero_theta": loss_zero_theta, "zero_lambda": loss_zero_lambda}
+
+    return loss_fit, {"fit": loss_fit, "shape": loss_shape}
+
+
 def generate_topo_opt(cond_norm, n_samples: int = 16, device: str = "cpu",
                       target_lambda: float = 1000.0,
                       steps: int = 200, lr: float = 0.02,
@@ -106,12 +163,32 @@ def generate_topo_opt(cond_norm, n_samples: int = 16, device: str = "cpu",
                       **kwargs) -> np.ndarray:
     """
     多起点拓扑优化：每次从随机初始化出发独立优化，取最优二值结构。
-    不使用任何学习模型，纯 RCWA 梯度驱动。
+    优化阶段使用前向代理模型和任务目标；最终质量由 run_eval.py 的 RCWA 统一打分。
     返回 [n_samples, 64, 64] 二值结构。
     """
     topo = _get_topo_opt_fns()
-    thetas   = topo["theta_grid"]()
-    target_t = topo["target_row_tensor"](device)
+    surrogate = kwargs.get("surrogate")
+    target_norm = kwargs.get("target_norm")
+    task_case = kwargs.get("task_case")
+    lambdas = kwargs.get("lambdas")
+    thetas = kwargs.get("thetas")
+    if surrogate is None or target_norm is None:
+        raise ValueError("topo_opt 现在需要 forward surrogate 和 target_norm 才能运行。")
+    if lambdas is None or thetas is None:
+        lambdas_np = np.arange(800.0, 1300.1, 50.0, dtype=np.float32)
+        thetas_np = np.arange(-40.0, 40.1, 5.0, dtype=np.float32)
+    else:
+        lambdas_np = np.asarray(lambdas, dtype=np.float32)
+        thetas_np = np.asarray(thetas, dtype=np.float32)
+    cond_ch = int(target_norm.shape[1])
+    if task_case is not None:
+        weight_np = build_case_weight(task_case, cond_ch, lambdas_np, thetas_np)
+    else:
+        weight_np = np.zeros((cond_ch, len(lambdas_np), len(thetas_np)), dtype=np.float32)
+        lam_idx = int(np.argmin(np.abs(lambdas_np - float(target_lambda))))
+        weight_np[0, lam_idx, :] = 1.0
+    weight_t = torch.from_numpy(weight_np).to(device).unsqueeze(0)
+    target_t = target_norm.to(device)
     results  = []
 
     for i in range(n_samples):
@@ -130,17 +207,9 @@ def generate_topo_opt(cond_norm, n_samples: int = 16, device: str = "cpu",
             rho   = topo["symmetrize"](rho_param).clamp(0.0, 1.0)
             rho_f = topo["density_filter"](rho, filter_radius)
             x     = topo["project_density"](rho_f, beta=beta, eta=proj_eta)
-
-            tpp_row, _ = topo["rcwa_tpp_tss_row"](x, target_lambda, device, rcwa_orders)
-            pack       = topo["second_order_score_row_torch"](tpp_row, thetas)
-            row_max    = tpp_row.amax(dim=-1, keepdim=True).clamp_min(1e-8)
-            y_norm     = tpp_row / row_max
-
-            loss = ((1.0 - pack["score"].mean())
-                    + 0.10 * (y_norm - target_t).abs().mean()
-                    + 0.10 * topo["outer_monotonic_penalty"](y_norm, thetas)
-                    + 0.06 * (x * (1.0 - x)).mean()
-                    + 0.02 * topo["tv_loss"](rho_f))
+            pred = surrogate(x)
+            loss_task, terms = task_guided_surrogate_loss(task_case, pred, target_t, weight_t)
+            loss = loss_task + 0.06 * (x * (1.0 - x)).mean() + 0.02 * topo["tv_loss"](rho_f)
 
             opt.zero_grad(); loss.backward()
             opt.step()
@@ -148,18 +217,24 @@ def generate_topo_opt(cond_norm, n_samples: int = 16, device: str = "cpu",
                 rho_param.clamp_(0.0, 1.0)
 
             if (step + 1) % 50 == 0 or step + 1 == steps:
-                try:
-                    xb       = topo["finalize_binary"](x.detach())
-                    tpp_b, _ = topo["rcwa_tpp_tss_row"](xb, target_lambda, device, rcwa_orders)
-                    sc       = float(topo["second_order_score_row_torch"](tpp_b, thetas)["score"].mean())
-                    if sc > best_score_val:
-                        best_score_val = sc
-                        best_bin = xb.detach().clone()
-                except Exception:
-                    pass
+                xb = topo["finalize_binary"](x.detach())
+                with torch.no_grad():
+                    pred_b = surrogate(xb)
+                    eval_loss, _ = task_guided_surrogate_loss(task_case, pred_b, target_t, weight_t)
+                    sc = float(1.0 / (1.0 + eval_loss.item()))
+                if sc > best_score_val:
+                    best_score_val = sc
+                    best_bin = xb.detach().clone()
+                extra = " ".join(f"{k}={float(v.item()):.4f}" for k, v in terms.items() if k not in {"fit", "shape"})
+                print(
+                    f"[topo_opt {i+1}/{n_samples}] step={step+1:03d}/{steps} "
+                    f"proxy_score={sc:.4f} fit={float(terms['fit'].item()):.4f} shape={float(terms['shape'].item()):.4f} "
+                    f"{extra}".rstrip(),
+                    flush=True,
+                )
 
         results.append(best_bin.squeeze().cpu().numpy().astype(np.float32))
-        print(f"[topo_opt {i+1}/{n_samples}] score={best_score_val:.4f}", flush=True)
+        print(f"[topo_opt {i+1}/{n_samples}] final_proxy_score={best_score_val:.4f}", flush=True)
 
     return np.stack(results, axis=0)
 
@@ -241,7 +316,7 @@ def load_diffusion(ckpt_path: str, device: str):
     ckpt     = torch.load(ckpt_path, map_location=device, weights_only=False)
     cond_ch  = ckpt["cond_channels"]
     cfg = ckpt.get("cfg", {})
-    unet = build_conditional_unet(cond_ch, cfg).to(device)
+    unet = ConditionalUNet(cond_ch).to(device)
     diffusion = GaussianDiffusion(unet, timesteps=int(cfg.get("timesteps", 1000)), image_size=64).to(device)
 
     state = ckpt["diffusion"]

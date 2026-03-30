@@ -23,32 +23,15 @@ src/
 │   ├── train_diffusion.py
 │   └── sample.py
 ├── infer/
-│   ├── common.py                  # 公共工具：打分 / RCWA / 可视化
-│   ├── laplas.py                  # 推理核心逻辑（支持任意 --target_lambda）
-│   ├── laplas2.py                 # 推理简化变体
-│   ├── optimization.py            # 拓扑优化核心逻辑
+│   ├── common.py                  # 公共工具：模型加载 / 可视化
+│   ├── task_library.py            # 六类任务清单 + 任务评分公式
+│   ├── run_diffusion_tasks.py     # 扩散生成 + RCWA 任务打分 + 可视化
+│   ├── optimize_task_candidates.py # top-k 候选的 RCWA 拓扑优化
 │   ├── validate_surrogate_top.py  # 代理模型验证
 │   ├── imag_process/              # 傅里叶光学成像仿真（通用版，支持任意 --lambda_nm）
 │   │   ├── image_processing.py
 │   │   └── scan_kspace.py
-│   ├── band_900nm/                # 900 nm 波段入口（默认参数已设为 900nm）
-│   │   ├── laplas.py
-│   │   ├── optimization.py
-│   │   └── imag_process/
-│   │       ├── image_processing.py
-│   │       └── scan_kspace.py
-│   ├── band_1000nm/               # 1000 nm 波段入口
-│   │   ├── laplas.py
-│   │   ├── optimization.py
-│   │   └── imag_process/
-│   │       ├── image_processing.py
-│   │       └── scan_kspace.py
-│   └── band_1100nm/               # 1100 nm 波段入口
-│       ├── laplas.py
-│       ├── optimization.py
-│       └── imag_process/
-│           ├── image_processing.py
-│           └── scan_kspace.py
+│   └── optimization.py            # 旧版单目标优化脚本（保留作历史参考）
 └── baselines/
     ├── model/
     │   ├── cvae.py     # CVAE 架构
@@ -240,67 +223,7 @@ python src/model/train_forward.py
 - 输入结构训练时会从 `[0, 1]` 映射到 `[-1, 1]`
 - 训练日志与预览样本也由 `src/model/train_utils.py` 统一管理
 
-#### UNet 架构（v3 改进版）
-
-条件注入采用三层机制，按信息保留量从低到高排列：
-
-**① AdaGN（Adaptive Group Normalization）**
-
-每个 ResBlock 将全局条件向量 `c_emb [B, 256]` 通过仿射变换注入特征：
-
-```
-scale, shift = Linear(time_dim + cond_dim → out_ch*2)(cat[t_emb, c_emb])
-h = h * (1 + scale) + shift
-```
-
-这是扩散模型的标准条件注入方式（v-prediction + AdaGN = Imagen/SD2.x 标准范式）。
-
-**② ConditionEncoderTokens（Token 化光谱编码器，v3 新增）**
-
-旧版 `ConditionEncoder2D` 用 CNN 下采样（11→6→3，17→9→5）+ AvgPool，信息损失严重：
-
-- 下采样后只剩 3×5=15 个 token 供 cross-attention 使用
-- AvgPool 丢失所有位置信息，模型不知道 λ=1000nm 和 θ=±40° 的位置
-
-新版 `ConditionEncoderTokens` 把 `[B, 2, 11, 17]` 光谱**展开成 187 个 token**（每个格点一个）：
-
-```
-[B, 2, 11, 17]
-    ↓ flatten → [B, 187, 2]
-    ↓ Linear(2→256)
-    ↓ + 物理位置编码（λ轴 Embedding(11,128) + θ轴 Embedding(17,128)）
-    ↓ 3层 Pre-LN Transformer（全局自注意力）
-    ↓
-CLS token → c_emb   [B, 256]     → AdaGN
-其余 token → tokens [B, 187, 256] → cross-attention
-```
-
-| | 旧版 | v3 新版 |
-|--|------|--------|
-| cross-attn token 数 | 15 | **187**（多12×） |
-| 知道 λ=1000nm 位置 | 否 | **是**（可学习 PE） |
-| 知道 θ=±40° 位置 | 否 | **是**（可学习 PE） |
-| 空间插值注入 | 频谱图→64×64（语义错位） | **已删除** |
-
-**③ SpectrumCrossAttention（跨注意力）**
-
-UNet 的结构特征图对 187 个光谱 token 做 multi-head cross-attention，每个空间位置可以"查询"最相关的 (λ, θ) 格点：
-
-```
-Q: UNet 特征图像素     [B, h*w, 128]
-K,V: 光谱 token       [B, 187, 128]
-→ 每个像素位置选择性关注对它最相关的频谱信息
-```
-
-v3 在解码器 32×32 层新增了 `up_cross2`，补齐了此前的 cross-attention 空白：
-
-```
-编码器：cross3（16×16）+ cross4（8×8）
-Bottleneck：mid_cross（8×8）
-解码器：up_cross1（16×16）+ up_cross2（32×32，新增）
-```
-
-**参数量**：~15.8M（旧版 ~22M，删去了无效的空间注入 Conv2d，更适合 5000 样本规模）
+当前实现是项目内自定义的 `ConditionalUNet + GaussianDiffusion`，训练入口固定为这一套架构，没有在脚本里提供多架构切换。
 
 运行：
 
@@ -316,7 +239,7 @@ python src/model/train_diffusion.py
 - `checkpoints/diffusion_preview/*.npy`
 - `runs/diffusion`（如果环境支持 TensorBoard）
 
-### 采样
+### 基础采样
 
 `src/model/sample.py`
 
@@ -340,6 +263,87 @@ python src/model/sample.py
 - `topk_indices.npy`
 - `topk_samples.npy`
 - `topk_pred_cond.npy`
+
+### 任务驱动推理与拓扑优化
+
+当前推荐的逆设计流程不再依赖旧版 `laplas.py` 的单一二阶目标入口，而是按任务清单统一走：
+
+1. 从训练集里取高分目标样本作为条件输入
+2. 用扩散模型生成候选结构
+3. 用 RCWA 按各任务原始评分公式重排
+4. 取 top-k 候选继续做 RCWA 拓扑优化
+
+核心脚本：
+
+- `src/infer/task_library.py`
+  - 维护任务清单与评分逻辑
+  - 六类任务的评分公式直接内联写在这里，不再依赖 `data/` 下的打分脚本导入
+  - 当前内置任务包括：
+    - `p_second_order`
+    - `polarization_independent`
+    - `polarization_multiplexed`
+    - `fourth_order`
+    - `lowpass`
+    - `st2`
+- `src/infer/run_diffusion_tasks.py`
+  - 扩散生成 + RCWA 重排
+  - 支持 `--eval_mode target_only/full`
+  - 会输出目标热力图、top1 热力图、目标波长一维曲线图、top-k 总览图和完整 `summary.json`
+- `src/infer/optimize_task_candidates.py`
+  - 读取 `run_diffusion_tasks.py` 产出的 case 目录
+  - 用 top-k 扩散候选做 RCWA 连续拓扑优化
+  - 优化过程中按任务类型切换目标项，并在评估与选优时使用对应任务分数
+  - 优化日志会持续打印任务分数、40 度值和各项 loss
+
+示例：
+
+```bash
+# 跑一类任务
+python src/infer/run_diffusion_tasks.py --tasks p_second_order --num_samples 16 --topk 5 --eval_mode target_only
+
+# 精确跑一个 case
+python src/infer/run_diffusion_tasks.py --tasks polarization_multiplexed:1100nm_id11339 --num_samples 16 --topk 5 --eval_mode full
+
+# 对某个 case 的 top-k 候选继续做拓扑优化
+python src/infer/optimize_task_candidates.py \
+    --case_dir samples/task_infer/<timestamp>/polarization_multiplexed/1100nm_id11339 \
+    --max_inits 3
+```
+
+`run_diffusion_tasks.py` 的输出目录结构示例：
+
+```text
+samples/task_infer/<timestamp>/<task_key>/<case_label>/
+├── target_cond_raw.npy
+├── task_weight.npy
+├── all_samples.npy
+├── all_pred_cond_raw.npy
+├── task_scores.npy
+├── topk_samples.npy
+├── topk_pred_cond_raw.npy
+├── target_tpp.png
+├── target_tss.png
+├── target_vs_top1_curves.png
+├── top1_structure.png
+├── top1_pred_tpp.png
+├── top1_pred_tss.png
+├── top{k}_overview.png
+└── summary.json
+```
+
+`summary.json` 里会记录：
+
+- 原始输入样本的任务分数 `original_input_score`
+- 扩散候选的 `task_score`
+- `weighted_error` / `global_error`
+- top-k 排名细节
+
+`optimization_summary.json` 里会记录：
+
+- 原始输入样本分数 `original_input_score`
+- 每个 seed 优化后的 `task_score`
+- 对应的 `weighted_raw_mae` / `weighted_norm_mae`
+- 40 度位置的目标值与优化后值
 
 ## 对比实验（Baseline Comparison）
 
@@ -411,135 +415,6 @@ python src/baselines/eval/plot_results.py \
 
 
 
-### 二阶目标扩散推理
-
-`src/infer/laplas.py`
-
-- 支持任意目标波长，通过 `--target_lambda` 指定（默认 `1000 nm`，可选 `900 / 1000 / 1100` 等 RCWA 网格内任意值）
-- 目标曲线与 `|sin(theta)|^2` 成正比；`tpp` 目标以数据集 top-1 模板为底图；非目标波长平滑过渡到背景谱
-- 默认生成 `32` 个候选结构，调用 RCWA 复核后按二阶分数排序保存 top 结果
-
-#### 多波段入口（推荐）
-
-为方便按波段组织实验，`src/infer/` 下提供了三个波段的专用入口目录，每个目录的脚本只修改了默认参数（`target_lambda` 和 `save_dir`），完整逻辑复用顶层脚本：
-
-| 目录 | 目标波长 | 输出目录 |
-|------|---------|---------|
-| `band_900nm/` | 900 nm | `samples/laplas_900nm/` |
-| `band_1000nm/` | 1000 nm | `samples/laplas_1000nm/` |
-| `band_1100nm/` | 1100 nm | `samples/laplas_1100nm/` |
-
-```bash
-# 900 nm 推理（直接运行，无需传 --target_lambda）
-python src/infer/band_900nm/laplas.py
-
-# 1000 nm 推理
-python src/infer/band_1000nm/laplas.py
-
-# 1100 nm 推理
-python src/infer/band_1100nm/laplas.py
-```
-
-也可以直接调用顶层脚本并手动传入波长：
-
-```bash
-python src/infer/laplas.py --target_lambda 900
-python src/infer/laplas.py --target_lambda 1000
-python src/infer/laplas.py --target_lambda 1100
-```
-
-#### 物理引导采样（DPS 风格）
-
-去噪过程分为两条互补路径：
-
-**路径 A：`sample()`** — 标准 CFG，无实时物理反馈
-
-```
-高斯噪声 xT
-  ↓ 每步：CFG v-pred → DDPM 反向一步
-x0 → 阈值化 → 二值结构
-```
-
-物理信息仅来自训练时的 `loss_phys`（烘焙在模型权重中）。
-
-**路径 B：`sample_guided()`** — CFG + 实时物理引导（laplas 默认启用）
-
-```
-高斯噪声 xT
-  ↓ 每步 p_sample_guided：
-    ① 标准 CFG 去噪 → model_mean      (no_grad)
-    ② 物理引导（仅 t < guide_start_t）：
-       x_t →(有梯度)→ UNet → x0_hat
-           → STE 二值化 → surrogate → pred_cond
-           → L1(pred_cond, target_norm) = loss_g
-           → grad = ∂loss_g / ∂x_t
-           → grad_norm = ‖grad‖（逐样本归一化）
-       model_mean -= guidance_scale × (grad / grad_norm)
-x0 → 阈值化 → 二值结构
-```
-
-梯度归一化（`grad / ‖grad‖`）消除了不同时间步梯度量级的差异，使 `guidance_scale` 在全程可解释，参考 arXiv:2601.15210（Enhanced Posterior Sampling for Metasurfaces, 2026）。
-
-两层物理信息：
-- **训练层**（`loss_phys`）：把物理知识烘焙进模型权重，模型整体知道频谱→结构的映射
-- **推理层**（DPS 引导）：对每个具体样本实时校正，把采样轨迹拉向目标频谱
-
-参数说明：
-  - `guidance_scale`：引导强度，默认 `0.1`，建议从 `0.05` 开始试；设为 `0` 可禁用
-  - `guide_start_t`：只在 `t < guide_start_t` 时引导，默认 `300`
-  - `guide_every`：每隔几步引导一次，默认 `1`（每步），设为 `5` 可降低计算量
-
-运行：
-
-```bash
-python src/infer/laplas.py
-```
-
-常用参数示例：
-
-```bash
-# 基础运行（默认启用物理引导，guidance_scale=0.1）
-python src/infer/laplas.py --num_samples 128 --cfg_scale 3.0 --topk_second 5 --target_lambda 1000
-
-# 调整引导强度（从弱到强试）
-python src/infer/laplas.py --guidance_scale 0.05
-python src/infer/laplas.py --guidance_scale 0.1
-python src/infer/laplas.py --guidance_scale 0.2
-
-# 每5步引导一次，降低计算量
-python src/infer/laplas.py --guidance_scale 0.1 --guide_every 5
-
-# 禁用物理引导（退回纯 CFG 采样）
-python src/infer/laplas.py --guidance_scale 0
-
-# 指定前向代理模型路径
-python src/infer/laplas.py --forward_ckpt checkpoints/forward_best.pt
-```
-
-多卡说明：
-
-- 默认会自动检测全部可见 GPU，并用首张卡做扩散采样、其余 GPU 一起做 RCWA 复核。
-- 如果要手动指定设备，可传：
-
-```bash
-python src/infer/laplas.py --devices cuda:0,cuda:1,cuda:2,cuda:3
-```
-
-输出目录默认在 `samples/laplas/<timestamp>/<case_name>/`，每个 case 主要包括：
-
-- `target_cond_raw.npy`
-- `all_samples.npy`
-- `all_pred_cond_raw.npy`
-- `all_errors.npy`
-- `topk_samples.npy`
-- `topk_second_samples.npy`
-- `topk_second_pred_cond_raw.npy`
-- `second_order_metrics.json`
-- `summary.json`
-- `target_tpp.png`
-- `best_tpp.png`
-- `top*_second_order.png`
-
 ### 光学成像仿真
 
 `src/infer/imag_process/`
@@ -594,54 +469,6 @@ python src/infer/imag_process/scan_kspace.py --from_infer
 输出：`kspace_tpp.png` / `kspace_tss.png`（文献圆形 k 空间图）+ `kspace_result.npz`
 
 ---
-
-### 拓扑优化
-
-`src/infer/optimization.py`
-
-- 读取 `laplas.py` 生成的目标条件和初始结构
-- 默认优先使用 `topk_second_samples.npy` 作为初始化
-- 直接基于 RCWA 做多起点拓扑优化
-- 当前优化目标以目标波长处的二阶角响应为主，同时加入外侧单调性、二值化和 TV 正则
-- 最终按二阶分数排序输出
-
-运行：
-
-```bash
-python src/infer/optimization.py
-```
-
-常用参数示例：
-
-```bash
-python src/infer/optimization.py --steps 500 --lr 0.02 --max_inits 5 --target_lambda 1000
-```
-
-多卡说明：
-
-- 默认会自动检测全部可见 GPU，并把不同初始化 candidate 分配到多张卡并行优化。
-- 如果要手动指定设备，可传：
-
-```bash
-python src/infer/optimization.py --devices cuda:0,cuda:1,cuda:2,cuda:3
-```
-
-输出目录默认在 `samples/optimized/<timestamp>/candidate_XX/`，主要包括：
-
-- `optimized_continuous.npy`
-- `optimized_binary.npy`
-- `optimized_rcwa_tpp_row.npy`
-- `optimized_rcwa_tss_row.npy`
-- `optimized_rcwa_continuous_tpp_row.npy`
-- `optimized_rcwa_continuous_tss_row.npy`
-- `optimized_continuous.png`
-- `optimized_binary.png`
-- `optimized_second_order_curve.png`
-- `optimization_log.json`
-
-根目录还会汇总：
-
-- `optimization_summary.json`
 
 ## 依赖
 
@@ -719,17 +546,6 @@ pip install -r requirements.txt
 tensorboard --logdir runs
 ```
 
-## 架构设计参考
-
-本项目的核心设计决策参考了以下工作：
-
-- **v-prediction + cosine schedule**：Salimans & Ho, "Progressive Distillation for Fast Sampling" (2022)
-- **Classifier-Free Guidance (CFG)**：Ho & Salimans, "Classifier-Free Diffusion Guidance" (2022)
-- **DPS 物理引导采样**：Chung et al., "Diffusion Posterior Sampling for General Noisy Inverse Problems" (ICLR 2023)
-- **引导梯度归一化**：arXiv:2601.15210, "Enhanced Posterior Sampling via Diffusion Models for Efficient Metasurfaces Inverse Design" (2026)
-- **STE 二值梯度**：Bengio et al., "Estimating or Propagating Gradients Through Stochastic Neurons" (2013)；Chen et al., "Binary Latent Diffusion" (CVPR 2023)
-- **Pre-LN Transformer**：Xiong et al., "On Layer Normalization in the Transformer Architecture" (ICML 2020)
-
 ## 当前已知问题
 
 这份仓库仍然是研究代码，不是完全整理好的工程，目前已知缺口有：
@@ -747,9 +563,8 @@ python src/dataset/structure/dataset_pre.py --num_samples 5000
 python src/dataset/rcwa/rcwa_all.py   ->耗时随结构数、RCWA 阶数和 GPU 数量变化
 python src/model/train_forward.py     ->几分钟
 python src/model/train_diffusion.py   ->耗时随数据量和训练配置变化
-python src/model/sample.py
-python src/infer/laplas.py
-python src/infer/optimization.py
+python src/infer/run_diffusion_tasks.py --tasks p_second_order
+python src/infer/optimize_task_candidates.py --case_dir samples/task_infer/<timestamp>/<task_key>/<case_label>
 ```
 
 常用可视化命令：

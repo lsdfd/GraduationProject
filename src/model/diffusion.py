@@ -37,38 +37,9 @@ class GaussianDiffusion(nn.Module):
 
         self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod))
-        self.register_buffer("snr", alphas_cumprod / (1.0 - alphas_cumprod).clamp(min=1e-8))
 
         posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         self.register_buffer("posterior_variance", posterior_variance.clamp(min=1e-20))
-
-    def uses_self_condition(self):
-        model = getattr(self.model, "module", self.model)
-        return bool(getattr(model, "self_condition", False))
-
-    def _diffusion_loss(
-        self,
-        v_pred,
-        v_gt,
-        t,
-        loss_weight="none",
-        min_snr_gamma=5.0,
-        p2_k=1.0,
-        p2_gamma=1.0,
-    ):
-        per_sample = ((v_pred - v_gt) ** 2).reshape(v_pred.shape[0], -1).mean(dim=1)
-        scheme = str(loss_weight).lower()
-        if scheme == "none":
-            return per_sample.mean()
-
-        snr = extract(self.snr, t, per_sample.shape).reshape(-1)
-        if scheme == "min_snr":
-            weights = torch.clamp(snr, max=float(min_snr_gamma)) / snr.clamp_min(1e-8)
-        elif scheme == "p2":
-            weights = (float(p2_k) + snr).pow(-float(p2_gamma))
-        else:
-            raise ValueError(f"Unsupported diffusion loss weighting: {loss_weight}")
-        return (per_sample * weights).mean()
 
     def q_sample(self, x0, t, noise=None):
         if noise is None:
@@ -98,17 +69,9 @@ class GaussianDiffusion(nn.Module):
         x0,
         cond,
         surrogate=None,
-        lambda_diff=1.0,
         lambda_phys=0.5,
         lambda_bin=0.05,
-        lambda_x0=0.0,
-        cond_drop_prob=0.1,
-        phys_start_t=None,
-        phys_bin_mode="ste",
-        diff_loss_weight="none",
-        min_snr_gamma=5.0,
-        p2_k=1.0,
-        p2_gamma=1.0,
+        cond_drop_prob=0.1
     ):
         b = x0.shape[0]
         device = x0.device
@@ -118,56 +81,18 @@ class GaussianDiffusion(nn.Module):
         x_t = self.q_sample(x0, t, noise=noise)
 
         v_gt = self.v_target(x0, t, noise)
-        self_cond = None
-        if self.uses_self_condition() and torch.rand(()) < 0.5:
-            with torch.no_grad():
-                v_sc = self.model(x_t, t, cond=cond, cond_drop_prob=0.0)
-                self_cond = self.predict_x0_from_v(x_t, t, v_sc).clamp(-1.0, 1.0).detach()
-        v_pred = self.model(x_t, t, cond=cond, cond_drop_prob=cond_drop_prob, self_cond=self_cond)
+        v_pred = self.model(x_t, t, cond=cond, cond_drop_prob=cond_drop_prob)
 
-        loss_diff = self._diffusion_loss(
-            v_pred,
-            v_gt,
-            t,
-            loss_weight=diff_loss_weight,
-            min_snr_gamma=min_snr_gamma,
-            p2_k=p2_k,
-            p2_gamma=p2_gamma,
-        )
+        loss_diff = F.mse_loss(v_pred, v_gt)
 
         x0_pred = self.predict_x0_from_v(x_t, t, v_pred).clamp(-1.0, 1.0)
 
-        total_loss = lambda_diff * loss_diff
+        total_loss = loss_diff
         log_dict = {"loss_diff": loss_diff.item()}
 
-        if lambda_x0 > 0:
-            loss_x0 = F.l1_loss(x0_pred, x0)
-            total_loss = total_loss + lambda_x0 * loss_x0
-            log_dict["loss_x0"] = loss_x0.item()
-
-        apply_phys = surrogate is not None
-        if phys_start_t is not None:
-            apply_phys = apply_phys and bool((t <= int(phys_start_t)).any())
-
-        if apply_phys:
-            x01_pred = (x0_pred + 1.0) / 2.0
-            if phys_bin_mode == "soft":
-                x01_in = x01_pred
-            elif phys_bin_mode == "ste":
-                x01_hard = (x01_pred > 0.5).float()
-                x01_in = x01_pred + (x01_hard - x01_pred).detach()
-            else:
-                raise ValueError(f"Unsupported phys_bin_mode: {phys_bin_mode}")
-
-            if phys_start_t is not None:
-                apply_mask = (t <= int(phys_start_t))
-                x01_in = x01_in[apply_mask]
-                cond_in = cond[apply_mask]
-            else:
-                cond_in = cond
-
-            pred_cond = surrogate(x01_in)
-            loss_phys = F.l1_loss(pred_cond, cond_in)
+        if surrogate is not None:
+            pred_cond = surrogate((x0_pred + 1.0) / 2.0)
+            loss_phys = F.l1_loss(pred_cond, cond)
             total_loss = total_loss + lambda_phys * loss_phys
             log_dict["loss_phys"] = loss_phys.item()
 
@@ -179,19 +104,18 @@ class GaussianDiffusion(nn.Module):
         return total_loss, log_dict
 
     @torch.no_grad()
-    def p_sample(self, x, t_scalar, cond, cfg_scale=3.0, self_cond=None, return_x0=False):
+    def p_sample(self, x, t_scalar, cond, cfg_scale=3.0):
         b = x.shape[0]
         t = torch.full((b,), t_scalar, device=x.device, dtype=torch.long)
 
         if cfg_scale != 1.0:
-            v_cond = self.model(x, t, cond=cond, force_uncond=False, self_cond=self_cond)
-            v_uncond = self.model(x, t, cond=None, force_uncond=True, self_cond=self_cond)
+            v_cond = self.model(x, t, cond=cond, force_uncond=False)
+            v_uncond = self.model(x, t, cond=None, force_uncond=True)
             v = v_uncond + cfg_scale * (v_cond - v_uncond)
         else:
-            v = self.model(x, t, cond=cond, self_cond=self_cond)
+            v = self.model(x, t, cond=cond)
 
         eps = self.predict_eps_from_v(x, t, v)
-        x0_hat = self.predict_x0_from_v(x, t, v).clamp(-1.0, 1.0)
 
         beta_t = extract(self.betas, t, x.shape)
         alpha_t = extract(self.alphas, t, x.shape)
@@ -200,118 +124,20 @@ class GaussianDiffusion(nn.Module):
         model_mean = (1.0 / torch.sqrt(alpha_t)) * (x - (beta_t / sqrt_one_minus_ab) * eps)
 
         if t_scalar == 0:
-            return (model_mean, x0_hat.detach()) if return_x0 else model_mean
+            return model_mean
 
         noise = torch.randn_like(x)
         var = extract(self.posterior_variance, t, x.shape)
-        out = model_mean + torch.sqrt(var) * noise
-        return (out, x0_hat.detach()) if return_x0 else out
+        return model_mean + torch.sqrt(var) * noise
 
     @torch.no_grad()
     def sample(self, cond, cfg_scale=3.0):
         b = cond.shape[0]
         device = cond.device
         x = torch.randn(b, 1, self.image_size, self.image_size, device=device)
-        self_cond = None
 
         for t in reversed(range(self.timesteps)):
-            x, x0_hat = self.p_sample(x, t, cond, cfg_scale=cfg_scale, self_cond=self_cond, return_x0=True)
-            self_cond = x0_hat if self.uses_self_condition() else None
-
-        x = x.clamp(-1.0, 1.0)
-        x = (x + 1.0) / 2.0
-        x = (x > 0.5).float()
-        return x
-
-    def p_sample_guided(
-        self, x, t_scalar, cond, cfg_scale=3.0,
-        surrogate=None, target_norm=None,
-        guidance_scale=0.1, guide_start_t=300, guide_every=1,
-        self_cond=None, return_x0=False,
-    ):
-        b = x.shape[0]
-        device = x.device
-        t = torch.full((b,), t_scalar, device=device, dtype=torch.long)
-
-        # ── ① 标准 CFG 去噪（不需要梯度）──────────────────────────────
-        v_uncond_saved = None
-        with torch.no_grad():
-            if cfg_scale != 1.0:
-                v_cond   = self.model(x, t, cond=cond, force_uncond=False, self_cond=self_cond)
-                v_uncond = self.model(x, t, cond=None,  force_uncond=True, self_cond=self_cond)
-                v_uncond_saved = v_uncond
-                v = v_uncond + cfg_scale * (v_cond - v_uncond)
-            else:
-                v = self.model(x, t, cond=cond, self_cond=self_cond)
-
-            eps            = self.predict_eps_from_v(x, t, v)
-            x0_hat         = self.predict_x0_from_v(x, t, v).clamp(-1.0, 1.0)
-            beta_t         = extract(self.betas, t, x.shape)
-            alpha_t        = extract(self.alphas, t, x.shape)
-            sqrt_one_minus = extract(self.sqrt_one_minus_alphas_cumprod, t, x.shape)
-            model_mean = (1.0 / torch.sqrt(alpha_t)) * (
-                x - (beta_t / sqrt_one_minus) * eps
-            )
-
-        # ── ② 物理引导梯度（低噪声阶段才做）──────────────────────────
-        do_guide = (
-            surrogate is not None
-            and target_norm is not None
-            and t_scalar < guide_start_t
-            and t_scalar % guide_every == 0
-        )
-        if do_guide:
-            x_in = x.detach().requires_grad_(True)
-            with torch.enable_grad():
-                # 用完整 CFG v 估计 x0_hat，和 block ① 的去噪方向一致
-                v_g_cond = self.model(x_in, t, cond=cond, force_uncond=False, self_cond=self_cond)
-                if cfg_scale != 1.0 and v_uncond_saved is not None:
-                    v_g = v_uncond_saved.detach() + cfg_scale * (v_g_cond - v_uncond_saved.detach())
-                else:
-                    v_g = v_g_cond
-                x0_hat = self.predict_x0_from_v(x_in, t, v_g).clamp(-1.0, 1.0)
-                x01    = (x0_hat + 1.0) / 2.0
-                # STE：前向传 {0,1}，反向梯度不断
-                x01_ste    = x01 + ((x01 > 0.5).float() - x01).detach()
-                pred_cond  = surrogate(x01_ste)
-                loss_g     = F.l1_loss(pred_cond, target_norm.expand_as(pred_cond))
-                grad       = torch.autograd.grad(loss_g, x_in)[0]
-            # 梯度归一化：消除不同时间步梯度量级差异，让 guidance_scale 可解释
-            # 参考 arXiv:2601.15210 (Enhanced Posterior Sampling for Metasurfaces, 2026)
-            grad_norm = grad.reshape(b, -1).norm(dim=1).reshape(b, 1, 1, 1).clamp(min=1e-8)
-            grad_normalized = grad / grad_norm
-            model_mean = model_mean - guidance_scale * grad_normalized
-
-        if t_scalar == 0:
-            return (model_mean, x0_hat.detach()) if return_x0 else model_mean
-
-        noise = torch.randn_like(x)
-        var   = extract(self.posterior_variance, t, x.shape)
-        out = model_mean + torch.sqrt(var) * noise
-        return (out, x0_hat.detach()) if return_x0 else out
-
-    @torch.no_grad()
-    def sample_guided(
-        self, cond, cfg_scale=3.0,
-        surrogate=None, target_norm=None,
-        guidance_scale=0.1, guide_start_t=300, guide_every=1,
-    ):
-        b = cond.shape[0]
-        device = cond.device
-        x = torch.randn(b, 1, self.image_size, self.image_size, device=device)
-        self_cond = None
-
-        for t in reversed(range(self.timesteps)):
-            x, x0_hat = self.p_sample_guided(
-                x, t, cond, cfg_scale=cfg_scale,
-                surrogate=surrogate, target_norm=target_norm,
-                guidance_scale=guidance_scale,
-                guide_start_t=guide_start_t,
-                guide_every=guide_every,
-                self_cond=self_cond,
-                return_x0=True,
-            )
-            self_cond = x0_hat if self.uses_self_condition() else None
+            x = self.p_sample(x, t, cond, cfg_scale=cfg_scale)
 
         x = x.clamp(-1.0, 1.0)
         x = (x + 1.0) / 2.0

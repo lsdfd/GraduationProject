@@ -29,22 +29,23 @@ import numpy as np
 import torch
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+_SRC = os.path.join(_ROOT, "src")
 for _p in [
-    os.path.join(_ROOT, "src", "model"),
-    os.path.join(_ROOT, "src", "infer"),
+    _SRC,
     os.path.join(_ROOT, "src", "baselines", "eval"),
 ]:
     if _p not in sys.path:
-        sys.path.insert(0, _p)
+        sys.path.append(_p)
 
-from models import ForwardSurrogate
-from train_utils import resolve_latest_run
-from common import (
+from model.models import ForwardSurrogate
+from model.train_utils import resolve_latest_run
+from infer.common import (
     lambda_theta_grid,
     rcwa_eval_target_lambda,
     second_order_score_row,
     second_order_target,
 )
+from infer.task_library import TASK_INDEX, task_score_details
 from infer_all import (
     METHODS,
     load_all_models,
@@ -56,8 +57,7 @@ from infer_all import (
 from metrics import summarize
 
 # 复用当前 laplas.py 里的目标构建函数，和主推理流程保持一致
-sys.path.insert(0, os.path.join(_ROOT, "src", "infer"))
-from laplas import build_target
+from infer.laplas import build_target
 
 
 def parse_args():
@@ -69,12 +69,14 @@ def parse_args():
     p.add_argument("--stats_path",     default=None)
     p.add_argument("--cvae_ckpt",      default=None)
     p.add_argument("--cgan_ckpt",      default=None)
-    p.add_argument("--diffusion_ckpt", default=None)
+    p.add_argument("--diffusion_ckpt", default="checkpoints/diffusion_best.pt")
     p.add_argument("--n_samples",      type=int,   default=32,
                    help="每个方法生成的候选数量")
     p.add_argument("--target_lambda",  type=float, default=1000.0)
     p.add_argument("--target_rank",    type=int,   default=1,
                    help="使用数据集中二阶得分第 N 名的样本作为目标模板")
+    p.add_argument("--task_case",      default=None,
+                   help="使用 infer/task_library.py 里的任务 case 作为统一评测目标，例如 p_second_order:1050nm_id4279")
     p.add_argument("--band_sigma_nm",  type=float, default=25.0)
     p.add_argument("--rcwa_orders",    type=int,   default=7)
     p.add_argument("--save_dir",       default="samples/eval_compare")
@@ -96,6 +98,21 @@ def parse_methods(arg: str) -> list[str]:
 def normalize_target(cond_raw: np.ndarray, cond_mean: np.ndarray, cond_std: np.ndarray) -> torch.Tensor:
     cond_norm_np = (cond_raw - cond_mean.squeeze(0)) / cond_std.squeeze(0)
     return torch.from_numpy(cond_norm_np).unsqueeze(0).float()
+
+
+def load_case_target(data_path: str, selector: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, object]:
+    case = TASK_INDEX[selector]
+    data = np.load(data_path)
+    cond_raw = np.stack(
+        [
+            np.asarray(data["tpp_mag"][case.sample_idx], dtype=np.float32),
+            np.asarray(data["tss_mag"][case.sample_idx], dtype=np.float32),
+        ],
+        axis=0,
+    )
+    lambdas = np.asarray(data["lambdas"], dtype=np.float32)
+    thetas = np.asarray(data["thetas"], dtype=np.float32)
+    return cond_raw, lambdas, thetas, case
 
 
 def resolve_default_stats_path(explicit_path: str | None = None) -> str:
@@ -139,6 +156,7 @@ def eval_one_method(
     thetas: np.ndarray,
     target_lambda: float,
     rcwa_orders: int,
+    task_case=None,
 ) -> dict:
     """生成 n_samples 个候选，仅在目标波长做真实 RCWA 角度扫描并打分。"""
 
@@ -152,7 +170,8 @@ def eval_one_method(
     best_score_val = -1.0
     best_pred_cond = None
     best_idx = 0
-    target_row = cond_raw[:, int(np.argmin(np.abs(lambda_theta_grid()[0] - float(target_lambda))))]
+    lam_idx = int(np.argmin(np.abs(lambda_theta_grid()[0] - float(target_lambda))))
+    target_row = cond_raw[:, lam_idx]
 
     for idx, struct in enumerate(structs):
         print(f"[run_eval]   RCWA {idx + 1}/{len(structs)}", flush=True)
@@ -169,7 +188,12 @@ def eval_one_method(
             raise RuntimeError("RCWA backend unavailable during baseline evaluation.")
         _, pr = out
         pred_rows.append(pr.astype(np.float32))
-        sc = second_order_score_row(pr[0], thetas)["score"]
+        if task_case is None:
+            sc = second_order_score_row(pr[0], thetas)["score"]
+        else:
+            pred_map = np.zeros_like(cond_raw, dtype=np.float32)
+            pred_map[:, lam_idx, :] = pr.astype(np.float32)
+            sc = float(task_score_details(task_case, pred_map, lambda_theta_grid()[0], thetas)["task_score"])
         scores.append(sc)
         if sc > best_score_val:
             best_score_val = sc
@@ -208,15 +232,21 @@ def main():
         raise ValueError("Current baseline target builder is aligned with laplas.py and only supports --target_rank 1.")
 
     lambdas, thetas = lambda_theta_grid()
+    task_case = None
 
-    # ── 构建目标（与当前 laplas.py 保持一致）──────────────────────────
-    cond_raw, _, _, sample_idx = build_target(
-        cond_ch=2,
-        target_lambda=args.target_lambda,
-        band_sigma_nm=args.band_sigma_nm,
-        train_npz_path=Path(args.data_path),
-        topk_csv_path=Path(args.topk_csv),
-    )   # [2, 11, 17] 物理空间目标
+    # ── 构建目标：优先使用 task_library case；否则保持旧 laplas 逻辑 ────
+    if args.task_case:
+        cond_raw, lambdas, thetas, task_case = load_case_target(args.data_path, args.task_case)
+        sample_idx = task_case.sample_idx
+        args.target_lambda = float(task_case.target_lambda_nm)
+    else:
+        cond_raw, _, _, sample_idx = build_target(
+            cond_ch=2,
+            target_lambda=args.target_lambda,
+            band_sigma_nm=args.band_sigma_nm,
+            train_npz_path=Path(args.data_path),
+            topk_csv_path=Path(args.topk_csv),
+        )   # [2, 11, 17] 物理空间目标
 
     args.cvae_ckpt = resolve_default_cvae_ckpt(args.cvae_ckpt)
     args.cgan_ckpt = resolve_default_cgan_ckpt(args.cgan_ckpt)
@@ -225,6 +255,8 @@ def main():
 
     print(f"[run_eval] target: lambda={args.target_lambda}nm  "
           f"rank={args.target_rank}  dataset_idx={sample_idx}")
+    if task_case is not None:
+        print(f"[run_eval] task_case={task_case.selector}")
     print(f"[run_eval] forward_ckpt={args.forward_ckpt}")
     print(f"[run_eval] stats_path={args.stats_path}")
     print(f"[run_eval] cvae_ckpt={args.cvae_ckpt}")
@@ -250,7 +282,8 @@ def main():
     guide_surrogate = None
     guide_mean = None
     guide_std = None
-    if "diffusion+guide" in methods:
+    need_forward_guidance = ("diffusion+guide" in methods) or ("topo_opt" in methods)
+    if need_forward_guidance:
         guide_surrogate, guide_mean, guide_std = load_surrogate(
             args.forward_ckpt,
             args.stats_path,
@@ -262,12 +295,20 @@ def main():
     for method_name, method_info in all_models.items():
         method_mean = guide_mean if method_name == "diffusion+guide" and guide_mean is not None else method_info.get("cond_mean")
         method_std = guide_std if method_name == "diffusion+guide" and guide_std is not None else method_info.get("cond_std")
+        if method_name == "topo_opt" and guide_mean is not None:
+            method_mean = guide_mean
+            method_std = guide_std
         if method_mean is None or method_std is None:
             method_mean = default_mean
             method_std = default_std
         cond_norm_by_method[method_name] = normalize_target(cond_raw, method_mean, method_std)
     if "topo_opt" in all_models:
         all_models["topo_opt"]["target_lambda"] = args.target_lambda
+        all_models["topo_opt"]["surrogate"] = guide_surrogate
+        all_models["topo_opt"]["target_norm"] = cond_norm_by_method["topo_opt"].to(device)
+        all_models["topo_opt"]["task_case"] = task_case
+        all_models["topo_opt"]["lambdas"] = lambdas
+        all_models["topo_opt"]["thetas"] = thetas
     if "diffusion+guide" in all_models:
         all_models["diffusion+guide"]["surrogate"] = guide_surrogate
         all_models["diffusion+guide"]["target_norm"] = cond_norm_by_method["diffusion+guide"].to(device)
@@ -290,6 +331,7 @@ def main():
                 thetas        = thetas,
                 target_lambda = args.target_lambda,
                 rcwa_orders   = args.rcwa_orders,
+                task_case     = task_case,
             )
         except Exception as e:
             print(f"ERROR: {e}")
