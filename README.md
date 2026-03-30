@@ -347,19 +347,31 @@ samples/task_infer/<timestamp>/<task_key>/<case_label>/
 
 ## 对比实验（Baseline Comparison）
 
-`src/baselines/` 包含三种基线方法（CVAE、cGAN、随机+拓扑）与扩散模型的对比实验框架。
+`src/baselines/` 包含四类对比方法：
+
+- `topo_opt`：随机初始化 + 前向代理引导的拓扑优化，最终统一用 RCWA 打分
+- `cvae`
+- `cgan`
+- `diffusion`
+
+当前 `run_eval.py` 已经支持直接复用 `src/infer/task_library.py` 里的任务 case，默认会和 `run_diffusion_tasks.py` 对齐：
+
+- 默认数据集：`data/train_data_20000.npz`
+- 默认扩散 checkpoint：`checkpoints/diffusion_best.pt`
+- 默认扩散采样：`cfg_scale=1.0`
+- 最终 RCWA 评测口径与 `run_diffusion_tasks.py` 统一
 
 ### 训练基线模型
 
 ```bash
 # CVAE（约 200 epochs，有 early stop）
 python src/baselines/train/train_cvae.py \
-    --data_path data/train_data.npz \
+    --data_path data/train_data_20000.npz \
     --save_dir  checkpoints/cvae
 
 # cGAN（200 epochs，n_critic=2）
 python src/baselines/train/train_cgan.py \
-    --data_path data/train_data.npz \
+    --data_path data/train_data_20000.npz \
     --save_dir  checkpoints/cgan
 ```
 
@@ -367,24 +379,42 @@ python src/baselines/train/train_cgan.py \
 
 ### 运行评估
 
+推荐直接按任务 case 运行，这样目标样本与 task infer 完全一致。例如：
+
 ```bash
 python src/baselines/eval/run_eval.py \
-    --data_path      data/train_data.npz \
-    --topk_csv       data/second_order_scores/tpp_mag_top5_per_lambda.csv \
+    --task_case p_second_order:1050nm_id4279
+```
+
+只跑单个方法时，可以显式指定 `--methods`：
+
+```bash
+python src/baselines/eval/run_eval.py \
+    --task_case p_second_order:1050nm_id4279 \
+    --methods diffusion
+```
+
+如果需要覆盖默认路径，也可以显式传参：
+
+```bash
+python src/baselines/eval/run_eval.py \
+    --data_path      data/train_data_20000.npz \
     --forward_ckpt   checkpoints/forward_best.pt \
     --stats_path     checkpoints/cond_stats.npz \
     --cvae_ckpt      checkpoints/cvae/cvae_best.pt \
     --cgan_ckpt      checkpoints/cgan/cgan_best.pt \
     --diffusion_ckpt checkpoints/diffusion_best.pt \
+    --task_case      p_second_order:1050nm_id4279 \
     --n_samples      32 \
-    --target_lambda  1000.0 \
-    --target_rank    1 \
     --save_dir       samples/eval_compare
 ```
 
 输出：`samples/eval_compare/results.json`，同时打印汇总表格。
 
 > 若某个 checkpoint 不存在，该方法会被自动跳过，不影响其余方法。
+>
+> 当前 baseline 方法集合默认不包含 `diffusion+guide`。
+> 旧的 `--topk_csv + --target_lambda + --target_rank` 路径仍保留兼容，但主线实验更推荐直接使用 `--task_case`。
 
 ### 绘制对比图
 

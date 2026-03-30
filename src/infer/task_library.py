@@ -34,7 +34,7 @@ TASK_CASES: tuple[TaskCase, ...] = (
     TaskCase("fourth_order", "fourth-order differentiation", "row_tpp", 3886, 1050.0, "data/fourth_order_scores/tpp_mag_fourth_order_summary.json", "1050nm_id3886"),
     TaskCase("fourth_order", "fourth-order differentiation", "row_tpp", 3186, 1150.0, "data/fourth_order_scores/tpp_mag_fourth_order_summary.json", "1150nm_id3186", "t40 nearly 1"),
     TaskCase("lowpass", "lowpass", "row_tpp", 18249, 1100.0, "data/optica_lowpass_scores/tpp_mag_optica_lowpass_summary.json", "1100nm_id18249"),
-    TaskCase("st2", "spatiotemporal differentiation", "map_window_both", 11742, 950.0, "data/st2_screen/summary.json", "0950nm_idx11742"),
+    TaskCase("st2", "spatiotemporal differentiation", "map_window_both", 18959, 950.0, "data/st2_profiles/sample_18959/profile_summary.json", "0950nm_idx18959"),
 )
 
 TASK_INDEX = {case.selector: case for case in TASK_CASES}

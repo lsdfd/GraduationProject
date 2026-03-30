@@ -39,9 +39,9 @@ for _p in [
 
 from model.models import ForwardSurrogate
 from model.train_utils import resolve_latest_run
+from dataset.rcwa.rcwa import torcwa_simulation
 from infer.common import (
     lambda_theta_grid,
-    rcwa_eval_target_lambda,
     second_order_score_row,
     second_order_target,
 )
@@ -62,7 +62,7 @@ from infer.laplas import build_target
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--data_path",      default="data/train_data.npz")
+    p.add_argument("--data_path",      default="data/train_data_20000.npz")
     p.add_argument("--topk_csv",       default="data/second_order_scores/tpp_mag_top5_per_lambda.csv",
                    help="score_second_order.py 输出的 top-k CSV")
     p.add_argument("--forward_ckpt",   default="checkpoints/forward_best.pt")
@@ -146,6 +146,54 @@ def load_surrogate(forward_ckpt: str, stats_path: str, device: str):
     return surrogate, cond_mean, cond_std
 
 
+def load_cond_stats(stats_path: str) -> tuple[np.ndarray, np.ndarray]:
+    stats = np.load(stats_path)
+    return stats["mean"].astype(np.float32), stats["std"].astype(np.float32)
+
+
+def rcwa_physics_kwargs(target_lambda: float, theta: float) -> dict:
+    return {
+        "periodicity": 500.0,
+        "h": 500.0,
+        "lam": float(target_lambda),
+        "tet": float(theta),
+        "phi": 0.0,
+        "angle_unit": "deg",
+        "angle_layer": "input",
+        "input_medium": "air",
+        "output_medium": "SiO2",
+        "structure": "Si",
+    }
+
+
+def baseline_rcwa_eval_target_lambda(
+    structure: torch.Tensor,
+    target_raw: np.ndarray,
+    cond_ch: int,
+    device: str,
+    target_lambda: float,
+    rcwa_orders: int,
+):
+    _, thetas = lambda_theta_grid()
+    layer = structure.squeeze().to(device)
+    tpp = np.full((len(thetas),), np.nan, np.float32)
+    tss = np.full_like(tpp, np.nan)
+    for j, theta in enumerate(thetas):
+        out = torcwa_simulation(
+            rcwa_physics_kwargs(float(target_lambda), float(theta)),
+            layer,
+            rcwa_orders=rcwa_orders,
+            project=False,
+            device=device,
+        )
+        tpp[j] = float(out["tpp_mag"].detach().cpu().item())
+        tss[j] = float(out["tss_mag"].detach().cpu().item())
+    pred = np.stack([tpp, tss], axis=0) if cond_ch == 2 else tpp[None]
+    lam_idx = int(np.argmin(np.abs(lambda_theta_grid()[0] - float(target_lambda))))
+    mae = float(np.mean(np.abs(pred - target_raw[:, lam_idx])))
+    return mae, pred
+
+
 def eval_one_method(
     method_name: str,
     method_info: dict,
@@ -176,7 +224,7 @@ def eval_one_method(
     for idx, struct in enumerate(structs):
         print(f"[run_eval]   RCWA {idx + 1}/{len(structs)}", flush=True)
         struct_t = torch.from_numpy(struct[None, None]).float().to(device)
-        out = rcwa_eval_target_lambda(
+        out = baseline_rcwa_eval_target_lambda(
             struct_t,
             cond_raw,
             cond_ch=int(cond_raw.shape[0]),
@@ -273,17 +321,11 @@ def main():
         methods        = methods,
     )
 
-    dataset = np.load(args.data_path)
-    cond_stack = np.stack([dataset["tpp_mag"], dataset["tss_mag"]], axis=1).astype(np.float32)
-    valid_mask = np.isfinite(cond_stack).all(axis=(1, 2, 3))
-    cond_stack = cond_stack[valid_mask]
-    default_mean = cond_stack.mean(axis=0, keepdims=True)
-    default_std = cond_stack.std(axis=0, keepdims=True) + 1e-6
+    default_mean, default_std = load_cond_stats(args.stats_path)
     guide_surrogate = None
     guide_mean = None
     guide_std = None
-    need_forward_guidance = ("diffusion+guide" in methods) or ("topo_opt" in methods)
-    if need_forward_guidance:
+    if "topo_opt" in methods:
         guide_surrogate, guide_mean, guide_std = load_surrogate(
             args.forward_ckpt,
             args.stats_path,
@@ -293,8 +335,8 @@ def main():
     # ── 为不同方法准备各自匹配的目标归一化 ────────────────────────────
     cond_norm_by_method = {}
     for method_name, method_info in all_models.items():
-        method_mean = guide_mean if method_name == "diffusion+guide" and guide_mean is not None else method_info.get("cond_mean")
-        method_std = guide_std if method_name == "diffusion+guide" and guide_std is not None else method_info.get("cond_std")
+        method_mean = method_info.get("cond_mean")
+        method_std = method_info.get("cond_std")
         if method_name == "topo_opt" and guide_mean is not None:
             method_mean = guide_mean
             method_std = guide_std
@@ -309,9 +351,6 @@ def main():
         all_models["topo_opt"]["task_case"] = task_case
         all_models["topo_opt"]["lambdas"] = lambdas
         all_models["topo_opt"]["thetas"] = thetas
-    if "diffusion+guide" in all_models:
-        all_models["diffusion+guide"]["surrogate"] = guide_surrogate
-        all_models["diffusion+guide"]["target_norm"] = cond_norm_by_method["diffusion+guide"].to(device)
 
     print(f"[run_eval] methods: {list(all_models.keys())}")
 

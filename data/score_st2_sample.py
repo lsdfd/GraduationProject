@@ -19,7 +19,7 @@ from screen_st2_template_match import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Score one sample for ST2 screening settings.")
     parser.add_argument("--npz", type=str, default="data/train_data.npz")
-    parser.add_argument("--sample_idx", type=int, default=11742)
+    parser.add_argument("--sample_idx", type=int, default=18959)
     parser.add_argument("--target_lambdas", type=float, nargs="+", default=[900.0, 1000.0, 1100.0])
     parser.add_argument("--theta_zero_width_deg", type=float, default=2.5)
     parser.add_argument("--lambda_zero_width_nm", type=float, default=25.0)
