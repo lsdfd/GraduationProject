@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -15,6 +16,13 @@ C0 = 299792458.0
 def resolve_from_root(path_like: str | Path) -> Path:
     path = Path(path_like)
     return path if path.is_absolute() else ROOT / path
+
+
+def resolve_default_out_dir(explicit: str | None = None) -> Path:
+    if explicit:
+        return resolve_from_root(explicit)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return ROOT / "data" / f"st2_template_match_{stamp}"
 
 
 def robust_norm(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -326,6 +334,9 @@ def score_weighted_error(
 def score_corners(
     spec_map: np.ndarray,
     ideal_map: np.ndarray,
+    lambdas_nm: np.ndarray,
+    thetas_deg: np.ndarray,
+    lambda0_nm: float,
     work_mask: np.ndarray,
     hi_q: float = 0.90,
     lo_q: float = 0.15,
@@ -337,8 +348,30 @@ def score_corners(
     hi_mean = float(np.mean(spec[hi_mask])) if np.any(hi_mask) else 0.0
     lo_mean = float(np.mean(spec[lo_mask])) if np.any(lo_mask) else 0.0
     contrast = float(np.clip((hi_mean - lo_mean) / max(hi_mean + lo_mean, 1e-8), 0.0, 1.0))
-    return contrast, {
-        "corner_lobe_score": contrast,
+    hi_score = float(np.clip(hi_mean, 0.0, 1.0))
+    theta_abs = np.abs(np.asarray(thetas_deg, dtype=np.float64))
+    lam_abs = np.abs(np.asarray(lambdas_nm, dtype=np.float64) - float(lambda0_nm))
+    active_lam = lam_abs[np.any(work_mask, axis=1)]
+    half_bw = float(np.max(active_lam)) if active_lam.size else 0.0
+    outer_lambda_thr = 0.5 * half_bw
+    outer_lambda_mask = lam_abs >= outer_lambda_thr
+    angle30_mask = theta_abs >= 30.0
+    angle40_mask = theta_abs >= 37.5
+    lobe30_region = work_mask & outer_lambda_mask[:, None] & angle30_mask[None, :]
+    lobe40_region = work_mask & outer_lambda_mask[:, None] & angle40_mask[None, :]
+    lobe30_mean = float(np.mean(spec[lobe30_region])) if np.any(lobe30_region) else 0.0
+    lobe40_mean = float(np.mean(spec[lobe40_region])) if np.any(lobe40_region) else 0.0
+    lobe30_score = float(np.clip(lobe30_mean, 0.0, 1.0))
+    lobe40_score = float(np.clip(lobe40_mean, 0.0, 1.0))
+    score = 0.30 * hi_score + 0.20 * contrast + 0.30 * lobe30_score + 0.20 * lobe40_score
+    return score, {
+        "corner_lobe_score": score,
+        "corner_lobe_hi_score": hi_score,
+        "corner_lobe_contrast": contrast,
+        "corner_lobe_30deg_score": lobe30_score,
+        "corner_lobe_40deg_score": lobe40_score,
+        "corner_lobe_30deg_mean": lobe30_mean,
+        "corner_lobe_40deg_mean": lobe40_mean,
         "ideal_high_region_mean": hi_mean,
         "ideal_low_region_mean": lo_mean,
     }
@@ -365,17 +398,22 @@ def score_channel(
     proj_coeff, proj_corr = projection_coeff_in_window(spec_map, ideal_map, work_mask)
     expansion = expansion_weight_k2omega2(spec_map, lambdas_nm, thetas_deg, lambda0_nm, work_mask)
     proj_score = 0.5 * float(expansion["expansion_weight_k2omega2"]) + 0.5 * proj_corr
-    total = 0.65 * zero_score + 0.25 * weighted_error_score + 0.10 * proj_score
+    corner_score, corner_details = score_corners(spec_map, ideal_map, lambdas_nm, thetas_deg, lambda0_nm, work_mask)
+    aux_score = 0.5 * weighted_error_score + 0.5 * proj_score
+    total = 0.50 * zero_score + 0.40 * corner_score + 0.10 * aux_score
     return {
         "score_total": total,
         "score_zero_lines": zero_score,
         "score_weighted_error": weighted_error_score,
         "score_projection": proj_score,
+        "score_corner_lobes": corner_score,
+        "score_auxiliary": aux_score,
         "projection_coeff_k2omega2": proj_coeff,
         "projection_corr_k2omega2": proj_corr,
         **expansion,
         **zero_details,
         **weighted_error_details,
+        **corner_details,
     }
 
 
@@ -389,6 +427,23 @@ def merge_channel_scores(tpp: dict[str, float], tss: dict[str, float]) -> dict[s
             merged[f"tss_{key}"] = sv
             merged[key] = 0.5 * (tv + sv)
     return merged
+
+
+def _draw_st2_guides(ax, lambda0_nm: float, theta_max_deg: float, lambda_window_nm: float) -> None:
+    half_bw = 0.5 * float(lambda_window_nm)
+    for theta in (-40.0, -30.0, 0.0, 30.0, 40.0):
+        if abs(theta) > float(theta_max_deg) + 1e-6:
+            continue
+        style = "--" if abs(theta) in (0.0, 30.0, 40.0) else ":"
+        color = "w" if abs(theta) in (30.0, 40.0) else "0.9"
+        ax.axvline(theta, color=color, ls=style, lw=0.9, alpha=0.9)
+    for delta in (-half_bw, -50.0, 0.0, 50.0, half_bw):
+        lam = float(lambda0_nm + delta)
+        if abs(delta) > half_bw + 1e-6:
+            continue
+        style = "--" if abs(delta) in (0.0, 50.0, half_bw) else ":"
+        color = "w" if abs(delta) in (50.0, half_bw) else "0.9"
+        ax.axhline(lam, color=color, ls=style, lw=0.9, alpha=0.9)
 
 
 def plot_candidate(
@@ -408,8 +463,6 @@ def plot_candidate(
     lambda_idx = find_lambda_index(lambdas, lambda0_nm)
     theta0_idx = int(np.argmin(np.abs(thetas)))
     extent = [float(thetas[0]), float(thetas[-1]), float(lambdas[0]), float(lambdas[-1])]
-    lambdas_dense, thetas_dense, ideal_dense = ideal_st2_map_dense(lambda0_nm, lambda_window_nm, theta_max_deg)
-    extent_dense = [float(thetas_dense[0]), float(thetas_dense[-1]), float(lambdas_dense[0]), float(lambdas_dense[-1])]
 
     fig, axes = plt.subplots(2, 3, figsize=(14.0, 7.8), constrained_layout=True)
     ax0, ax1, ax2, ax3, ax4, ax5 = axes.ravel()
@@ -424,21 +477,16 @@ def plot_candidate(
     lam_max_vis = float(lambda0_nm + 0.5 * lambda_window_nm)
 
     hm0 = ax1.imshow(
-        ideal_dense,
+        ideal_map,
         origin="lower",
         aspect="auto",
-        extent=extent_dense,
+        extent=extent,
         cmap="turbo",
         vmin=0.0,
         vmax=1.0,
-        interpolation="bicubic",
+        interpolation="nearest",
     )
-    ax1.axvline(0.0, color="w", ls="--", lw=0.8)
-    ax1.axhline(float(lambdas[lambda_idx]), color="w", ls="--", lw=0.8)
-    ax1.axvline(-float(theta_max_deg), color="w", ls=":", lw=0.8)
-    ax1.axvline(float(theta_max_deg), color="w", ls=":", lw=0.8)
-    ax1.axhline(float(lambda0_nm - 0.5 * lambda_window_nm), color="w", ls=":", lw=0.8)
-    ax1.axhline(float(lambda0_nm + 0.5 * lambda_window_nm), color="w", ls=":", lw=0.8)
+    _draw_st2_guides(ax1, lambda0_nm, theta_max_deg, lambda_window_nm)
     ax1.set_title(f"ideal ST2 @ {int(round(lambda0_nm))} nm")
     ax1.set_xlabel("theta (deg)")
     ax1.set_ylabel("lambda (nm)")
@@ -453,14 +501,9 @@ def plot_candidate(
         cmap="turbo",
         vmin=0.0,
         vmax=1.0,
-        interpolation="bicubic",
+        interpolation="nearest",
     )
-    ax2.axvline(0.0, color="w", ls="--", lw=0.8)
-    ax2.axhline(float(lambdas[lambda_idx]), color="w", ls="--", lw=0.8)
-    ax2.axvline(-float(theta_max_deg), color="w", ls=":", lw=0.8)
-    ax2.axvline(float(theta_max_deg), color="w", ls=":", lw=0.8)
-    ax2.axhline(float(lambda0_nm - 0.5 * lambda_window_nm), color="w", ls=":", lw=0.8)
-    ax2.axhline(float(lambda0_nm + 0.5 * lambda_window_nm), color="w", ls=":", lw=0.8)
+    _draw_st2_guides(ax2, lambda0_nm, theta_max_deg, lambda_window_nm)
     ax2.set_title(f"tpp | score={merged_score:.4f}")
     ax2.set_xlabel("theta (deg)")
     ax2.set_ylabel("lambda (nm)")
@@ -475,24 +518,22 @@ def plot_candidate(
         cmap="turbo",
         vmin=0.0,
         vmax=1.0,
-        interpolation="bicubic",
+        interpolation="nearest",
     )
-    ax3.axvline(0.0, color="w", ls="--", lw=0.8)
-    ax3.axhline(float(lambdas[lambda_idx]), color="w", ls="--", lw=0.8)
-    ax3.axvline(-float(theta_max_deg), color="w", ls=":", lw=0.8)
-    ax3.axvline(float(theta_max_deg), color="w", ls=":", lw=0.8)
-    ax3.axhline(float(lambda0_nm - 0.5 * lambda_window_nm), color="w", ls=":", lw=0.8)
-    ax3.axhline(float(lambda0_nm + 0.5 * lambda_window_nm), color="w", ls=":", lw=0.8)
+    _draw_st2_guides(ax3, lambda0_nm, theta_max_deg, lambda_window_nm)
     ax3.set_title("tss")
     ax3.set_xlabel("theta (deg)")
     ax3.set_ylabel("lambda (nm)")
     ax3.set_xlim(theta_min_vis, theta_max_vis)
     ax3.set_ylim(lam_min_vis, lam_max_vis)
 
-    ideal_row_dense = ideal_dense[np.argmin(np.abs(lambdas_dense - lambda0_nm))]
-    ax4.plot(thetas_dense, ideal_row_dense, "k--", lw=1.8, label="ideal row")
+    ideal_row = ideal_map[lambda_idx]
+    ax4.plot(thetas, ideal_row, "k--", lw=1.8, label="ideal row")
     ax4.plot(thetas, robust_norm(tpp_map[lambda_idx]), lw=2.0, label="tpp row")
     ax4.plot(thetas, robust_norm(tss_map[lambda_idx]), lw=2.0, label="tss row")
+    for theta in (-40.0, -30.0, 30.0, 40.0):
+        if abs(theta) <= float(theta_max_deg) + 1e-6:
+            ax4.axvline(theta, color="0.6", ls=":", lw=0.8)
     ax4.set_title(f"row @ {int(round(lambda0_nm))} nm")
     ax4.set_xlabel("theta (deg)")
     ax4.set_ylabel("normalized amplitude")
@@ -500,11 +541,15 @@ def plot_candidate(
     ax4.legend(fontsize=8)
     ax4.set_xlim(theta_min_vis, theta_max_vis)
 
-    ideal_col_dense = ideal_dense[:, np.argmin(np.abs(thetas_dense))]
-    ax5.plot(lambdas_dense, ideal_col_dense, "k--", lw=1.8, label="ideal theta=0")
+    ideal_col = ideal_map[:, theta0_idx]
+    ax5.plot(lambdas, ideal_col, "k--", lw=1.8, label="ideal theta=0")
     ax5.plot(lambdas, robust_norm(tpp_map[:, theta0_idx]), lw=2.0, label="tpp theta=0")
     ax5.plot(lambdas, robust_norm(tss_map[:, theta0_idx]), lw=2.0, label="tss theta=0")
-    ax5.axvline(float(lambda0_nm), color="k", ls="--", lw=0.8)
+    half_bw = 0.5 * float(lambda_window_nm)
+    for lam in (lambda0_nm - half_bw, lambda0_nm - 50.0, lambda0_nm, lambda0_nm + 50.0, lambda0_nm + half_bw):
+        if lam < float(np.min(lambdas)) - 1e-6 or lam > float(np.max(lambdas)) + 1e-6:
+            continue
+        ax5.axvline(float(lam), color="0.6", ls=":", lw=0.8)
     ax5.set_title("column @ theta=0")
     ax5.set_xlabel("lambda (nm)")
     ax5.set_ylabel("normalized amplitude")
@@ -526,23 +571,57 @@ def save_ranking_csv(path: Path, rows: list[dict[str, float | int | str]]) -> No
             writer.writerow(row)
 
 
+def _sort_rows(rows: list[dict[str, float | int | str]], key: str) -> list[dict[str, float | int | str]]:
+    return sorted(rows, key=lambda row: float(row.get(key, -1.0)), reverse=True)
+
+
+def _extract_channel_rows(
+    rows: list[dict[str, float | int | str]],
+    score_key: str,
+    prefix: str,
+) -> list[dict[str, float | int | str]]:
+    channel_rows: list[dict[str, float | int | str]] = []
+    for row in rows:
+        item: dict[str, float | int | str] = {
+            "sample_idx": int(row["sample_idx"]),
+            "target_lambda_nm": float(row["target_lambda_nm"]),
+            "score_total": float(row[score_key]),
+        }
+        for key, value in row.items():
+            if key.startswith(prefix):
+                item[key[len(prefix):]] = value
+        channel_rows.append(item)
+    return channel_rows
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Template-match train_data.npz against ideal k^2*Omega^2 spatiotemporal differentiator maps.")
     parser.add_argument("--npz", type=str, default="data/train_data.npz")
-    parser.add_argument("--target_lambdas", type=float, nargs="+", default=[900.0, 1000.0, 1100.0])
+    parser.add_argument(
+        "--target_lambdas",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Target wavelengths to screen. Default: use all dataset lambdas (typically 50 nm spaced).",
+    )
     parser.add_argument("--topk", type=int, default=10)
     parser.add_argument("--theta_zero_width_deg", type=float, default=2.5)
     parser.add_argument("--lambda_zero_width_nm", type=float, default=25.0)
-    parser.add_argument("--lambda_window_nm", type=float, default=100.0, help="Working wavelength window centered at lambda0.")
+    parser.add_argument("--lambda_window_nm", type=float, default=200.0, help="Working wavelength window centered at lambda0.")
     parser.add_argument("--theta_max_deg", type=float, default=None, help="Max abs(theta) used for ideal map and scoring window.")
-    parser.add_argument("--out_dir", type=str, default="data/st2_template_match")
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default=None,
+        help="Output directory. Default: create a new timestamped st2_template_match_* directory under data/.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     npz_path = resolve_from_root(args.npz)
-    out_dir = resolve_from_root(args.out_dir)
+    out_dir = resolve_default_out_dir(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     bundle = load_dataset(npz_path)
@@ -553,39 +632,29 @@ def main() -> None:
     thetas = bundle["thetas"]
     theta0_mask = theta_zero_band_mask(thetas, args.theta_zero_width_deg)
     theta_max_deg = float(args.theta_max_deg) if args.theta_max_deg is not None else float(np.max(np.abs(thetas)))
+    target_lambdas = [float(x) for x in (args.target_lambdas if args.target_lambdas is not None else lambdas.tolist())]
 
     global_summary = []
-    for target_lambda in args.target_lambdas:
+    for target_lambda in target_lambdas:
         lambda_idx = find_lambda_index(lambdas, target_lambda)
         actual_lambda = float(lambdas[lambda_idx])
         lambda0_mask = lambda_zero_band_mask(lambdas, actual_lambda, args.lambda_zero_width_nm)
         ideal_map, work_mask = ideal_st2_map(lambdas, thetas, actual_lambda, args.lambda_window_nm, theta_max_deg)
-        lambdas_dense, thetas_dense, ideal_dense = ideal_st2_map_dense(
-            actual_lambda,
-            args.lambda_window_nm,
-            theta_max_deg,
-        )
-
         wave_dir = out_dir / f"lambda_{int(round(actual_lambda))}nm"
         wave_dir.mkdir(parents=True, exist_ok=True)
 
         plt.figure(figsize=(5.4, 4.2))
         plt.imshow(
-            ideal_dense,
+            ideal_map,
             origin="lower",
             aspect="auto",
-            extent=[float(thetas_dense[0]), float(thetas_dense[-1]), float(lambdas_dense[0]), float(lambdas_dense[-1])],
+            extent=[float(thetas[0]), float(thetas[-1]), float(lambdas[0]), float(lambdas[-1])],
             cmap="turbo",
             vmin=0.0,
             vmax=1.0,
-            interpolation="bicubic",
+            interpolation="nearest",
         )
-        plt.axvline(0.0, color="w", ls="--", lw=0.8)
-        plt.axhline(actual_lambda, color="w", ls="--", lw=0.8)
-        plt.axvline(-theta_max_deg, color="w", ls=":", lw=0.8)
-        plt.axvline(theta_max_deg, color="w", ls=":", lw=0.8)
-        plt.axhline(actual_lambda - 0.5 * args.lambda_window_nm, color="w", ls=":", lw=0.8)
-        plt.axhline(actual_lambda + 0.5 * args.lambda_window_nm, color="w", ls=":", lw=0.8)
+        _draw_st2_guides(plt.gca(), actual_lambda, theta_max_deg, args.lambda_window_nm)
         plt.title(f"ideal ST2 map @ {int(round(actual_lambda))} nm")
         plt.xlabel("theta (deg)")
         plt.ylabel("lambda (nm)")
@@ -605,19 +674,29 @@ def main() -> None:
             merged["target_lambda_nm"] = actual_lambda
             ranking_rows.append(merged)
 
-        ranking_rows.sort(key=lambda row: float(row.get("score_total", -1.0)), reverse=True)
-        save_ranking_csv(wave_dir / "ranking.csv", ranking_rows)
+        merged_rows = _sort_rows(ranking_rows, "score_total")
+        tpp_rows = _sort_rows(_extract_channel_rows(ranking_rows, "tpp_score_total", "tpp_"), "score_total")
+        tss_rows = _sort_rows(_extract_channel_rows(ranking_rows, "tss_score_total", "tss_"), "score_total")
+
+        save_ranking_csv(wave_dir / "merged_ranking.csv", merged_rows)
+        save_ranking_csv(wave_dir / "tpp_ranking.csv", tpp_rows)
+        save_ranking_csv(wave_dir / "tss_ranking.csv", tss_rows)
+        save_ranking_csv(wave_dir / "ranking.csv", merged_rows)
 
         summary = {
             "target_lambda_nm": actual_lambda,
             "requested_lambda_nm": float(target_lambda),
-            "top_score": float(ranking_rows[0]["score_total"]) if ranking_rows else None,
-            "top_sample_idx": int(ranking_rows[0]["sample_idx"]) if ranking_rows else None,
-            "num_samples": len(ranking_rows),
+            "merged_top_score": float(merged_rows[0]["score_total"]) if merged_rows else None,
+            "merged_top_sample_idx": int(merged_rows[0]["sample_idx"]) if merged_rows else None,
+            "tpp_top_score": float(tpp_rows[0]["score_total"]) if tpp_rows else None,
+            "tpp_top_sample_idx": int(tpp_rows[0]["sample_idx"]) if tpp_rows else None,
+            "tss_top_score": float(tss_rows[0]["score_total"]) if tss_rows else None,
+            "tss_top_sample_idx": int(tss_rows[0]["sample_idx"]) if tss_rows else None,
+            "num_samples": len(merged_rows),
         }
         global_summary.append(summary)
 
-        for rank, row in enumerate(ranking_rows[: max(1, args.topk)], start=1):
+        for rank, row in enumerate(merged_rows[: max(1, args.topk)], start=1):
             sample_idx = int(row["sample_idx"])
             plot_candidate(
                 wave_dir / f"rank_{rank:03d}_sample_{sample_idx}.png",
@@ -638,7 +717,8 @@ def main() -> None:
         json.dump(
             {
                 "input_npz": str(npz_path),
-                "target_lambdas": [float(x) for x in args.target_lambdas],
+                "out_dir": str(out_dir),
+                "target_lambdas": target_lambdas,
                 "theta_zero_width_deg": float(args.theta_zero_width_deg),
                 "lambda_zero_width_nm": float(args.lambda_zero_width_nm),
                 "lambda_window_nm": float(args.lambda_window_nm),
@@ -654,8 +734,9 @@ def main() -> None:
     for item in global_summary:
         print(
             f"lambda={item['target_lambda_nm']:.1f}nm "
-            f"top_sample={item['top_sample_idx']} "
-            f"top_score={item['top_score']:.4f}"
+            f"merged={item['merged_top_sample_idx']}:{item['merged_top_score']:.4f} "
+            f"tpp={item['tpp_top_sample_idx']}:{item['tpp_top_score']:.4f} "
+            f"tss={item['tss_top_sample_idx']}:{item['tss_top_score']:.4f}"
         )
 
 

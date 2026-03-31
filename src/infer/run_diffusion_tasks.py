@@ -332,6 +332,8 @@ def run_case(
     weighted_err = []
     global_err = []
     task_scores = []
+    tpp_scores = []
+    tss_scores = []
     task_details = []
     for idx in range(samples.shape[0]):
         print(f"[task_infer-rcwa] {case.case_label} sample {idx + 1}/{samples.shape[0]}", flush=True)
@@ -359,70 +361,43 @@ def run_case(
         global_err.append(float(np.mean(np.abs(pred - target_raw))))
         details = task_score_details(case, pred, lambdas, thetas)
         task_details.append(details)
-        task_scores.append(float(details["task_score"]))
-        print(
-            f"[task_infer-score] {case.case_label} sample {idx + 1}/{samples.shape[0]} "
-            f"task_score={float(details['task_score']):.4f} weighted_err={float(weighted_err[-1]):.4f}",
-            flush=True,
-        )
+        if case.task_key == "st2":
+            tpp_scores.append(float(details["tpp_score_total"]))
+            tss_scores.append(float(details["tss_score_total"]))
+            print(
+                f"[task_infer-score] {case.case_label} sample {idx + 1}/{samples.shape[0]} "
+                f"tpp_score={float(details['tpp_score_total']):.4f} "
+                f"tss_score={float(details['tss_score_total']):.4f} "
+                f"weighted_err={float(weighted_err[-1]):.4f}",
+                flush=True,
+            )
+        else:
+            task_scores.append(float(details["task_score"]))
+            print(
+                f"[task_infer-score] {case.case_label} sample {idx + 1}/{samples.shape[0]} "
+                f"task_score={float(details['task_score']):.4f} weighted_err={float(weighted_err[-1]):.4f}",
+                flush=True,
+            )
 
     pred_raw = np.stack(rcwa_preds, axis=0).astype(np.float32)
     weighted_err_np = np.asarray(weighted_err, dtype=np.float32)
     global_err_np = np.asarray(global_err, dtype=np.float32)
-    task_scores_np = np.asarray(task_scores, dtype=np.float32)
-    rank_np = np.argsort(task_scores_np)[::-1]
-    topk_idx_np = rank_np[: min(args.topk, args.num_samples)]
 
     save_dir = case_output_dir(root_save_dir, case)
     save_dir.mkdir(parents=True, exist_ok=True)
 
     all_samples = samples.cpu().numpy()
-    topk_samples = all_samples[topk_idx_np]
-    topk_pred_raw = pred_raw[topk_idx_np]
 
     np.save(save_dir / "target_cond_raw.npy", target_raw)
     np.save(save_dir / "target_cond_norm.npy", target_norm)
     np.save(save_dir / "task_weight.npy", weight_np)
     np.save(save_dir / "all_samples.npy", all_samples)
     np.save(save_dir / "all_pred_cond_raw.npy", pred_raw)
-    np.save(save_dir / "task_scores.npy", task_scores_np)
     np.save(save_dir / "weighted_errors.npy", weighted_err_np)
     np.save(save_dir / "global_errors.npy", global_err_np)
-    np.save(save_dir / "rank_indices.npy", rank_np)
-    np.save(save_dir / "topk_indices.npy", topk_idx_np)
-    np.save(save_dir / "topk_samples.npy", topk_samples)
-    np.save(save_dir / "topk_pred_cond_raw.npy", topk_pred_raw)
     np.save(save_dir / "lambdas.npy", lambdas)
     np.save(save_dir / "thetas.npy", thetas)
-
-    save_case_visuals(save_dir, case, target_raw, all_samples, topk_samples, topk_pred_raw, lambdas, thetas)
     input_score = original_input_score(case, target_raw, lambdas, thetas)
-    if len(topk_idx_np):
-        best_details = task_details[int(topk_idx_np[0])]
-        plot_target_lambda_curves(
-            save_dir / "target_vs_top1_curves.png",
-            case,
-            target_raw,
-            pred_raw[int(topk_idx_np[0])],
-            thetas,
-            lambdas,
-            f"{case.case_label} target vs top1",
-            best_details,
-        )
-    plot_ranked_overview(
-        save_dir / f"top{len(topk_idx_np)}_overview.png",
-        case,
-        all_samples,
-        pred_raw,
-        target_raw,
-        lambdas,
-        thetas,
-        rank_np,
-        weighted_err_np,
-        global_err_np,
-        min(args.topk, len(rank_np)),
-    )
-
     summary = {
         "task_key": case.task_key,
         "task_label": case.task_label,
@@ -438,23 +413,169 @@ def run_case(
         "rcwa_orders": int(args.rcwa_orders),
         "eval_mode": args.eval_mode,
         "num_samples": int(args.num_samples),
-        "topk": int(len(topk_idx_np)),
         "original_input_score": input_score,
-        "best_task_score": float(task_scores_np[topk_idx_np[0]]) if len(topk_idx_np) else None,
-        "best_weighted_error": float(weighted_err_np[topk_idx_np[0]]) if len(topk_idx_np) else None,
-        "best_global_error": float(global_err_np[topk_idx_np[0]]) if len(topk_idx_np) else None,
-        "selected_rankings": [
-            {
-                "rank": int(r + 1),
-                "sample_rank_idx": int(topk_idx_np[r]),
-                "task_score": float(task_scores_np[topk_idx_np[r]]),
-                "weighted_error": float(weighted_err_np[topk_idx_np[r]]),
-                "global_error": float(global_err_np[topk_idx_np[r]]),
-                "task_details": task_details[int(topk_idx_np[r])],
-            }
-            for r in range(len(topk_idx_np))
-        ],
     }
+
+    if case.task_key == "st2":
+        tpp_scores_np = np.asarray(tpp_scores, dtype=np.float32)
+        tss_scores_np = np.asarray(tss_scores, dtype=np.float32)
+        tpp_rank_np = np.argsort(tpp_scores_np)[::-1]
+        tss_rank_np = np.argsort(tss_scores_np)[::-1]
+        tpp_topk_idx_np = tpp_rank_np[: min(args.topk, args.num_samples)]
+        tss_topk_idx_np = tss_rank_np[: min(args.topk, args.num_samples)]
+
+        np.save(save_dir / "tpp_scores.npy", tpp_scores_np)
+        np.save(save_dir / "tss_scores.npy", tss_scores_np)
+        np.save(save_dir / "tpp_rank_indices.npy", tpp_rank_np)
+        np.save(save_dir / "tss_rank_indices.npy", tss_rank_np)
+        np.save(save_dir / "tpp_topk_indices.npy", tpp_topk_idx_np)
+        np.save(save_dir / "tss_topk_indices.npy", tss_topk_idx_np)
+        np.save(save_dir / "tpp_topk_samples.npy", all_samples[tpp_topk_idx_np])
+        np.save(save_dir / "tss_topk_samples.npy", all_samples[tss_topk_idx_np])
+        np.save(save_dir / "tpp_topk_pred_cond_raw.npy", pred_raw[tpp_topk_idx_np])
+        np.save(save_dir / "tss_topk_pred_cond_raw.npy", pred_raw[tss_topk_idx_np])
+
+        if len(tpp_topk_idx_np):
+            plot_target_lambda_curves(
+                save_dir / "target_vs_top1_tpp_curves.png",
+                case,
+                target_raw,
+                pred_raw[int(tpp_topk_idx_np[0])],
+                thetas,
+                lambdas,
+                f"{case.case_label} target vs top1 tpp-ranked",
+                task_details[int(tpp_topk_idx_np[0])],
+            )
+            plot_ranked_overview(
+                save_dir / f"tpp_top{len(tpp_topk_idx_np)}_overview.png",
+                case,
+                all_samples,
+                pred_raw,
+                target_raw,
+                lambdas,
+                thetas,
+                tpp_rank_np,
+                weighted_err_np,
+                global_err_np,
+                min(args.topk, len(tpp_rank_np)),
+            )
+        if len(tss_topk_idx_np):
+            plot_target_lambda_curves(
+                save_dir / "target_vs_top1_tss_curves.png",
+                case,
+                target_raw,
+                pred_raw[int(tss_topk_idx_np[0])],
+                thetas,
+                lambdas,
+                f"{case.case_label} target vs top1 tss-ranked",
+                task_details[int(tss_topk_idx_np[0])],
+            )
+            plot_ranked_overview(
+                save_dir / f"tss_top{len(tss_topk_idx_np)}_overview.png",
+                case,
+                all_samples,
+                pred_raw,
+                target_raw,
+                lambdas,
+                thetas,
+                tss_rank_np,
+                weighted_err_np,
+                global_err_np,
+                min(args.topk, len(tss_rank_np)),
+            )
+
+        summary.update(
+            {
+                "topk": int(min(args.topk, args.num_samples)),
+                "best_tpp_score": float(tpp_scores_np[tpp_topk_idx_np[0]]) if len(tpp_topk_idx_np) else None,
+                "best_tpp_weighted_error": float(weighted_err_np[tpp_topk_idx_np[0]]) if len(tpp_topk_idx_np) else None,
+                "best_tpp_global_error": float(global_err_np[tpp_topk_idx_np[0]]) if len(tpp_topk_idx_np) else None,
+                "best_tss_score": float(tss_scores_np[tss_topk_idx_np[0]]) if len(tss_topk_idx_np) else None,
+                "best_tss_weighted_error": float(weighted_err_np[tss_topk_idx_np[0]]) if len(tss_topk_idx_np) else None,
+                "best_tss_global_error": float(global_err_np[tss_topk_idx_np[0]]) if len(tss_topk_idx_np) else None,
+                "tpp_rankings": [
+                    {
+                        "rank": int(r + 1),
+                        "sample_rank_idx": int(tpp_topk_idx_np[r]),
+                        "tpp_score": float(tpp_scores_np[tpp_topk_idx_np[r]]),
+                        "weighted_error": float(weighted_err_np[tpp_topk_idx_np[r]]),
+                        "global_error": float(global_err_np[tpp_topk_idx_np[r]]),
+                        "task_details": task_details[int(tpp_topk_idx_np[r])],
+                    }
+                    for r in range(len(tpp_topk_idx_np))
+                ],
+                "tss_rankings": [
+                    {
+                        "rank": int(r + 1),
+                        "sample_rank_idx": int(tss_topk_idx_np[r]),
+                        "tss_score": float(tss_scores_np[tss_topk_idx_np[r]]),
+                        "weighted_error": float(weighted_err_np[tss_topk_idx_np[r]]),
+                        "global_error": float(global_err_np[tss_topk_idx_np[r]]),
+                        "task_details": task_details[int(tss_topk_idx_np[r])],
+                    }
+                    for r in range(len(tss_topk_idx_np))
+                ],
+            }
+        )
+    else:
+        task_scores_np = np.asarray(task_scores, dtype=np.float32)
+        rank_np = np.argsort(task_scores_np)[::-1]
+        topk_idx_np = rank_np[: min(args.topk, args.num_samples)]
+        topk_samples = all_samples[topk_idx_np]
+        topk_pred_raw = pred_raw[topk_idx_np]
+
+        np.save(save_dir / "task_scores.npy", task_scores_np)
+        np.save(save_dir / "rank_indices.npy", rank_np)
+        np.save(save_dir / "topk_indices.npy", topk_idx_np)
+        np.save(save_dir / "topk_samples.npy", topk_samples)
+        np.save(save_dir / "topk_pred_cond_raw.npy", topk_pred_raw)
+
+        save_case_visuals(save_dir, case, target_raw, all_samples, topk_samples, topk_pred_raw, lambdas, thetas)
+        if len(topk_idx_np):
+            best_details = task_details[int(topk_idx_np[0])]
+            plot_target_lambda_curves(
+                save_dir / "target_vs_top1_curves.png",
+                case,
+                target_raw,
+                pred_raw[int(topk_idx_np[0])],
+                thetas,
+                lambdas,
+                f"{case.case_label} target vs top1",
+                best_details,
+            )
+        plot_ranked_overview(
+            save_dir / f"top{len(topk_idx_np)}_overview.png",
+            case,
+            all_samples,
+            pred_raw,
+            target_raw,
+            lambdas,
+            thetas,
+            rank_np,
+            weighted_err_np,
+            global_err_np,
+            min(args.topk, len(rank_np)),
+        )
+
+        summary.update(
+            {
+                "topk": int(len(topk_idx_np)),
+                "best_task_score": float(task_scores_np[topk_idx_np[0]]) if len(topk_idx_np) else None,
+                "best_weighted_error": float(weighted_err_np[topk_idx_np[0]]) if len(topk_idx_np) else None,
+                "best_global_error": float(global_err_np[topk_idx_np[0]]) if len(topk_idx_np) else None,
+                "selected_rankings": [
+                    {
+                        "rank": int(r + 1),
+                        "sample_rank_idx": int(topk_idx_np[r]),
+                        "task_score": float(task_scores_np[topk_idx_np[r]]),
+                        "weighted_error": float(weighted_err_np[topk_idx_np[r]]),
+                        "global_error": float(global_err_np[topk_idx_np[r]]),
+                        "task_details": task_details[int(topk_idx_np[r])],
+                    }
+                    for r in range(len(topk_idx_np))
+                ],
+            }
+        )
     with (save_dir / "summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     return summary

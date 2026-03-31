@@ -95,7 +95,7 @@ def build_case_weight(case: TaskCase, cond_ch: int, lambdas: np.ndarray, thetas:
         weight[: min(cond_ch, 2), lam_idx, :] = 1.0
         return weight
     if case.objective_key == "map_window_both":
-        lam_mask = np.abs(lambdas.astype(np.float64) - float(case.target_lambda_nm)) <= 50.0
+        lam_mask = np.abs(lambdas.astype(np.float64) - float(case.target_lambda_nm)) <= 100.0
         if not np.any(lam_mask):
             lam_mask[lam_idx] = True
         weight[: min(cond_ch, 2), lam_mask, :] = 1.0
@@ -232,6 +232,52 @@ def _robust_norm(x: np.ndarray) -> np.ndarray:
     return arr / max(float(np.max(np.abs(arr))), 1e-12)
 
 
+def _st2_corner_score(
+    spec_map: np.ndarray,
+    ideal_map: np.ndarray,
+    work_mask: np.ndarray,
+    lambdas_nm: np.ndarray,
+    thetas_deg: np.ndarray,
+    lambda0_nm: float,
+    hi_q: float = 0.90,
+    lo_q: float = 0.15,
+) -> dict[str, float]:
+    spec = _robust_norm(spec_map)
+    active = ideal_map[work_mask] if np.any(work_mask) else ideal_map.ravel()
+    hi_mask = work_mask & (ideal_map >= float(np.quantile(active, hi_q)))
+    lo_mask = work_mask & (ideal_map <= float(np.quantile(active, lo_q)))
+    hi_mean = float(np.mean(spec[hi_mask])) if np.any(hi_mask) else 0.0
+    lo_mean = float(np.mean(spec[lo_mask])) if np.any(lo_mask) else 0.0
+    contrast = float(np.clip((hi_mean - lo_mean) / max(hi_mean + lo_mean, 1e-8), 0.0, 1.0))
+    hi_score = float(np.clip(hi_mean, 0.0, 1.0))
+    theta_abs = np.abs(np.asarray(thetas_deg, dtype=np.float64))
+    lam_abs = np.abs(np.asarray(lambdas_nm, dtype=np.float64) - float(lambda0_nm))
+    active_lam = lam_abs[np.any(work_mask, axis=1)]
+    half_bw = float(np.max(active_lam)) if active_lam.size else 0.0
+    outer_lambda_thr = 0.5 * half_bw
+    outer_lambda_mask = lam_abs >= outer_lambda_thr
+    angle30_mask = theta_abs >= 30.0
+    angle40_mask = theta_abs >= 37.5
+    lobe30_region = work_mask & outer_lambda_mask[:, None] & angle30_mask[None, :]
+    lobe40_region = work_mask & outer_lambda_mask[:, None] & angle40_mask[None, :]
+    lobe30_mean = float(np.mean(spec[lobe30_region])) if np.any(lobe30_region) else 0.0
+    lobe40_mean = float(np.mean(spec[lobe40_region])) if np.any(lobe40_region) else 0.0
+    lobe30_score = float(np.clip(lobe30_mean, 0.0, 1.0))
+    lobe40_score = float(np.clip(lobe40_mean, 0.0, 1.0))
+    score = 0.30 * hi_score + 0.20 * contrast + 0.30 * lobe30_score + 0.20 * lobe40_score
+    return {
+        "score_corner_lobes": score,
+        "corner_lobe_hi_score": hi_score,
+        "corner_lobe_contrast": contrast,
+        "corner_lobe_30deg_score": lobe30_score,
+        "corner_lobe_40deg_score": lobe40_score,
+        "corner_lobe_30deg_mean": lobe30_mean,
+        "corner_lobe_40deg_mean": lobe40_mean,
+        "ideal_high_region_mean": hi_mean,
+        "ideal_low_region_mean": lo_mean,
+    }
+
+
 def _st2_channel_score(spec_map: np.ndarray, ideal_map: np.ndarray, work_mask: np.ndarray, lambdas_nm: np.ndarray, thetas_deg: np.ndarray, lambda0_nm: float) -> dict[str, float]:
     spec = _robust_norm(spec_map)
     theta0_mask = np.abs(thetas_deg) <= 2.5
@@ -257,8 +303,17 @@ def _st2_channel_score(spec_map: np.ndarray, ideal_map: np.ndarray, work_mask: n
     else:
         weighted_error_score = 0.0
         proj_corr = 0.0
-    total = 0.65 * zero_score + 0.25 * weighted_error_score + 0.10 * proj_corr
-    return {"score_total": total, "score_zero_lines": zero_score, "score_weighted_error": weighted_error_score, "score_projection": proj_corr}
+    corner = _st2_corner_score(spec_map, ideal_map, work_mask, lambdas_nm, thetas_deg, lambda0_nm)
+    aux_score = 0.5 * weighted_error_score + 0.5 * proj_corr
+    total = 0.50 * zero_score + 0.40 * float(corner["score_corner_lobes"]) + 0.10 * aux_score
+    return {
+        "score_total": total,
+        "score_zero_lines": zero_score,
+        "score_weighted_error": weighted_error_score,
+        "score_projection": proj_corr,
+        "score_auxiliary": aux_score,
+        **corner,
+    }
 
 
 def task_score_details(case: TaskCase, pred_raw: np.ndarray, lambdas: np.ndarray, thetas: np.ndarray) -> dict[str, float]:
@@ -317,7 +372,7 @@ def task_score_details(case: TaskCase, pred_raw: np.ndarray, lambdas: np.ndarray
 
     if case.task_key == "st2":
         actual_lambda = float(lambdas[lam_idx])
-        ideal_map, work_mask = _st2_ideal_map(lambdas.astype(np.float64), thetas.astype(np.float64), actual_lambda, 100.0, float(np.max(np.abs(thetas))))
+        ideal_map, work_mask = _st2_ideal_map(lambdas.astype(np.float64), thetas.astype(np.float64), actual_lambda, 200.0, float(np.max(np.abs(thetas))))
         tpp = _st2_channel_score(pred[0], ideal_map, work_mask, lambdas.astype(np.float64), thetas.astype(np.float64), actual_lambda)
         tss = _st2_channel_score(pred[1], ideal_map, work_mask, lambdas.astype(np.float64), thetas.astype(np.float64), actual_lambda)
         return {
@@ -328,6 +383,8 @@ def task_score_details(case: TaskCase, pred_raw: np.ndarray, lambdas: np.ndarray
             "score_zero_lines": 0.5 * (float(tpp["score_zero_lines"]) + float(tss["score_zero_lines"])),
             "score_weighted_error": 0.5 * (float(tpp["score_weighted_error"]) + float(tss["score_weighted_error"])),
             "score_projection": 0.5 * (float(tpp["score_projection"]) + float(tss["score_projection"])),
+            "score_corner_lobes": 0.5 * (float(tpp["score_corner_lobes"]) + float(tss["score_corner_lobes"])),
+            "score_auxiliary": 0.5 * (float(tpp["score_auxiliary"]) + float(tss["score_auxiliary"])),
         }
 
     raise ValueError(f"Unsupported task key: {case.task_key}")
