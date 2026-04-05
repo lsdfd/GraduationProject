@@ -31,18 +31,20 @@ from infer.task_library import (  # noqa: E402
     original_input_score,
     select_cases,
     task_score_details,
+    task_score_details_at_lambda,
 )
 from model.diffusion import GaussianDiffusion  # noqa: E402
 from model.models import ConditionalUNet  # noqa: E402
 
 
-def load_target_from_dataset(train_npz: Path, sample_idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_target_from_dataset(train_npz: Path, sample_idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     data = np.load(train_npz)
+    structure = np.asarray(data["structures"][sample_idx], dtype=np.float32)
     tpp = np.asarray(data["tpp_mag"][sample_idx], dtype=np.float32)
     tss = np.asarray(data["tss_mag"][sample_idx], dtype=np.float32)
     lambdas = np.asarray(data["lambdas"], dtype=np.float32)
     thetas = np.asarray(data["thetas"], dtype=np.float32)
-    return np.stack([tpp, tss], axis=0), lambdas, thetas
+    return structure, np.stack([tpp, tss], axis=0), lambdas, thetas
 
 
 def selected_pairs_from_weight(weight: np.ndarray) -> list[tuple[int, int]]:
@@ -75,7 +77,7 @@ def simulate_selected_map(
     rcwa_orders: int,
 ) -> np.ndarray:
     layer = structure.squeeze(0).squeeze(0)
-    pred = np.zeros((cond_ch, len(lambdas), len(thetas)), dtype=np.float32)
+    pred = np.full((cond_ch, len(lambdas), len(thetas)), np.nan, dtype=np.float32)
     for lam_idx, theta_idx in selected_pairs:
         out = torcwa_simulation(
             rcwa_physics_kwargs(float(lambdas[lam_idx]), float(thetas[theta_idx])),
@@ -102,16 +104,117 @@ def simulate_full_map(
     return simulate_selected_map(structure, cond_ch, lambdas, thetas, all_pairs, device, rcwa_orders)
 
 
+def simulate_lambda_rows(
+    structure: torch.Tensor,
+    cond_ch: int,
+    lambdas: np.ndarray,
+    thetas: np.ndarray,
+    lam_indices: list[int],
+    device: str,
+    rcwa_orders: int,
+) -> np.ndarray:
+    selected_pairs = [(int(lam_idx), theta_idx) for lam_idx in lam_indices for theta_idx in range(len(thetas))]
+    return simulate_selected_map(structure, cond_ch, lambdas, thetas, selected_pairs, device, rcwa_orders)
+
+
 def weighted_mae_numpy(pred: np.ndarray, target: np.ndarray, weight: np.ndarray) -> float:
-    denom = float(np.sum(weight))
-    if denom <= 1e-8:
-        return float(np.mean(np.abs(pred - target)))
-    return float(np.sum(np.abs(pred - target) * weight) / denom)
+    pred = np.asarray(pred, dtype=np.float32)
+    target = np.asarray(target, dtype=np.float32)
+    weight = np.asarray(weight, dtype=np.float32)
+    valid = np.isfinite(pred) & np.isfinite(target)
+    if float(np.sum(weight)) <= 1e-8:
+        if not np.any(valid):
+            return float("nan")
+        return float(np.mean(np.abs(pred[valid] - target[valid])))
+    valid &= weight > 0
+    if not np.any(valid):
+        return float("nan")
+    w = weight[valid]
+    return float(np.sum(np.abs(pred[valid] - target[valid]) * w) / np.sum(w))
 
 
 def normalized_row(row: np.ndarray) -> np.ndarray:
     row = np.asarray(row, dtype=np.float64)
-    return row / max(float(np.max(row)), 1e-8)
+    valid = np.isfinite(row)
+    if not np.any(valid):
+        return np.full_like(row, np.nan, dtype=np.float64)
+    scale = max(float(np.max(row[valid])), 1e-8)
+    out = np.full_like(row, np.nan, dtype=np.float64)
+    out[valid] = row[valid] / scale
+    return out
+
+
+def format_metric(value: float) -> str:
+    return "N/A" if not np.isfinite(value) else f"{float(value):.3f}"
+
+
+def second_like_curve(thetas: np.ndarray, order: int) -> np.ndarray:
+    thetas = np.asarray(thetas, dtype=np.float64)
+    tmax = float(np.max(np.abs(thetas)))
+    if tmax <= 0:
+        return np.zeros_like(thetas, dtype=np.float64)
+    kx = np.sin(np.deg2rad(thetas)) / np.sin(np.deg2rad(tmax))
+    x = np.abs(kx) ** order
+    return (x - x.min()) / max(float(x.max() - x.min()), 1e-8)
+
+
+def lowpass_curve(thetas: np.ndarray, sigma_deg: float) -> np.ndarray:
+    thetas = np.asarray(thetas, dtype=np.float64)
+    x = np.exp(-(thetas ** 2) / max(float(sigma_deg) ** 2, 1e-8))
+    return x / max(float(np.max(x)), 1e-8)
+
+
+def best_lowpass_sigma(target_row: np.ndarray, thetas: np.ndarray, candidates: tuple[float, ...] = (8.0, 12.0, 16.0)) -> float:
+    y = normalized_row(target_row)
+    valid = np.isfinite(y)
+    if not np.any(valid):
+        return float(candidates[0])
+    best_sigma = float(candidates[0])
+    best_err = float("inf")
+    for sigma in candidates:
+        ref = lowpass_curve(thetas, sigma)
+        err = float(np.mean(np.abs(y[valid] - ref[valid])))
+        if err < best_err:
+            best_err = err
+            best_sigma = float(sigma)
+    return best_sigma
+
+
+def ideal_curve_for_case(case: TaskCase, thetas: np.ndarray, target_row: np.ndarray | None = None) -> np.ndarray | None:
+    if case.task_key in {"p_second_order", "polarization_independent", "polarization_multiplexed"}:
+        return second_like_curve(thetas, 2)
+    if case.task_key == "fourth_order":
+        return second_like_curve(thetas, 4)
+    if case.task_key == "lowpass":
+        sigma = best_lowpass_sigma(target_row, thetas) if target_row is not None else 12.0
+        return lowpass_curve(thetas, sigma)
+    return None
+
+
+def use_raw_curve_display(case: TaskCase, channel_idx: int) -> bool:
+    return case.task_key == "polarization_multiplexed" and int(channel_idx) == 1
+
+
+def curve_display_row(case: TaskCase, channel_idx: int, row: np.ndarray) -> np.ndarray:
+    arr = np.asarray(row, dtype=np.float64)
+    if use_raw_curve_display(case, channel_idx):
+        out = np.full_like(arr, np.nan, dtype=np.float64)
+        valid = np.isfinite(arr)
+        out[valid] = arr[valid]
+        return out
+    return normalized_row(arr)
+
+
+def curve_ylim(case: TaskCase, channel_idx: int) -> tuple[float, float]:
+    if use_raw_curve_display(case, channel_idx):
+        return 0.0, 1.0
+    return -0.05, 1.05
+
+
+def curve_ylabel(case: TaskCase, channel_idx: int) -> str:
+    if use_raw_curve_display(case, channel_idx):
+        return "magnitude"
+    return "normalized magnitude"
 
 
 def plot_target_lambda_curves(
@@ -129,24 +232,30 @@ def plot_target_lambda_curves(
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.8), constrained_layout=True)
     names = [("tpp", 0, "#1f77b4"), ("tss", 1, "#ff7f0e")]
     for ax, (label, ch, color) in zip(axes, names):
-        target_row = normalized_row(target_raw[ch, lam_idx])
-        pred_row = normalized_row(pred_raw[ch, lam_idx])
+        target_row = curve_display_row(case, ch, target_raw[ch, lam_idx])
+        pred_row = curve_display_row(case, ch, pred_raw[ch, lam_idx])
+        ideal_row = ideal_curve_for_case(case, thetas, target_raw[ch, lam_idx])
         theta40 = float(thetas[idx40])
         target40_raw = float(target_raw[ch, lam_idx, idx40])
-        pred40_raw = float(pred_raw[ch, lam_idx, idx40])
+        pred40_raw = float(pred_raw[ch, lam_idx, idx40]) if np.isfinite(pred_raw[ch, lam_idx, idx40]) else float("nan")
         target40 = float(target_row[idx40])
-        pred40 = float(pred_row[idx40])
+        pred40 = float(pred_row[idx40]) if np.isfinite(pred_row[idx40]) else float("nan")
+        if ideal_row is not None:
+            ax.plot(thetas, ideal_row, color="#2ca02c", ls=":", lw=1.6, label="ideal")
         ax.plot(thetas, target_row, "k--", lw=1.6, label="target")
-        ax.plot(thetas, pred_row, lw=1.9, color=color, label="pred")
+        pred_valid = np.isfinite(pred_row)
+        if np.any(pred_valid):
+            ax.plot(thetas[pred_valid], pred_row[pred_valid], lw=1.9, color=color, label="pred")
         ax.axvline(theta40, color="0.5", ls=":", lw=1.0)
         ax.scatter([theta40], [target40], color="k", s=24, zorder=3)
-        ax.scatter([theta40], [pred40], color=color, s=24, zorder=3)
-        ax.set_ylim(-0.05, 1.05)
+        if np.isfinite(pred40):
+            ax.scatter([theta40], [pred40], color=color, s=24, zorder=3)
+        ax.set_ylim(*curve_ylim(case, ch))
         ax.set_xlabel("theta (deg)")
-        ax.set_ylabel("normalized magnitude")
+        ax.set_ylabel(curve_ylabel(case, ch))
         ax.set_title(
             f"{label} @ {float(case.target_lambda_nm):.0f}nm\n"
-            f"target40={target40_raw:.3f} pred40={pred40_raw:.3f}"
+            f"target40={target40_raw:.3f} pred40={format_metric(pred40_raw)}"
         )
         ax.grid(alpha=0.25)
         ax.legend(fontsize=8, loc="lower right")
@@ -160,16 +269,19 @@ def plot_target_lambda_curves(
             ha="left",
             va="bottom",
         )
-        ax.annotate(
-            f"40° pred={pred40_raw:.3f}",
-            xy=(theta40, pred40),
-            xytext=(8, -16),
-            textcoords="offset points",
-            fontsize=8,
-            color=color,
-            ha="left",
-            va="top",
-        )
+        if np.isfinite(pred40):
+            ax.annotate(
+                f"40° pred={pred40_raw:.3f}",
+                xy=(theta40, pred40),
+                xytext=(8, -16),
+                textcoords="offset points",
+                fontsize=8,
+                color=color,
+                ha="left",
+                va="top",
+            )
+        else:
+            ax.text(0.98, 0.03, "pred: not evaluated", transform=ax.transAxes, fontsize=8, color=color, ha="right", va="bottom")
         ax.text(
             0.02,
             0.03,
@@ -180,6 +292,188 @@ def plot_target_lambda_curves(
             va="bottom",
         )
     fig.suptitle(title, fontsize=12)
+    fig.savefig(out_png, dpi=180)
+    plt.close(fig)
+
+
+def plot_ideal_pred_curves(
+    out_png: Path,
+    case: TaskCase,
+    pred_raw: np.ndarray,
+    thetas: np.ndarray,
+    lambdas: np.ndarray,
+    title: str,
+    score_info: dict[str, float],
+) -> None:
+    if case.task_key == "st2":
+        return
+    lam_idx = int(np.argmin(np.abs(lambdas - float(case.target_lambda_nm))))
+    idx40 = int(np.argmin(np.abs(thetas - 40.0)))
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.8), constrained_layout=True)
+    names = [("tpp", 0, "#1f77b4"), ("tss", 1, "#ff7f0e")]
+    for ax, (label, ch, color) in zip(axes, names):
+        ideal_row = ideal_curve_for_case(case, thetas, pred_raw[ch, lam_idx])
+        pred_row = curve_display_row(case, ch, pred_raw[ch, lam_idx])
+        pred40_raw = float(pred_raw[ch, lam_idx, idx40]) if np.isfinite(pred_raw[ch, lam_idx, idx40]) else float("nan")
+        pred40 = float(pred_row[idx40]) if np.isfinite(pred_row[idx40]) else float("nan")
+        theta40 = float(thetas[idx40])
+        if ideal_row is not None:
+            ax.plot(thetas, ideal_row, color="#2ca02c", ls=":", lw=1.6, label="ideal")
+        pred_valid = np.isfinite(pred_row)
+        if np.any(pred_valid):
+            ax.plot(thetas[pred_valid], pred_row[pred_valid], lw=1.9, color=color, label="pred")
+        ax.axvline(theta40, color="0.5", ls=":", lw=1.0)
+        if np.isfinite(pred40):
+            ax.scatter([theta40], [pred40], color=color, s=24, zorder=3)
+        ax.set_ylim(*curve_ylim(case, ch))
+        ax.set_xlabel("theta (deg)")
+        ax.set_ylabel(curve_ylabel(case, ch))
+        ax.set_title(f"{label} @ {float(case.target_lambda_nm):.0f}nm\npred40={format_metric(pred40_raw)}")
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8, loc="lower right")
+        if np.isfinite(pred40):
+            ax.annotate(
+                f"40° pred={pred40_raw:.3f}",
+                xy=(theta40, pred40),
+                xytext=(8, -16),
+                textcoords="offset points",
+                fontsize=8,
+                color=color,
+                ha="left",
+                va="top",
+            )
+        else:
+            ax.text(0.98, 0.03, "pred: not evaluated", transform=ax.transAxes, fontsize=8, color=color, ha="right", va="bottom")
+        ax.text(0.02, 0.03, f"score={float(score_info.get('task_score', np.nan)):.3f}", transform=ax.transAxes, fontsize=8, ha="left", va="bottom")
+    fig.suptitle(title, fontsize=12)
+    fig.savefig(out_png, dpi=180)
+    plt.close(fig)
+
+
+def band_lambda_indices(case: TaskCase, lambdas: np.ndarray) -> list[int]:
+    targets = [float(case.target_lambda_nm) - 50.0, float(case.target_lambda_nm), float(case.target_lambda_nm) + 50.0]
+    return [int(np.argmin(np.abs(lambdas.astype(np.float64) - target))) for target in targets]
+
+
+def band_lambda_labels() -> tuple[str, str, str]:
+    return ("lambda_minus_50", "lambda_target", "lambda_plus_50")
+
+
+def build_band_score_payload(case: TaskCase, pred_raw: np.ndarray, lambdas: np.ndarray, thetas: np.ndarray, lam_indices: list[int]) -> dict[str, dict[str, float]]:
+    payload: dict[str, dict[str, float]] = {}
+    targets = [float(case.target_lambda_nm) - 50.0, float(case.target_lambda_nm), float(case.target_lambda_nm) + 50.0]
+    for key, target_nm, lam_idx in zip(band_lambda_labels(), targets, lam_indices):
+        details = dict(task_score_details_at_lambda(case, pred_raw, lambdas, thetas, lam_idx))
+        details["lambda_nm_target"] = float(target_nm)
+        details["lambda_nm_actual"] = float(lambdas[int(lam_idx)])
+        payload[key] = details
+    return payload
+
+
+def plot_band_curves(
+    out_png: Path,
+    case: TaskCase,
+    band_pred_rows: np.ndarray,
+    lambdas_nm: np.ndarray,
+    thetas: np.ndarray,
+    title: str,
+) -> None:
+    if case.task_key == "st2":
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(10.8, 3.8), constrained_layout=True)
+    names = [("tpp", 0), ("tss", 1)]
+    colors = ["#1f77b4", "#ff7f0e", "#d62728"]
+    ideal_row = ideal_curve_for_case(case, thetas, band_pred_rows[0, 0])
+    for ax, (label, ch) in zip(axes, names):
+        if ideal_row is not None:
+            ax.plot(thetas, ideal_row, color="#2ca02c", ls=":", lw=1.5, label="ideal")
+        for i, color in enumerate(colors):
+            pred_row = curve_display_row(case, ch, band_pred_rows[i, ch])
+            valid = np.isfinite(pred_row)
+            if np.any(valid):
+                ax.plot(thetas[valid], pred_row[valid], color=color, lw=1.8, label=f"{float(lambdas_nm[i]):.0f}nm")
+        ax.set_ylim(*curve_ylim(case, ch))
+        ax.set_xlabel("theta (deg)")
+        ax.set_ylabel(curve_ylabel(case, ch))
+        ax.set_title(label)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8, loc="lower right")
+    fig.suptitle(title, fontsize=12)
+    fig.savefig(out_png, dpi=180)
+    plt.close(fig)
+
+
+def plot_full_map_top3_overview(
+    out_png: Path,
+    case: TaskCase,
+    samples: np.ndarray,
+    pred_raw: np.ndarray,
+    target_raw: np.ndarray,
+    lambdas: np.ndarray,
+    thetas: np.ndarray,
+    ranked_idx: np.ndarray,
+    topn: int,
+) -> None:
+    topn = min(topn, len(ranked_idx))
+    if topn <= 0:
+        return
+    target_lambda = float(case.target_lambda_nm)
+    lam_idx = int(np.argmin(np.abs(lambdas - target_lambda)))
+    idx40 = int(np.argmin(np.abs(thetas - 40.0)))
+    extent = [float(thetas[0]), float(thetas[-1]), float(lambdas[0]), float(lambdas[-1])]
+    vmax_tpp = max(float(np.nanmax(target_raw[0])), float(np.nanmax(pred_raw[:, 0])) if pred_raw.size else 0.0, 1e-6)
+    vmax_tss = max(float(np.nanmax(target_raw[1])), float(np.nanmax(pred_raw[:, 1])) if pred_raw.size else 0.0, 1e-6)
+    cmap = plt.get_cmap("turbo").copy()
+    cmap.set_bad(color="#f2f2f2")
+    fig, axes = plt.subplots(topn, 5, figsize=(22.0, max(2.8 * topn, 6.0)), gridspec_kw={"width_ratios": [0.7, 1.0, 1.0, 1.0, 1.0]}, constrained_layout=True)
+    axes = np.atleast_2d(axes)
+    hm_tpp = hm_tss = None
+    ideal_row_tpp = ideal_curve_for_case(case, thetas, target_raw[0, lam_idx])
+    ideal_row_tss = ideal_curve_for_case(case, thetas, target_raw[1, lam_idx])
+    for r, idx in enumerate(ranked_idx[:topn]):
+        a_struct, a_hmtpp, a_curve_tpp, a_hmtss, a_curve_tss = axes[r]
+        i = int(idx)
+        a_struct.imshow(samples[i, 0], cmap="gray_r", interpolation="nearest", vmin=0.0, vmax=1.0)
+        a_struct.set_title(f"id={i}", fontsize=10)
+        a_struct.axis("off")
+        hm_tpp = a_hmtpp.imshow(np.ma.masked_invalid(pred_raw[r, 0]), cmap=cmap, aspect="auto", origin="lower", extent=extent, vmin=0.0, vmax=vmax_tpp, interpolation="bicubic")
+        a_hmtpp.axhline(target_lambda, color="w", ls="--", lw=1.0)
+        a_hmtpp.set_title("tpp full-map", fontsize=9)
+        a_hmtpp.set_xlabel("theta")
+        a_hmtpp.set_ylabel("lambda (nm)")
+        if ideal_row_tpp is not None:
+            a_curve_tpp.plot(thetas, ideal_row_tpp, color="#2ca02c", ls=":", lw=1.4, label="ideal")
+        pred_tpp_row = curve_display_row(case, 0, pred_raw[r, 0, lam_idx])
+        valid_tpp = np.isfinite(pred_tpp_row)
+        if np.any(valid_tpp):
+            a_curve_tpp.plot(thetas[valid_tpp], pred_tpp_row[valid_tpp], lw=1.8, color="#1f77b4", label="pred")
+        a_curve_tpp.set_ylim(*curve_ylim(case, 0))
+        a_curve_tpp.set_xlabel("theta")
+        a_curve_tpp.set_title(f"tpp pred40={format_metric(pred_raw[r, 0, lam_idx, idx40])}", fontsize=9)
+        a_curve_tpp.grid(alpha=0.25)
+        if r == 0:
+            a_curve_tpp.legend(fontsize=7, loc="lower right")
+        hm_tss = a_hmtss.imshow(np.ma.masked_invalid(pred_raw[r, 1]), cmap=cmap, aspect="auto", origin="lower", extent=extent, vmin=0.0, vmax=vmax_tss, interpolation="bicubic")
+        a_hmtss.axhline(target_lambda, color="w", ls="--", lw=1.0)
+        a_hmtss.set_title("tss full-map", fontsize=9)
+        a_hmtss.set_xlabel("theta")
+        if ideal_row_tss is not None:
+            a_curve_tss.plot(thetas, ideal_row_tss, color="#2ca02c", ls=":", lw=1.4, label="ideal")
+        pred_tss_row = curve_display_row(case, 1, pred_raw[r, 1, lam_idx])
+        valid_tss = np.isfinite(pred_tss_row)
+        if np.any(valid_tss):
+            a_curve_tss.plot(thetas[valid_tss], pred_tss_row[valid_tss], lw=1.8, color="#ff7f0e", label="pred")
+        a_curve_tss.set_ylim(*curve_ylim(case, 1))
+        a_curve_tss.set_xlabel("theta")
+        a_curve_tss.set_title(f"tss pred40={format_metric(pred_raw[r, 1, lam_idx, idx40])}", fontsize=9)
+        a_curve_tss.grid(alpha=0.25)
+        if r == 0:
+            a_curve_tss.legend(fontsize=7, loc="lower right")
+    fig.suptitle(f"{case.case_label} Top-{topn} full-spectrum RCWA", fontsize=12)
+    if hm_tpp is not None:
+        fig.colorbar(hm_tpp, ax=axes[:, 1].tolist(), shrink=0.9, pad=0.01, label="|tpp|")
+    if hm_tss is not None:
+        fig.colorbar(hm_tss, ax=axes[:, 3].tolist(), shrink=0.9, pad=0.01, label="|tss|")
     fig.savefig(out_png, dpi=180)
     plt.close(fig)
 
@@ -216,9 +510,13 @@ def plot_ranked_overview(
     )
     axes = np.atleast_2d(axes)
     hm_tpp = hm_tss = None
+    cmap = plt.get_cmap("turbo").copy()
+    cmap.set_bad(color="#f2f2f2")
 
-    target_tpp_row = normalized_row(target_raw[0, lam_idx])
-    target_tss_row = normalized_row(target_raw[1, lam_idx])
+    target_tpp_row = curve_display_row(case, 0, target_raw[0, lam_idx])
+    target_tss_row = curve_display_row(case, 1, target_raw[1, lam_idx])
+    ideal_tpp_row = ideal_curve_for_case(case, thetas, target_raw[0, lam_idx])
+    ideal_tss_row = ideal_curve_for_case(case, thetas, target_raw[1, lam_idx])
 
     for r, idx in enumerate(ranked_idx[:topk]):
         a_struct, a_hmtpp, a_curve_tpp, a_hmtss, a_curve_tss = axes[r]
@@ -227,35 +525,45 @@ def plot_ranked_overview(
         a_struct.set_title(f"id={i}", fontsize=10)
         a_struct.axis("off")
 
-        hm_tpp = a_hmtpp.imshow(pred_raw[i, 0], cmap="turbo", aspect="auto", origin="lower", extent=extent, vmin=0.0, vmax=vmax_tpp, interpolation="bicubic")
+        hm_tpp = a_hmtpp.imshow(np.ma.masked_invalid(pred_raw[i, 0]), cmap=cmap, aspect="auto", origin="lower", extent=extent, vmin=0.0, vmax=vmax_tpp, interpolation="bicubic")
         a_hmtpp.axhline(target_lambda, color="w", ls="--", lw=1.0)
-        a_hmtpp.set_title(f"werr={float(weighted_err[i]):.4f}\ngerr={float(global_err[i]):.4f}", fontsize=9)
+        a_hmtpp.set_title(f"werr={format_metric(weighted_err[i])}\ngerr={format_metric(global_err[i])}", fontsize=9)
         a_hmtpp.set_xlabel("theta")
         a_hmtpp.set_ylabel("lambda (nm)")
 
+        if ideal_tpp_row is not None:
+            a_curve_tpp.plot(thetas, ideal_tpp_row, color="#2ca02c", ls=":", lw=1.4, label="ideal")
         a_curve_tpp.plot(thetas, target_tpp_row, "k--", lw=1.5, label="target")
-        a_curve_tpp.plot(thetas, normalized_row(pred_raw[i, 0, lam_idx]), lw=1.8, color="#1f77b4", label="pred")
-        a_curve_tpp.set_ylim(-0.05, 1.05)
+        pred_tpp_row = curve_display_row(case, 0, pred_raw[i, 0, lam_idx])
+        pred_tpp_valid = np.isfinite(pred_tpp_row)
+        if np.any(pred_tpp_valid):
+            a_curve_tpp.plot(thetas[pred_tpp_valid], pred_tpp_row[pred_tpp_valid], lw=1.8, color="#1f77b4", label="pred")
+        a_curve_tpp.set_ylim(*curve_ylim(case, 0))
         a_curve_tpp.set_xlabel("theta")
         a_curve_tpp.set_title(
-            f"tpp t40={float(target_raw[0, lam_idx, idx40]):.3f} / p40={float(pred_raw[i, 0, lam_idx, idx40]):.3f}",
+            f"tpp t40={float(target_raw[0, lam_idx, idx40]):.3f} / p40={format_metric(pred_raw[i, 0, lam_idx, idx40])}",
             fontsize=9,
         )
         a_curve_tpp.grid(alpha=0.25)
         if r == 0:
             a_curve_tpp.legend(fontsize=7, loc="lower right")
 
-        hm_tss = a_hmtss.imshow(pred_raw[i, 1], cmap="turbo", aspect="auto", origin="lower", extent=extent, vmin=0.0, vmax=vmax_tss, interpolation="bicubic")
+        hm_tss = a_hmtss.imshow(np.ma.masked_invalid(pred_raw[i, 1]), cmap=cmap, aspect="auto", origin="lower", extent=extent, vmin=0.0, vmax=vmax_tss, interpolation="bicubic")
         a_hmtss.axhline(target_lambda, color="w", ls="--", lw=1.0)
         a_hmtss.set_title("tss", fontsize=9)
         a_hmtss.set_xlabel("theta")
 
+        if ideal_tss_row is not None:
+            a_curve_tss.plot(thetas, ideal_tss_row, color="#2ca02c", ls=":", lw=1.4, label="ideal")
         a_curve_tss.plot(thetas, target_tss_row, "k--", lw=1.5, label="target")
-        a_curve_tss.plot(thetas, normalized_row(pred_raw[i, 1, lam_idx]), lw=1.8, color="#ff7f0e", label="pred")
-        a_curve_tss.set_ylim(-0.05, 1.05)
+        pred_tss_row = curve_display_row(case, 1, pred_raw[i, 1, lam_idx])
+        pred_tss_valid = np.isfinite(pred_tss_row)
+        if np.any(pred_tss_valid):
+            a_curve_tss.plot(thetas[pred_tss_valid], pred_tss_row[pred_tss_valid], lw=1.8, color="#ff7f0e", label="pred")
+        a_curve_tss.set_ylim(*curve_ylim(case, 1))
         a_curve_tss.set_xlabel("theta")
         a_curve_tss.set_title(
-            f"tss t40={float(target_raw[1, lam_idx, idx40]):.3f} / p40={float(pred_raw[i, 1, lam_idx, idx40]):.3f}",
+            f"tss t40={float(target_raw[1, lam_idx, idx40]):.3f} / p40={format_metric(pred_raw[i, 1, lam_idx, idx40])}",
             fontsize=9,
         )
         a_curve_tss.grid(alpha=0.25)
@@ -274,6 +582,7 @@ def plot_ranked_overview(
 def save_case_visuals(
     save_dir: Path,
     case: TaskCase,
+    target_structure: np.ndarray,
     target_raw: np.ndarray,
     all_samples: np.ndarray,
     topk_samples: np.ndarray,
@@ -283,6 +592,7 @@ def save_case_visuals(
 ) -> None:
     vmax = float(np.nanmax(target_raw)) if np.isfinite(target_raw).any() else 1.0
     vmax = max(vmax, 1e-6)
+    plot_structure(save_dir / "target_structure.png", target_structure, f"{case.case_label} target structure")
     plot_map(save_dir / "target_tpp.png", target_raw, lambdas, thetas, f"{case.case_label} target tpp", vmax=vmax, channel_idx=0)
     plot_map(save_dir / "target_tss.png", target_raw, lambdas, thetas, f"{case.case_label} target tss", vmax=vmax, channel_idx=1)
     if len(all_samples):
@@ -309,6 +619,76 @@ def save_case_visuals(
         )
 
 
+def compute_topk_band_data(
+    case: TaskCase,
+    samples: torch.Tensor,
+    topk_idx_np: np.ndarray,
+    cond_channels: int,
+    lambdas: np.ndarray,
+    thetas: np.ndarray,
+    device: str,
+    rcwa_orders: int,
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, dict[str, float]]]]:
+    lam_indices = band_lambda_indices(case, lambdas)
+    topk_band_pred = np.full((len(topk_idx_np), len(lam_indices), cond_channels, len(thetas)), np.nan, dtype=np.float32)
+    band_scores: list[dict[str, dict[str, float]]] = []
+    for rank_pos, sample_idx in enumerate(topk_idx_np):
+        if case.task_key == "st2":
+            pred_for_score = simulate_full_map(
+                samples[int(sample_idx) : int(sample_idx) + 1],
+                cond_channels,
+                lambdas,
+                thetas,
+                device,
+                rcwa_orders,
+            )
+        else:
+            pred_for_score = simulate_lambda_rows(
+                samples[int(sample_idx) : int(sample_idx) + 1],
+                cond_channels,
+                lambdas,
+                thetas,
+                lam_indices,
+                device,
+                rcwa_orders,
+            )
+        for band_pos, lam_idx in enumerate(lam_indices):
+            topk_band_pred[rank_pos, band_pos] = pred_for_score[:, lam_idx, :]
+        band_scores.append(build_band_score_payload(case, pred_for_score, lambdas, thetas, lam_indices))
+    return topk_band_pred, np.asarray([float(lambdas[idx]) for idx in lam_indices], dtype=np.float32), band_scores
+
+
+def compute_top3_full_maps(
+    samples: torch.Tensor,
+    ranked_idx: np.ndarray,
+    cond_channels: int,
+    lambdas: np.ndarray,
+    thetas: np.ndarray,
+    device: str,
+    rcwa_orders: int,
+    existing_pred_raw: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    topn = min(3, len(ranked_idx))
+    top_idx = np.asarray(ranked_idx[:topn], dtype=np.int64)
+    if topn == 0:
+        return top_idx, np.empty((0, cond_channels, len(lambdas), len(thetas)), dtype=np.float32)
+    if existing_pred_raw is not None and existing_pred_raw.shape[1:] == (cond_channels, len(lambdas), len(thetas)) and np.isfinite(existing_pred_raw[top_idx]).all():
+        return top_idx, existing_pred_raw[top_idx].astype(np.float32)
+    preds = []
+    for sample_idx in top_idx:
+        preds.append(
+            simulate_full_map(
+                samples[int(sample_idx) : int(sample_idx) + 1],
+                cond_channels,
+                lambdas,
+                thetas,
+                device,
+                rcwa_orders,
+            )
+        )
+    return top_idx, np.stack(preds, axis=0).astype(np.float32)
+
+
 @torch.no_grad()
 def run_case(
     case: TaskCase,
@@ -319,7 +699,7 @@ def run_case(
     train_npz: Path,
     root_save_dir: Path,
 ) -> dict:
-    target_raw, lambdas, thetas = load_target_from_dataset(train_npz, case.sample_idx)
+    target_structure, target_raw, lambdas, thetas = load_target_from_dataset(train_npz, case.sample_idx)
     cond_channels = target_raw.shape[0]
     weight_np = build_case_weight(case, cond_channels, lambdas, thetas)
     selected_pairs = selected_pairs_from_weight(weight_np)
@@ -390,6 +770,7 @@ def run_case(
 
     np.save(save_dir / "target_cond_raw.npy", target_raw)
     np.save(save_dir / "target_cond_norm.npy", target_norm)
+    np.save(save_dir / "target_structure.npy", target_structure)
     np.save(save_dir / "task_weight.npy", weight_np)
     np.save(save_dir / "all_samples.npy", all_samples)
     np.save(save_dir / "all_pred_cond_raw.npy", pred_raw)
@@ -398,6 +779,17 @@ def run_case(
     np.save(save_dir / "lambdas.npy", lambdas)
     np.save(save_dir / "thetas.npy", thetas)
     input_score = original_input_score(case, target_raw, lambdas, thetas)
+    save_case_visuals(
+        save_dir,
+        case,
+        target_structure,
+        target_raw,
+        all_samples,
+        all_samples[:0],
+        pred_raw[:0],
+        lambdas,
+        thetas,
+    )
     summary = {
         "task_key": case.task_key,
         "task_label": case.task_label,
@@ -530,7 +922,7 @@ def run_case(
         np.save(save_dir / "topk_samples.npy", topk_samples)
         np.save(save_dir / "topk_pred_cond_raw.npy", topk_pred_raw)
 
-        save_case_visuals(save_dir, case, target_raw, all_samples, topk_samples, topk_pred_raw, lambdas, thetas)
+        save_case_visuals(save_dir, case, target_structure, target_raw, all_samples, topk_samples, topk_pred_raw, lambdas, thetas)
         if len(topk_idx_np):
             best_details = task_details[int(topk_idx_np[0])]
             plot_target_lambda_curves(
@@ -541,6 +933,15 @@ def run_case(
                 thetas,
                 lambdas,
                 f"{case.case_label} target vs top1",
+                best_details,
+            )
+            plot_ideal_pred_curves(
+                save_dir / "ideal_vs_top1_curves.png",
+                case,
+                pred_raw[int(topk_idx_np[0])],
+                thetas,
+                lambdas,
+                f"{case.case_label} ideal vs top1",
                 best_details,
             )
         plot_ranked_overview(
@@ -557,12 +958,62 @@ def run_case(
             min(args.topk, len(rank_np)),
         )
 
+        topk_band_pred, topk_band_lambdas_nm, topk_band_scores = compute_topk_band_data(
+            case,
+            samples,
+            topk_idx_np,
+            cond_channels,
+            lambdas,
+            thetas,
+            args.device,
+            args.rcwa_orders,
+        )
+        np.save(save_dir / "topk_band_pred_rows.npy", topk_band_pred)
+        np.save(save_dir / "topk_band_lambdas_nm.npy", topk_band_lambdas_nm)
+        with (save_dir / "topk_band_scores_3pt.json").open("w", encoding="utf-8") as f:
+            json.dump(topk_band_scores, f, ensure_ascii=False, indent=2)
+        if len(topk_idx_np):
+            plot_band_curves(
+                save_dir / "top1_band_curves_3pt.png",
+                case,
+                topk_band_pred[0],
+                topk_band_lambdas_nm,
+                thetas,
+                f"{case.case_label} top1 band curves",
+            )
+
+        top3_full_idx_np, top3_full_pred = compute_top3_full_maps(
+            samples,
+            rank_np,
+            cond_channels,
+            lambdas,
+            thetas,
+            args.device,
+            args.rcwa_orders,
+            existing_pred_raw=pred_raw if args.eval_mode == "full" else None,
+        )
+        np.save(save_dir / "top3_full_indices.npy", top3_full_idx_np)
+        np.save(save_dir / "top3_full_pred_cond_raw.npy", top3_full_pred)
+        plot_full_map_top3_overview(
+            save_dir / "top3_full_overview.png",
+            case,
+            all_samples,
+            top3_full_pred,
+            target_raw,
+            lambdas,
+            thetas,
+            top3_full_idx_np,
+            len(top3_full_idx_np),
+        )
+
         summary.update(
             {
                 "topk": int(len(topk_idx_np)),
                 "best_task_score": float(task_scores_np[topk_idx_np[0]]) if len(topk_idx_np) else None,
                 "best_weighted_error": float(weighted_err_np[topk_idx_np[0]]) if len(topk_idx_np) else None,
                 "best_global_error": float(global_err_np[topk_idx_np[0]]) if len(topk_idx_np) else None,
+                "top3_full_indices": [int(i) for i in top3_full_idx_np],
+                "topk_band_lambdas_nm": [float(x) for x in topk_band_lambdas_nm],
                 "selected_rankings": [
                     {
                         "rank": int(r + 1),
@@ -571,6 +1022,7 @@ def run_case(
                         "weighted_error": float(weighted_err_np[topk_idx_np[r]]),
                         "global_error": float(global_err_np[topk_idx_np[r]]),
                         "task_details": task_details[int(topk_idx_np[r])],
+                        "band_scores_3pt": topk_band_scores[r],
                     }
                     for r in range(len(topk_idx_np))
                 ],

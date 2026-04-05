@@ -23,6 +23,7 @@ class TaskCase:
 
 
 TASK_CASES: tuple[TaskCase, ...] = (
+    TaskCase("p_second_order", "p polarization second-order", "row_tpp", 2644, 800.0, "data/second_order_scores/tpp_mag_summary.json", "0800nm_id2644"),
     TaskCase("p_second_order", "p polarization second-order", "row_tpp", 4279, 1050.0, "data/second_order_scores/tpp_mag_summary.json", "1050nm_id4279"),
     TaskCase("p_second_order", "p polarization second-order", "row_tpp", 4637, 1100.0, "data/second_order_scores/tpp_mag_summary.json", "1100nm_id4637"),
     TaskCase("p_second_order", "p polarization second-order", "row_tpp", 212, 1100.0, "data/second_order_scores/tpp_mag_summary.json", "1100nm_id0212"),
@@ -316,9 +317,9 @@ def _st2_channel_score(spec_map: np.ndarray, ideal_map: np.ndarray, work_mask: n
     }
 
 
-def task_score_details(case: TaskCase, pred_raw: np.ndarray, lambdas: np.ndarray, thetas: np.ndarray) -> dict[str, float]:
+def task_score_details_at_lambda(case: TaskCase, pred_raw: np.ndarray, lambdas: np.ndarray, thetas: np.ndarray, lam_idx: int) -> dict[str, float]:
     pred = np.asarray(pred_raw, dtype=np.float32)
-    lam_idx = int(np.argmin(np.abs(lambdas.astype(np.float64) - float(case.target_lambda_nm))))
+    lam_idx = int(np.clip(int(lam_idx), 0, len(lambdas) - 1))
     idx40 = int(np.argmin(np.abs(thetas - 40.0)))
 
     if case.task_key == "p_second_order":
@@ -388,6 +389,11 @@ def task_score_details(case: TaskCase, pred_raw: np.ndarray, lambdas: np.ndarray
         }
 
     raise ValueError(f"Unsupported task key: {case.task_key}")
+
+
+def task_score_details(case: TaskCase, pred_raw: np.ndarray, lambdas: np.ndarray, thetas: np.ndarray) -> dict[str, float]:
+    lam_idx = int(np.argmin(np.abs(lambdas.astype(np.float64) - float(case.target_lambda_nm))))
+    return task_score_details_at_lambda(case, pred_raw, lambdas, thetas, lam_idx)
 
 
 def original_input_score(case: TaskCase, target_raw: np.ndarray, lambdas: np.ndarray, thetas: np.ndarray) -> dict[str, float]:

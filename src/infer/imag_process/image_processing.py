@@ -17,19 +17,20 @@ Usage
   python image_processing.py --from_kspace
 
   # 改偏振 / 改波长
-  python image_processing.py --ideal --pol x --lambda_nm 1000
+  python image_processing.py --ideal --pol x45 --lambda_nm 1000
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import json
+from PIL import Image
 from scipy.ndimage import binary_dilation
 from scipy.interpolate import interp1d, RegularGridInterpolator
 
@@ -39,6 +40,8 @@ from scipy.interpolate import interp1d, RegularGridInterpolator
 _HERE        = Path(__file__).resolve().parent
 PROJECT_ROOT = _HERE.parents[2]
 DATA_PATH    = PROJECT_ROOT / "data" / "train_data.npz"
+ASSETS_DIR   = _HERE / "assets"
+DEFAULT_THU_IMAGE_PATH = ASSETS_DIR / "fc728b57c87df1ef1c97e5fa08a6434f.png"
 
 # ---------------------------------------------------------------------------
 # Fixed constants
@@ -65,13 +68,40 @@ def _safe_tag(text: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text)
 
 
-def make_run_output_dir(src_label: str, lambda_nm: float, polarization: str, pattern: str) -> Path:
+def _task_tag_from_path(path: Path | None) -> str:
+    if path is None:
+        return "general"
+    parts = list(path.parts)
+    if "results" in parts:
+        i = parts.index("results")
+        if i + 2 < len(parts):
+            return _safe_tag(f"{parts[i + 1]}_{parts[i + 2]}")
+    if "run_kspace" in path.name:
+        stem = path.stem.replace("kspace_result_", "")
+        return _safe_tag(stem)
+    return _safe_tag(path.stem)
+
+
+def _results_case_dir_from_path(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    parts = list(path.parts)
+    if "results" not in parts:
+        return None
+    i = parts.index("results")
+    if i + 2 >= len(parts):
+        return None
+    return Path(*parts[: i + 3])
+
+
+def make_run_output_dir(base_dir: Path, task_tag: str, source_tag: str, lambda_nm: float, polarization: str, pattern: str) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    src_tag = _safe_tag(src_label)
+    task_tag = _safe_tag(task_tag)
+    src_tag = _safe_tag(source_tag)
     pol_tag = _safe_tag(polarization)
     pattern_tag = _safe_tag(pattern)
     lam_tag = f"{int(round(lambda_nm))}nm"
-    out_dir = _HERE / f"run_{src_tag}_{lam_tag}_{pol_tag}_{pattern_tag}_{stamp}"
+    out_dir = base_dir / f"run_imaging_{task_tag}_{lam_tag}_{src_tag}_{pol_tag}_{pattern_tag}_{stamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 
@@ -224,54 +254,110 @@ def _draw_rect(img: np.ndarray, x0: int, x1: int, y0: int, y1: int, value: float
     img[max(0, y0):min(img.shape[0], y1), max(0, x0):min(img.shape[1], x1)] = value
 
 
-def build_input_image(pattern: str) -> np.ndarray:
+def build_builtin_input(pattern: str) -> np.ndarray:
     img = np.zeros((NY, NX), dtype=np.float64)
     cx, cy = NX // 2, NY // 2
 
-    # 保留原始白色方块，便于和历史结果直接对比。
-    sq = min(NX, NY) // 16
-    hs = sq // 2
-    _draw_rect(img, cx - hs, cx + hs, cy - hs, cy + hs)
-
-    if pattern in {"thu", "square_thu"}:
-        stroke = max(14, NX // 26)
-        letter_h = max(120, NY // 2)
-        letter_w = max(52, NX // 9)
-        gap = max(18, NX // 30)
-        margin = max(20, NX // 18)
-        top = cy - letter_h // 2
-        bottom = top + letter_h
-        total_w = 3 * letter_w + 2 * gap
-        left_t = cx - total_w // 2
-        left_h = left_t + letter_w + gap
-        left_u = left_h + letter_w + gap
-
-        # T
-        _draw_rect(img, left_t, left_t + letter_w, top, top + stroke)
-        _draw_rect(img, left_t + letter_w // 2 - stroke // 2, left_t + letter_w // 2 + (stroke + 1) // 2, top, bottom)
-
-        # H
-        _draw_rect(img, left_h, left_h + stroke, top, bottom)
-        _draw_rect(img, left_h + letter_w - stroke, left_h + letter_w, top, bottom)
-        _draw_rect(img, left_h, left_h + letter_w, cy - stroke // 2, cy + (stroke + 1) // 2)
-
-        # U
-        _draw_rect(img, left_u, left_u + stroke, top, bottom - margin)
-        _draw_rect(img, left_u + letter_w - stroke, left_u + letter_w, top, bottom - margin)
-        _draw_rect(img, left_u, left_u + letter_w, bottom - stroke, bottom)
+    if pattern in {"square", "square_thu"}:
+        sq = min(NX, NY) // 16
+        hs = sq // 2
+        _draw_rect(img, cx - hs, cx + hs, cy - hs, cy + hs)
 
     return img
+
+
+def _auto_binarize_mask(gray: np.ndarray) -> np.ndarray:
+    values = gray.ravel()
+    if np.allclose(values.min(), values.max()):
+        raise ValueError("输入图片亮度几乎恒定，无法区分黑底和白字。")
+
+    hist, edges = np.histogram(values, bins=256, range=(0.0, 1.0))
+    total = values.size
+    sum_total = np.dot(hist, 0.5 * (edges[:-1] + edges[1:]))
+    sum_bg = 0.0
+    weight_bg = 0.0
+    best_var = -1.0
+    threshold = 0.5
+
+    for idx, count in enumerate(hist):
+        weight_bg += count
+        if weight_bg == 0 or weight_bg == total:
+            sum_bg += count * (0.5 * (edges[idx] + edges[idx + 1]))
+            continue
+        bin_center = 0.5 * (edges[idx] + edges[idx + 1])
+        sum_bg += count * bin_center
+        mean_bg = sum_bg / weight_bg
+        weight_fg = total - weight_bg
+        mean_fg = (sum_total - sum_bg) / weight_fg
+        between = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+        if between > best_var:
+            best_var = between
+            threshold = bin_center
+
+    mask = gray >= threshold
+    fill_ratio = float(np.mean(mask))
+    if fill_ratio < 1e-4 or fill_ratio > 0.9999:
+        raise ValueError(
+            f"自动阈值失败，白字区域占比={fill_ratio:.4f}，请检查图片是否为黑底白字。"
+        )
+    return mask.astype(np.float64)
+
+
+def load_image_input(image_path: Path, nx: int, ny: int) -> np.ndarray:
+    if not image_path.exists():
+        raise FileNotFoundError(f"找不到输入图片：{image_path}")
+    with Image.open(image_path) as pil_img:
+        rgba_src = pil_img.convert("RGBA")
+        src_w, src_h = rgba_src.size
+        scale = min(nx / src_w, ny / src_h)
+        resized_w = max(1, int(round(src_w * scale)))
+        resized_h = max(1, int(round(src_h * scale)))
+        rgba_resized = rgba_src.resize((resized_w, resized_h), Image.Resampling.LANCZOS)
+        rgba = Image.new("RGBA", (nx, ny), (0, 0, 0, 255))
+        off_x = (nx - resized_w) // 2
+        off_y = (ny - resized_h) // 2
+        rgba.paste(rgba_resized, (off_x, off_y), rgba_resized)
+    arr = np.asarray(rgba, dtype=np.float32) / 255.0
+    rgb = arr[..., :3]
+    alpha = arr[..., 3:4]
+    rgb_on_black = rgb * alpha
+    gray = 0.2126 * rgb_on_black[..., 0] + 0.7152 * rgb_on_black[..., 1] + 0.0722 * rgb_on_black[..., 2]
+    return _auto_binarize_mask(gray)
+
+
+def build_input_image(pattern: str, input_image: str | None = None) -> tuple[np.ndarray, str]:
+    source_desc = pattern
+    builtin = build_builtin_input(pattern)
+
+    image_path: Path | None = None
+    if input_image:
+        image_path = Path(input_image)
+        if not image_path.is_absolute():
+            image_path = PROJECT_ROOT / image_path
+        source_desc = f"{pattern} + {image_path.name}" if pattern == "square_thu" else image_path.name
+    elif pattern in {"thu", "square_thu"}:
+        image_path = DEFAULT_THU_IMAGE_PATH
+        source_desc = f"{pattern} + {image_path.name}" if pattern == "square_thu" else image_path.name
+
+    if image_path is None:
+        return builtin, source_desc
+
+    image_mask = load_image_input(image_path, NX, NY)
+    if pattern == "square_thu":
+        return np.maximum(builtin, image_mask), source_desc
+    return image_mask, source_desc
 
 def run_fourier_optics(T_ss: np.ndarray, T_pp: np.ndarray,
                        e_in: np.ndarray,
                        KX: np.ndarray, KY: np.ndarray,
                        pattern: str,
-                       K0: float) -> tuple[np.ndarray, np.ndarray]:
+                       K0: float,
+                       input_image: str | None = None) -> tuple[np.ndarray, np.ndarray, str]:
     """
     角谱法 Jones 矩阵仿真。
-    返回 (I_out [NY,NX], I_in [NY,NX])。
+    返回 (I_out [NY,NX], I_in [NY,NX], input_label)。
     """
-    I_in = build_input_image(pattern)
+    I_in, input_label = build_input_image(pattern, input_image=input_image)
     f_in        = np.sqrt(I_in)
 
     # k 空间角度
@@ -303,7 +389,7 @@ def run_fourier_optics(T_ss: np.ndarray, T_pp: np.ndarray,
     E_x_sp = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(E_x_out)))
     E_y_sp = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(E_y_out)))
     I_out  = np.abs(E_x_sp)**2 + np.abs(E_y_sp)**2
-    return I_out, f_in
+    return I_out, I_in, input_label
 
 
 # ===========================================================================
@@ -311,50 +397,25 @@ def run_fourier_optics(T_ss: np.ndarray, T_pp: np.ndarray,
 # ===========================================================================
 
 def plot_results(I_in: np.ndarray, I_out: np.ndarray,
-                 T_ss: np.ndarray, T_pp: np.ndarray,
-                 KX: np.ndarray, K_MAX: float,
-                 lambda_nm: float, polarization: str, pattern: str,
-                 edge_mask: np.ndarray, metrics: dict[str, float],
-                 save_path: Path) -> None:
-    roi  = slice(150, 352)
-    fig, axes = plt.subplots(1, 4, figsize=(18, 5))
+                 lambda_nm: float, polarization: str, pattern: str, input_label: str,
+                 metrics: dict[str, float], save_path: Path) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.8))
 
-    # 输入图像
-    im0 = axes[0].imshow(I_in[roi, roi], cmap="gray", origin="upper")
-    axes[0].set_title(f"Input image ({pattern})")
+    # 仅保留输入图和输出图，结果页更聚焦。
+    im0 = axes[0].imshow(I_in, cmap="gray", origin="upper", vmin=0.0, vmax=1.0)
+    axes[0].set_title(f"Input image ({input_label})")
     axes[0].set_xlabel("x (pixel)")
     axes[0].set_ylabel("y (pixel)")
     plt.colorbar(im0, ax=axes[0])
 
-    # 期望边缘区域
-    im_edge = axes[1].imshow(edge_mask[roi, roi].astype(float), cmap="viridis", origin="upper", vmin=0.0, vmax=1.0)
-    axes[1].set_title("Expected edge region")
+    # 输出强度
+    vmax = float(np.percentile(I_out, 99)) or 1.0
+    im1  = axes[1].imshow(I_out, cmap="inferno",
+                           origin="upper", vmin=0, vmax=vmax)
+    axes[1].set_title(f"Output intensity  (pol={polarization})")
     axes[1].set_xlabel("x (pixel)")
     axes[1].set_ylabel("y (pixel)")
-    plt.colorbar(im_edge, ax=axes[1])
-
-    # 输出强度
-    vmax = float(np.percentile(I_out[roi, roi], 99)) or 1.0
-    im1  = axes[2].imshow(I_out[roi, roi], cmap="inferno",
-                           origin="upper", vmin=0, vmax=vmax)
-    axes[2].set_title(f"Output intensity  (pol={polarization})")
-    axes[2].set_xlabel("x (pixel)")
-    axes[2].set_ylabel("y (pixel)")
-    plt.colorbar(im1, ax=axes[2])
-
-    # 传递函数截面（沿 kx，归一化到 k_max）
-    half    = NX // 2
-    kx_norm = KX[NY // 2, half:] / K_MAX
-    axes[3].plot(kx_norm, T_ss[NY // 2, half:], "b-",  lw=1.5, label=r"$|t_{ss}|$")
-    axes[3].plot(kx_norm, T_pp[NY // 2, half:], "r--", lw=1.5, label=r"$|t_{pp}|$")
-    axes[3].axvline(1.0, color="gray", lw=0.8, ls=":", label="NA boundary")
-    axes[3].set_xlabel(r"$k_x\,/\,k_\mathrm{max}$")
-    axes[3].set_ylabel("Transmission amplitude")
-    axes[3].set_xlim([0, 1.3])
-    axes[3].set_ylim([0, None])
-    axes[3].legend()
-    axes[3].grid(True, alpha=0.4)
-    axes[3].set_title("Transfer function (kx cross-section)")
+    plt.colorbar(im1, ax=axes[1])
 
     fig.suptitle(
         f"Fourier optics simulation  |  "
@@ -378,9 +439,9 @@ def plot_results(I_in: np.ndarray, I_out: np.ndarray,
 
 def main():
     parser = argparse.ArgumentParser(description="Fourier optics imaging simulation")
-    parser.add_argument("--pol",         default="x",
+    parser.add_argument("--pol",         default="x45",
                         choices=list(POL_MAP.keys()),
-                        help="入射偏振（默认 x = p 偏振）")
+                        help="入射偏振（默认 x45，更适合观察较均衡的方向响应）")
     parser.add_argument("--lambda_nm",   type=float, default=1000.0,
                         help="工作波长 nm（默认 1000）")
     parser.add_argument("--ideal",       action="store_true",
@@ -399,6 +460,8 @@ def main():
                         help="输出 PNG 路径；不指定时自动新建结果文件夹")
     parser.add_argument("--pattern",     default="square_thu", choices=PATTERN_CHOICES,
                         help="输入图案：square / thu / square_thu（默认 square_thu）")
+    parser.add_argument("--input_image", default=None,
+                        help="输入图片路径（PNG/JPG）；指定后优先使用图片像素生成输入图")
     args = parser.parse_args()
 
     # --- 波长相关参数 -------------------------------------------------------
@@ -418,6 +481,9 @@ def main():
     if args.ideal:
         T_ss, T_pp = make_ideal_transfer(KX, KY, K_MAX)
         src_label  = "ideal  T = (k_rho / k_max)²"
+        task_tag = "ideal"
+        source_tag = "ideal_laplacian"
+        output_base_dir = _HERE
 
     elif args.from_kspace:
         npz_path = Path(args.kspace_npz) if args.kspace_npz else latest_kspace_npz()
@@ -429,6 +495,12 @@ def main():
             sys.exit(1)
         T_ss, T_pp = load_from_kspace(npz_path, KX, KY, K0, K_MAX)
         src_label  = f"kspace: {npz_path.name}"
+        with np.load(npz_path) as d:
+            structure_source = str(d["structure_source"][0]) if "structure_source" in d.files and len(d["structure_source"]) else ""
+        structure_source_path = Path(structure_source) if structure_source else None
+        task_tag = _task_tag_from_path(structure_source_path) if structure_source else _task_tag_from_path(npz_path)
+        source_tag = "from_kspace"
+        output_base_dir = _results_case_dir_from_path(structure_source_path) or _HERE
 
     elif args.from_infer:
         if args.infer_dir is None:
@@ -443,18 +515,26 @@ def main():
         T_ss = build_2d_transfer(t_ss_1d, KX, KY, K0, K_MAX)
         T_pp = build_2d_transfer(t_pp_1d, KX, KY, K0, K_MAX)
         src_label = f"infer: {Path(args.infer_dir).name}"
+        task_tag = _task_tag_from_path(Path(args.infer_dir))
+        source_tag = f"infer_{Path(args.infer_dir).name}"
+        output_base_dir = _results_case_dir_from_path(Path(args.infer_dir)) or _HERE
 
     else:
         t_ss_1d, t_pp_1d = load_from_training(args.sample, lam_idx)
         T_ss = build_2d_transfer(t_ss_1d, KX, KY, K0, K_MAX)
         T_pp = build_2d_transfer(t_pp_1d, KX, KY, K0, K_MAX)
         src_label = f"train sample {args.sample}"
+        task_tag = "train"
+        source_tag = f"sample_{args.sample}"
+        output_base_dir = _HERE
 
     print(f"Source : {src_label}")
 
     # --- 仿真 ---------------------------------------------------------------
     e_in  = POL_MAP[args.pol]
-    I_out, I_in = run_fourier_optics(T_ss, T_pp, e_in, KX, KY, args.pattern, K0)
+    I_out, I_in, input_label = run_fourier_optics(
+        T_ss, T_pp, e_in, KX, KY, args.pattern, K0, input_image=args.input_image
+    )
     edge_mask = edge_mask_from_input(I_in)
     metrics = compute_imaging_metrics(I_in, I_out, edge_mask)
     print(f"[metrics] eta_peak={metrics['eta_peak']:.6f} eta_avg={metrics['eta_avg']:.6f} edge_pixels={metrics['edge_pixels']}")
@@ -464,12 +544,11 @@ def main():
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
     else:
-        run_dir = make_run_output_dir(src_label, lambda_nm, args.pol, args.pattern)
+        run_dir = make_run_output_dir(output_base_dir, task_tag, source_tag, lambda_nm, args.pol, args.pattern)
         out_path = run_dir / "imaging_result.png"
         save_metrics(run_dir / "metrics.json", metrics)
         print(f"[output_dir] {run_dir}")
-    plot_results(I_in, I_out, T_ss, T_pp, KX, K_MAX,
-                 lambda_nm, args.pol, args.pattern, edge_mask, metrics, out_path)
+    plot_results(I_in, I_out, lambda_nm, args.pol, args.pattern, input_label, metrics, out_path)
 
 
 if __name__ == "__main__":

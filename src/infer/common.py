@@ -472,6 +472,8 @@ def rcwa_second_order_metrics_target_lambda(
 
 def plot_map(path: Path, cond: np.ndarray, lambdas: np.ndarray, thetas: np.ndarray, title: str, vmax: float, channel_idx: int = 0):
     img = cond if cond.ndim == 2 else cond[channel_idx]
+    img = np.asarray(img, dtype=np.float32)
+    masked = np.ma.masked_invalid(img)
     if len(lambdas) == 1:
         half_step = 5.0
         y0 = float(lambdas[0] - half_step)
@@ -479,12 +481,14 @@ def plot_map(path: Path, cond: np.ndarray, lambdas: np.ndarray, thetas: np.ndarr
     else:
         y0 = float(lambdas[0])
         y1 = float(lambdas[-1])
+    cmap = plt.get_cmap("turbo").copy()
+    cmap.set_bad(color="#f2f2f2")
     plt.figure(figsize=(5, 4))
     plt.imshow(
-        img,
+        masked,
         aspect="auto",
         origin="lower",
-        cmap="turbo",
+        cmap=cmap,
         extent=[float(thetas[0]), float(thetas[-1]), y0, y1],
         vmin=0.0,
         vmax=vmax,
@@ -501,7 +505,7 @@ def plot_map(path: Path, cond: np.ndarray, lambdas: np.ndarray, thetas: np.ndarr
 def plot_structure(path: Path, x: np.ndarray, title: str):
     img = x.squeeze()
     plt.figure(figsize=(4, 4))
-    plt.imshow(img, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
+    plt.imshow(img, cmap="gray_r", vmin=0.0, vmax=1.0, interpolation="nearest")
     plt.title(title)
     plt.axis("off")
     plt.tight_layout()
