@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import RegularGridInterpolator
 import os
 
+sample_idx = 4928
+
 # Sample 4928 table
 thetas_full = np.array([-40,-35,-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30,35,40], dtype=float)
 lams_full = np.array([800,850,900,950,1000,1050,1100,1150,1200,1250,1300], dtype=float)
@@ -134,7 +136,98 @@ def save_panel(data, path, title, vmax=None):
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
 
+
+def save_lambda_theta_panel(data, path, title, lambdas_dense, thetas_dense):
+    plt.figure(figsize=(6, 5))
+    im = plt.imshow(
+        data,
+        cmap="RdBu_r",
+        aspect="auto",
+        origin="lower",
+        extent=[thetas_dense.min(), thetas_dense.max(), lambdas_dense.min(), lambdas_dense.max()],
+        interpolation="bicubic",
+    )
+    plt.xlabel("theta (deg)")
+    plt.ylabel("lambda (nm)")
+    plt.title(title)
+    plt.colorbar(im, label="T")
+    plt.tight_layout()
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close()
+
+
+def save_structure_panel(data, path, title):
+    plt.figure(figsize=(5, 5))
+    plt.imshow(data, cmap="gray_r", vmin=0.0, vmax=1.0, interpolation="nearest")
+    plt.title(title)
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close()
+
+
+def save_grouped_overview(path, x_fig3, x_fig4, t_axis, rows):
+    fig, axes = plt.subplots(2, 3, figsize=(14, 9), constrained_layout=True)
+    col_titles = ["Input", "Ideal", "Sample"]
+    x_axes = [x_fig3, x_fig3, x_fig3, x_fig4, x_fig4, x_fig4]
+    flat_axes = axes.ravel()
+
+    for ax, title in zip(axes[0], col_titles):
+        ax.set_title(title, fontsize=16, pad=10)
+
+    for idx, data_row in enumerate(rows):
+        for jdx, data in enumerate(data_row):
+            ax = axes[idx, jdx]
+            x_local = x_axes[idx * 3 + jdx]
+            vmax = 1.0 if jdx == 0 else np.quantile(data, 0.999)
+            im = ax.imshow(
+                data,
+                aspect="auto",
+                origin="lower",
+                extent=[x_local.min(), x_local.max(), t_axis.min(), t_axis.max()],
+                vmax=vmax,
+            )
+            ax.set_xlabel("x / λ0")
+            ax.set_ylabel("t / T0")
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
 outdir = "."
+
+thetas_dense = np.linspace(theta_min, theta_max, 401)
+lambdas_dense = np.linspace(lam_min, lam_max, 401)
+Ll, Th = np.meshgrid(lambdas_dense, thetas_dense, indexing="ij")
+pts_dense = np.stack([Ll.ravel(), Th.ravel()], axis=-1)
+T_lambda_theta_dense = interp_T(pts_dense).reshape(Ll.shape)
+u_dense = lambda0_nm / Ll - 1.0
+p_dense = (1.0 + u_dense) * np.sin(np.deg2rad(Th))
+T_ideal_lambda_theta_dense = T_ideal_pu(p_dense, u_dense)
+
+bundle = np.load("data/train_data_20000.npz")
+structure4928 = bundle["structures"][sample_idx].astype(float)
+
+save_lambda_theta_panel(
+    T_lambda_theta_dense,
+    os.path.join(outdir, "sample4928_lambda_theta_window_interpolated.png"),
+    "Sample 4928 interpolated T(lambda, theta)",
+    lambdas_dense,
+    thetas_dense,
+)
+save_lambda_theta_panel(
+    T_ideal_lambda_theta_dense,
+    os.path.join(outdir, "sample4928_lambda_theta_window_ideal.png"),
+    "Sample 4928 ideal T(lambda, theta)",
+    lambdas_dense,
+    thetas_dense,
+)
+save_structure_panel(
+    structure4928,
+    os.path.join(outdir, "sample4928_structure.png"),
+    "Sample 4928 structure",
+)
+
 save_panel(input1, os.path.join(outdir, "sample4928_fig3a_input_fixed_segments.png"),
            "Fig. 3(a)-style input: fixed segments with time switching")
 save_panel(I1_raw, os.path.join(outdir, "sample4928_fig3b_raw_output_fixed_segments.png"),
@@ -214,6 +307,9 @@ def interp_at(lam, theta):
 
 u_min = lambda0_nm / lam_max - 1.0
 u_max = lambda0_nm / lam_min - 1.0
+p_support = max(abs(np.sin(np.deg2rad(theta_min)) * (1 + u_min)),
+                abs(np.sin(np.deg2rad(theta_max)) * (1 + u_max)))
+u_scale = max(abs(u_min), abs(u_max))
 
 p_axis = np.linspace(np.sin(np.deg2rad(theta_min)) * (1 + u_min),
                      np.sin(np.deg2rad(theta_max)) * (1 + u_max), 2600)
@@ -221,6 +317,18 @@ betas = np.linspace(0.001, 0.15, 700)
 
 def raw_overlap(beta):
     return np.trapz(T_raw_pu(p_axis, -beta * p_axis) ** 2, p_axis)
+
+
+def T_ideal_pu(p, u):
+    p = np.asarray(p)
+    u = np.asarray(u)
+    support = (
+        (u >= u_min) & (u <= u_max)
+        & (p >= np.sin(np.deg2rad(theta_min)) * (1 + u))
+        & (p <= np.sin(np.deg2rad(theta_max)) * (1 + u))
+    )
+    T = (p / p_support) ** 2 * (u / u_scale) ** 2
+    return np.where(support, T, 0.0)
 
 overlaps = np.array([raw_overlap(beta) for beta in betas])
 beta0 = float(betas[np.argmax(overlaps)])
@@ -278,12 +386,16 @@ p_fft = np.fft.fftshift(np.fft.fftfreq(Nx, d=dx))
 u_fft = np.fft.fftshift(np.fft.fftfreq(Nt, d=dt))
 P_fft, U_fft = np.meshgrid(p_fft, u_fft)
 T_grid = T_raw_pu(P_fft.ravel(), U_fft.ravel()).reshape(U_fft.shape)
+T_grid_ideal = T_ideal_pu(P_fft.ravel(), U_fft.ravel()).reshape(U_fft.shape)
 
 F_in = np.fft.fftshift(np.fft.fft2(input_xt))
 F_out = F_in * T_grid
 E_out = np.fft.ifft2(np.fft.ifftshift(F_out))
 amp_out = np.abs(E_out)
 int_out = amp_out ** 2
+F_out_ideal = F_in * T_grid_ideal
+E_out_ideal = np.fft.ifft2(np.fft.ifftshift(F_out_ideal))
+int_out_ideal = np.abs(E_out_ideal) ** 2
 
 u_plot = np.linspace(u_min, u_max, 260)
 p_min = np.sin(np.deg2rad(theta_min)) * (1 + u_min)
@@ -308,10 +420,12 @@ tf_path = "fig4_sample4928_1100pm20deg_pm50nm_tf.png"
 amp_path = "fig4_sample4928_1100pm20deg_pm50nm_output_amplitude.png"
 int_path = "fig4_sample4928_1100pm20deg_pm50nm_output_intensity.png"
 vel_path = "fig4_sample4928_1100pm20deg_pm50nm_velocity_response.png"
+grouped_path = "sample4928_grouped_overview.png"
 
 plt.figure(figsize=(6, 5))
 im = plt.imshow(
     T_plot,
+    cmap="RdBu_r",
     aspect="auto",
     origin="lower",
     extent=[p_plot.min(), p_plot.max(), u_plot.min(), u_plot.max()],
@@ -368,6 +482,17 @@ plt.tight_layout()
 plt.savefig(vel_path, dpi=200, bbox_inches="tight")
 plt.close()
 
+save_grouped_overview(
+    grouped_path,
+    x,
+    x,
+    t,
+    [
+        (input2, I2_ideal, I2_raw),
+        (input_xt, int_out_ideal, int_out),
+    ],
+)
+
 print(f"lambda0 = {lambda0_nm:.1f} nm")
 print(f"theta window = [{theta_min:.0f}, {theta_max:.0f}] deg")
 print(f"lambda window = [{lam_min:.0f}, {lam_max:.0f}] nm")
@@ -377,6 +502,7 @@ print(f"Estimated v0 = {v0_km_s:.1f} km/s")
 print(f"T0 = {T0_fs:.3f} fs")
 print(f"Amplitude max = {amp_out.max():.6f}")
 print(f"Intensity max = {int_out.max():.6f}")
+print(f"Ideal intensity max = {int_out_ideal.max():.6f}")
 print(f"Center T(1100,0) = {center_val:.4f}")
 print("Corner values:")
 for k, v in corner_vals.items():

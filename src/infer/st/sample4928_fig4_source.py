@@ -59,6 +59,9 @@ def interp_at(lam, theta):
 # Normalized-frequency window
 u_min = lambda0_nm / lam_max - 1.0
 u_max = lambda0_nm / lam_min - 1.0
+p_support = max(abs(np.sin(np.deg2rad(theta_min)) * (1 + u_min)),
+                abs(np.sin(np.deg2rad(theta_max)) * (1 + u_max)))
+u_scale = max(abs(u_min), abs(u_max))
 
 # Estimate v0 with the same overlap logic
 p_axis = np.linspace(np.sin(np.deg2rad(theta_min)) * (1 + u_min),
@@ -66,7 +69,19 @@ p_axis = np.linspace(np.sin(np.deg2rad(theta_min)) * (1 + u_min),
 betas = np.linspace(0.001, 0.15, 700)
 
 def raw_overlap(beta):
-    return np.trapezoid(T_raw_pu(p_axis, -beta * p_axis) ** 2, p_axis)
+    return np.trapz(T_raw_pu(p_axis, -beta * p_axis) ** 2, p_axis)
+
+
+def T_ideal_pu(p, u):
+    p = np.asarray(p)
+    u = np.asarray(u)
+    support = (
+        (u >= u_min) & (u <= u_max)
+        & (p >= np.sin(np.deg2rad(theta_min)) * (1 + u))
+        & (p <= np.sin(np.deg2rad(theta_max)) * (1 + u))
+    )
+    T = (p / p_support) ** 2 * (u / u_scale) ** 2
+    return np.where(support, T, 0.0)
 
 overlaps = np.array([raw_overlap(beta) for beta in betas])
 beta0 = float(betas[np.argmax(overlaps)])
@@ -126,12 +141,16 @@ p_fft = np.fft.fftshift(np.fft.fftfreq(Nx, d=dx))
 u_fft = np.fft.fftshift(np.fft.fftfreq(Nt, d=dt))
 P_fft, U_fft = np.meshgrid(p_fft, u_fft)
 T_grid = T_raw_pu(P_fft.ravel(), U_fft.ravel()).reshape(U_fft.shape)
+T_grid_ideal = T_ideal_pu(P_fft.ravel(), U_fft.ravel()).reshape(U_fft.shape)
 
 F_in = np.fft.fftshift(np.fft.fft2(input_xt))
 F_out = F_in * T_grid
 E_out = np.fft.ifft2(np.fft.ifftshift(F_out))
 amp_out = np.abs(E_out)
 int_out = amp_out ** 2
+F_out_ideal = F_in * T_grid_ideal
+E_out_ideal = np.fft.ifft2(np.fft.ifftshift(F_out_ideal))
+int_out_ideal = np.abs(E_out_ideal) ** 2
 
 # Visualize TF
 u_plot = np.linspace(u_min, u_max, 260)
@@ -156,14 +175,32 @@ corner_vals = {
 }
 
 # Save figures
+input_path = "fig4_sample4928_1100pm20deg_pm50nm_input.png"
 tf_path = "fig4_sample4928_1100pm20deg_pm50nm_tf.png"
 amp_path = "fig4_sample4928_1100pm20deg_pm50nm_output_amplitude.png"
 int_path = "fig4_sample4928_1100pm20deg_pm50nm_output_intensity.png"
+ideal_int_path = "fig4_sample4928_1100pm20deg_pm50nm_ideal_output_intensity.png"
 vel_path = "fig4_sample4928_1100pm20deg_pm50nm_velocity_response.png"
 
 plt.figure(figsize=(6, 5))
 im = plt.imshow(
+    input_xt,
+    aspect="auto",
+    origin="lower",
+    extent=[x.min(), x.max(), t.min(), t.max()],
+)
+plt.xlabel("x / λ0")
+plt.ylabel("t / T0")
+plt.title("Sample 4928 input")
+plt.colorbar(im)
+plt.tight_layout()
+plt.savefig(input_path, dpi=200, bbox_inches="tight")
+plt.close()
+
+plt.figure(figsize=(6, 5))
+im = plt.imshow(
     T_plot,
+    cmap="RdBu_r",
     aspect="auto",
     origin="lower",
     extent=[p_plot.min(), p_plot.max(), u_plot.min(), u_plot.max()],
@@ -209,6 +246,22 @@ plt.savefig(int_path, dpi=200, bbox_inches="tight")
 plt.close()
 
 plt.figure(figsize=(6, 5))
+im = plt.imshow(
+    int_out_ideal,
+    aspect="auto",
+    origin="lower",
+    extent=[x.min(), x.max(), t.min(), t.max()],
+    vmax=np.quantile(int_out_ideal, 0.999),
+)
+plt.xlabel("x / λ0")
+plt.ylabel("t / T0")
+plt.title("Sample 4928 ideal output intensity |E_out|^2")
+plt.colorbar(im)
+plt.tight_layout()
+plt.savefig(ideal_int_path, dpi=200, bbox_inches="tight")
+plt.close()
+
+plt.figure(figsize=(6, 5))
 plt.plot(velocities_km_s, raw_response_norm)
 plt.axvline(v0_km_s)
 plt.scatter([v0_km_s], [1.0])
@@ -229,6 +282,7 @@ print(f"Estimated v0 = {v0_km_s:.1f} km/s")
 print(f"T0 = {T0_fs:.3f} fs")
 print(f"Amplitude max = {amp_out.max():.6f}")
 print(f"Intensity max = {int_out.max():.6f}")
+print(f"Ideal intensity max = {int_out_ideal.max():.6f}")
 print(f"Center T(1100,0) = {center_val:.4f}")
 print("Corner values:")
 for k, v in corner_vals.items():
