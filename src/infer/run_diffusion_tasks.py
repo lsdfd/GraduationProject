@@ -217,6 +217,10 @@ def curve_ylabel(case: TaskCase, channel_idx: int) -> str:
     return "normalized magnitude"
 
 
+def show_ideal_curve(case: TaskCase, channel_idx: int) -> bool:
+    return not (case.task_key == "polarization_multiplexed" and int(channel_idx) == 1)
+
+
 def plot_target_lambda_curves(
     out_png: Path,
     case: TaskCase,
@@ -240,7 +244,7 @@ def plot_target_lambda_curves(
         pred40_raw = float(pred_raw[ch, lam_idx, idx40]) if np.isfinite(pred_raw[ch, lam_idx, idx40]) else float("nan")
         target40 = float(target_row[idx40])
         pred40 = float(pred_row[idx40]) if np.isfinite(pred_row[idx40]) else float("nan")
-        if ideal_row is not None:
+        if ideal_row is not None and show_ideal_curve(case, ch):
             ax.plot(thetas, ideal_row, color="#2ca02c", ls=":", lw=1.6, label="ideal")
         ax.plot(thetas, target_row, "k--", lw=1.6, label="target")
         pred_valid = np.isfinite(pred_row)
@@ -317,7 +321,7 @@ def plot_ideal_pred_curves(
         pred40_raw = float(pred_raw[ch, lam_idx, idx40]) if np.isfinite(pred_raw[ch, lam_idx, idx40]) else float("nan")
         pred40 = float(pred_row[idx40]) if np.isfinite(pred_row[idx40]) else float("nan")
         theta40 = float(thetas[idx40])
-        if ideal_row is not None:
+        if ideal_row is not None and show_ideal_curve(case, ch):
             ax.plot(thetas, ideal_row, color="#2ca02c", ls=":", lw=1.6, label="ideal")
         pred_valid = np.isfinite(pred_row)
         if np.any(pred_valid):
@@ -385,7 +389,7 @@ def plot_band_curves(
     colors = ["#1f77b4", "#ff7f0e", "#d62728"]
     ideal_row = ideal_curve_for_case(case, thetas, band_pred_rows[0, 0])
     for ax, (label, ch) in zip(axes, names):
-        if ideal_row is not None:
+        if ideal_row is not None and show_ideal_curve(case, ch):
             ax.plot(thetas, ideal_row, color="#2ca02c", ls=":", lw=1.5, label="ideal")
         for i, color in enumerate(colors):
             pred_row = curve_display_row(case, ch, band_pred_rows[i, ch])
@@ -441,7 +445,7 @@ def plot_full_map_top3_overview(
         a_hmtpp.set_title("tpp full-map", fontsize=9)
         a_hmtpp.set_xlabel("theta")
         a_hmtpp.set_ylabel("lambda (nm)")
-        if ideal_row_tpp is not None:
+        if ideal_row_tpp is not None and show_ideal_curve(case, 0):
             a_curve_tpp.plot(thetas, ideal_row_tpp, color="#2ca02c", ls=":", lw=1.4, label="ideal")
         pred_tpp_row = curve_display_row(case, 0, pred_raw[r, 0, lam_idx])
         valid_tpp = np.isfinite(pred_tpp_row)
@@ -457,7 +461,7 @@ def plot_full_map_top3_overview(
         a_hmtss.axhline(target_lambda, color="w", ls="--", lw=1.0)
         a_hmtss.set_title("tss full-map", fontsize=9)
         a_hmtss.set_xlabel("theta")
-        if ideal_row_tss is not None:
+        if ideal_row_tss is not None and show_ideal_curve(case, 1):
             a_curve_tss.plot(thetas, ideal_row_tss, color="#2ca02c", ls=":", lw=1.4, label="ideal")
         pred_tss_row = curve_display_row(case, 1, pred_raw[r, 1, lam_idx])
         valid_tss = np.isfinite(pred_tss_row)
@@ -531,7 +535,7 @@ def plot_ranked_overview(
         a_hmtpp.set_xlabel("theta")
         a_hmtpp.set_ylabel("lambda (nm)")
 
-        if ideal_tpp_row is not None:
+        if ideal_tpp_row is not None and show_ideal_curve(case, 0):
             a_curve_tpp.plot(thetas, ideal_tpp_row, color="#2ca02c", ls=":", lw=1.4, label="ideal")
         a_curve_tpp.plot(thetas, target_tpp_row, "k--", lw=1.5, label="target")
         pred_tpp_row = curve_display_row(case, 0, pred_raw[i, 0, lam_idx])
@@ -553,7 +557,7 @@ def plot_ranked_overview(
         a_hmtss.set_title("tss", fontsize=9)
         a_hmtss.set_xlabel("theta")
 
-        if ideal_tss_row is not None:
+        if ideal_tss_row is not None and show_ideal_curve(case, 1):
             a_curve_tss.plot(thetas, ideal_tss_row, color="#2ca02c", ls=":", lw=1.4, label="ideal")
         a_curve_tss.plot(thetas, target_tss_row, "k--", lw=1.5, label="target")
         pred_tss_row = curve_display_row(case, 1, pred_raw[i, 1, lam_idx])
