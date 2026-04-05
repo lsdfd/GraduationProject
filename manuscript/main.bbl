@@ -1,0 +1,97 @@
+\providecommand{\bysame}{\leavevmode\hbox to3em{\hrulefill}\thinspace}
+\providecommand{\MR}{\relax\ifhmode\unskip\space\fi MR }
+% \MRhref is called by the amsart/book/proc definition of \MR.
+\providecommand{\MRhref}[2]{%
+  \href{http://www.ams.org/mathscinet-getitem?mr=#1}{#2}
+}
+\providecommand{\href}[2]{#2}
+\begin{thebibliography}{10}
+
+\bibitem{cordaro2019}
+Andrea Cordaro, Hyunjun Kwon, Dimitrios Sounas, A.~Femius Koenderink, Andrea
+  Al{\`u}, and Albert Polman, \emph{High-index dielectric metasurfaces
+  performing mathematical operations}, Nano Letters \textbf{19} (2019), no.~12,
+  8418--8423.
+
+\bibitem{cotrufo2023natcom}
+Michele Cotrufo, Aditya Arora, Sahil Singh, and Andrea Al{\`u},
+  \emph{Dispersion engineered metasurfaces for broadband, high-na,
+  high-efficiency, dual-polarization analog image processing}, Nature
+  Communications \textbf{14} (2023), 7078.
+
+\bibitem{cotrufo2023optica}
+Michele Cotrufo, Sahil Singh, Aditya Arora, Adam Majewski, and Andrea Al{\`u},
+  \emph{Polarization imaging and edge detection with image-processing
+  metasurfaces}, Optica \textbf{10} (2023), no.~10, 1331--1338.
+
+\bibitem{goodman2017}
+Joseph~W. Goodman, \emph{Introduction to fourier optics}, 4 ed., W. H. Freeman,
+  New York, 2017.
+
+\bibitem{hen2026}
+Lior Hen, Elad Yosef, Daniel Raviv, Raja Giryes, and Jacob Scheuer,
+  \emph{Inverse design of diffractive metasurfaces using diffusion models}, ACS
+  Photonics \textbf{13} (2026), no.~1, 38--46, Metadata should be rechecked
+  against the final paginated publisher version; cited here from early-indexed
+  records.
+
+\bibitem{kamali2017}
+Seyedeh~Mahsa Kamali, Ehsan Arbabi, Amir Arbabi, Yu~Horie, Mohammad~S.
+  Faraji-Dana, and Andrei Faraon, \emph{Angle-multiplexed metasurfaces:
+  encoding independent wavefronts in a single metasurface under different
+  illumination angles}, Physical Review X \textbf{7} (2017), no.~4, 041056.
+
+\bibitem{kwon2020}
+Hyunjun Kwon, Andrea Cordaro, Dimitrios Sounas, Albert Polman, and Andrea
+  Al{\`u}, \emph{Dual-polarization analog 2d image processing with nonlocal
+  metasurfaces}, ACS Photonics \textbf{7} (2020), no.~7, 1799--1805.
+
+\bibitem{liu2018}
+Zhicong Liu, Deyin Zhu, Stephen~P. Rodrigues, Kwang-Tae Lee, Wenshan Cai, and
+  Shanhui Fan, \emph{Generative model for the inverse design of metasurfaces},
+  Nano Letters \textbf{18} (2018), no.~10, 6570--6576.
+
+\bibitem{ma2021}
+Wei Ma, Feng Cheng, and Yanqiu Liu, \emph{Deep-learning-enabled on-demand
+  design of chiral metamaterials}, ACS Nano \textbf{12} (2018), no.~6,
+  6326--6334, Included as a representative inverse-design reference beyond
+  Fourier-operator devices.
+
+\bibitem{moharam1981}
+M.~G. Moharam and T.~K. Gaylord, \emph{Rigorous coupled-wave analysis of
+  planar-grating diffraction}, Journal of the Optical Society of America
+  \textbf{71} (1981), no.~7, 811--818.
+
+\bibitem{moharam1995}
+M.~G. Moharam, D.~A. Pommet, E.~B. Grann, and T.~K. Gaylord, \emph{Formulation
+  for stable and efficient implementation of the rigorous coupled-wave analysis
+  of binary gratings}, Journal of the Optical Society of America A \textbf{12}
+  (1995), no.~5, 1068--1076.
+
+\bibitem{molesky2018}
+Sean Molesky, Zin Lin, Alexander~Y. Piggott, Weiliang Jin, Jelena Vuckovi{\'c},
+  and Alejandro~W. Rodriguez, \emph{Inverse design in nanophotonics}, Nature
+  Photonics \textbf{12} (2018), no.~11, 659--670.
+
+\bibitem{silva2014}
+Alexandre Silva, Francesco Monticone, Giuseppe Castaldi, Vincenzo Galdi, Andrea
+  Al{\`u}, and Nader Engheta, \emph{Performing mathematical operations with
+  metamaterials}, Science \textbf{343} (2014), no.~6167, 160--163.
+
+\bibitem{so2019}
+Somin So and Junsuk Rho, \emph{Designing nanophotonic structures using
+  conditional deep convolutional generative adversarial networks},
+  Nanophotonics \textbf{8} (2019), no.~7, 1255--1261.
+
+\bibitem{zhang2023}
+Zhe Zhang, Chao Yang, Yi~Qin, Hao Feng, Jun Feng, and Hui Li, \emph{Diffusion
+  probabilistic model based accurate and high-degree-of-freedom metasurface
+  inverse design}, Nanophotonics \textbf{12} (2023), no.~20, 3871--3881.
+
+\bibitem{zhang2024}
+Zhe Zhang, Chao Yang, Yi~Qin, Zhengtong Zheng, Jun Feng, and Hui Li,
+  \emph{Addressing high-performance data sparsity in metasurface inverse design
+  using multi-objective optimization and diffusion probabilistic models},
+  Optics Express \textbf{32} (2024), no.~23, 40869--40885.
+
+\end{thebibliography}

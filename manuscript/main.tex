@@ -1,0 +1,91 @@
+\documentclass[10pt,leqno]{amsart}
+
+\usepackage{graphicx}
+\baselineskip=16pt
+
+\usepackage{indentfirst,csquotes}
+\topmargin=.5cm
+\textheight=20cm
+\textwidth=32cc
+\baselineskip=16pt
+\evensidemargin=.9cm
+\oddsidemargin=.9cm
+
+\usepackage{amssymb,amsthm,amsmath}
+\usepackage{xcolor,paralist,hyperref,titlesec,fancyhdr,etoolbox}
+
+\newtheorem{theorem}{Theorem}[]
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{conjecture}[theorem]{Conjecture}
+
+\titleformat{\section}
+  {\normalfont\Large\bfseries\centering}
+  {\thesection.}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.2ex}{0.8ex}
+
+\titleformat{\subsection}
+  {\normalfont\large\bfseries}
+  {\thesubsection.}{0.5em}{}
+\titlespacing*{\subsection}{0pt}{1ex}{0.5ex}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  filecolor=black,
+  urlcolor=black,
+  citecolor=black
+}
+
+\def\proof{\noindent {\it Proof. $\, $}}
+\def\endproof{\hfill $\Box$ \vskip 5 pt }
+
+\newcommand{\otf}{\textsf{OTF}}
+\newcommand{\rcwa}{\textsf{RCWA}}
+\newcommand{\tp}{T_{pp}}
+\newcommand{\ts}{T_{ss}}
+\newcommand{\lam}{\lambda}
+\newcommand{\ang}{\theta}
+\newcommand{\Rtar}{\mathbf{R}^{\star}}
+\newcommand{\Rpred}{\widehat{\mathbf{R}}}
+\newcommand{\Rsim}{\mathbf{R}_{\mathrm{sim}}}
+\newcommand{\G}{\mathcal{G}}
+\newcommand{\D}{\mathcal{D}}
+\newcommand{\score}{\mathcal{S}}
+\newcommand{\loss}{\mathcal{L}}
+\newcommand{\etal}{\textit{et al.}}
+
+\title[Physics-consistent generative inverse design]
+{Physics-consistent Generative Inverse Design of Angle-Resolved Fourier-Operator Metasurfaces}
+
+\author[Your Name]{Your Name}
+\date{\today}
+\address{School of XXX, University of XXX, City, Country}
+\email{your\_email@example.com}
+\keywords{metasurfaces, inverse design, Fourier optics, angle-resolved response, diffusion model, \rcwa, polarization multiplexing}
+
+\begin{document}
+
+\begin{abstract}
+We present a maintainable manuscript draft centered on physics-consistent generative inverse design of angle-resolved Fourier-operator metasurfaces. The governing thesis is that freeform Fourier-operator metasurface design should be formulated in a unified angle--frequency--polarization response space rather than as a collection of disconnected task-specific optimizations. Within this formulation, the inverse problem becomes conditional generation of physically admissible structures from target response fields, with physical consistency enforced through simulation-grounded supervision, candidate verification, and post-generation reranking. The resulting narrative emphasizes a unified design paradigm: second-order differentiation, polarization-selective operators, and spectrally structured transfer functions are treated as different slices of the same response-space objective rather than as separate application libraries.
+\end{abstract}
+
+\maketitle
+
+\input{sections/01_introduction}
+\input{sections/02_unified_response_formulation}
+\input{sections/03_physics_consistent_framework}
+\input{sections/04_experimental_setup}
+\input{sections/05_main_results}
+\input{sections/06_unified_angle_frequency_polarization_validation}
+\input{sections/07_ablation_and_analysis}
+\input{sections/08_discussion}
+\input{sections/09_conclusion}
+
+\bibliographystyle{amsplain}
+\bibliography{refs}
+
+\end{document}

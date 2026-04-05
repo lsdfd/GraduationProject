@@ -1,0 +1,31 @@
+\section{Unified Angle--Frequency--Polarization Response Formulation}
+
+\subsection{Response field as the primary design object}
+
+Let $\G$ denote a freeform binary metasurface pattern defined on a fabrication-compatible lattice. Instead of summarizing its behavior by a single figure of merit, we associate to each structure a response tensor
+\[
+\mathbf{R}(\G)=\left\{\tp(\lam_i,\ang_j),\ts(\lam_i,\ang_j)\right\}_{i=1,\ldots,N_{\lambda},\,j=1,\ldots,N_{\theta}},
+\]
+where the two channels can be generalized to a broader polarization basis when needed. This object records the operator-relevant transfer characteristics over a finite angle--frequency sampling window and therefore serves as the physically meaningful state variable for inverse design.
+
+This response-centered definition is particularly appropriate for Fourier-operator metasurfaces. In such devices, the desired functionality is encoded by the shape of a transfer function across spatial-frequency coordinates, which are directly coupled to angle under the illumination and imaging geometry. Once the design objective is written in this way, the traditional distinction between ``differentiator,'' ``filter,'' and ``polarization-selective operator'' becomes a distinction between target field geometries rather than between fundamentally different inverse problems.
+
+\subsection{Unified target families in a single formulation}
+
+Within the proposed response-space viewpoint, several seemingly different device categories can be represented without changing the mathematical formulation. A second-order differentiator is expressed through a prescribed even-symmetric angular transfer profile, potentially over multiple wavelengths. A polarization-multiplexed operator is obtained by assigning different target profiles to different polarization channels. A spectrally selective operator corresponds to a structured dependence of the same profile family on $\lam$. In all cases, the optimization variable remains $\G$ and the target remains $\Rtar(\lam,\ang,p)$.
+
+This observation is not merely organizational. It clarifies that the role of a unified generative model is to learn a conditional distribution over structures given target response fields that may vary in shape, anisotropy, and polarization dependence, but still belong to one common response manifold. That is the sense in which this paper argues for a unified angle--frequency--polarization design paradigm rather than a catalog of unrelated demonstrations.
+
+\subsection{Physics-consistent inverse-design objective}
+
+The inverse-design objective is to identify structures whose simulated response $\Rsim(\G)$ matches the target field while respecting physical and fabrication constraints. We therefore write the score function as
+\[
+\score(\G;\Rtar)=
+\alpha\,\loss_{\mathrm{resp}}(\Rsim,\Rtar)
++\beta\,\loss_{\mathrm{pol}}
++\gamma\,\loss_{\mathrm{spec}}
++\delta\,\loss_{\mathrm{phys}},
+\]
+where the leading term measures response-field mismatch and the additional terms encode polarization separation, spectral smoothness or selectivity, and physical admissibility. The precise weighting may vary across experiments, but the formal structure remains unchanged because all objectives are defined in the same response space.
+
+Equally important, the formulation is compatible with multi-solution inversion. Because many structures can satisfy the same operator-level constraint within a tolerance band, the objective should not be interpreted as seeking a unique geometry. Rather, it defines a target-conditioned feasible set. This motivates the generative perspective adopted in the next section: instead of directly regressing a single structure, we model the conditional distribution of valid solutions and impose physics consistency through simulation-grounded evaluation.

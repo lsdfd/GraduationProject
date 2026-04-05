@@ -1,0 +1,19 @@
+\section{Experimental Setup}
+
+\subsection{Device family and parameterization}
+
+We consider freeform binary Fourier-operator metasurfaces parameterized on a fixed-resolution planar grid compatible with the intended fabrication process. The geometric representation is intentionally general enough to support nontrivial operator responses without biasing the search toward a narrow analytic motif. This choice aligns with the claim of unified design: if the formulation is truly response-driven, it should not rely on manual geometry specialization for each target family.
+
+All targets are defined over a prescribed angle--frequency window and, when relevant, over multiple polarization channels. The primary benchmark remains the second-order Fourier differentiator because it provides a stringent but interpretable test case. Additional validations are then introduced not as independent application cases, but as controlled perturbations of the same unified response-space formulation.
+
+\subsection{Target specification and sampling protocol}
+
+The target field $\Rtar$ is discretized on a finite set of wavelengths and incidence angles selected to balance operator fidelity with simulation cost. The discretization is dense enough to encode the intended transfer-function geometry and to capture spectral or polarization-dependent deviations that would be invisible in single-slice optimization. This sampling strategy ensures that the learning and evaluation pipelines are tied to the same underlying response-space object.
+
+For each target family, we generate multiple candidate structures per condition and carry them through surrogate screening and physical reranking. The goal is not only to identify the top design, but also to quantify how reliably the generator populates the target-conditioned feasible region. This candidate-level analysis becomes particularly informative when comparing deterministic and generative baselines.
+
+\subsection{Evaluation metrics and baseline models}
+
+We report three classes of metrics. The first class evaluates response-level agreement between the target and the verified field, including normalized response mismatch, transfer-function similarity, and channel-isolation error when polarization multiplexing is involved. The second class evaluates physically verified device performance, such as robustness across the sampled angle band and spectral stability. The third class evaluates operator-level behavior in downstream image-processing tests, where appropriate.
+
+Baseline models include deterministic inverse regression, conditional variational autoencoders, conditional adversarial generators, and ablated versions of the proposed pipeline without physical reranking or without full response-field conditioning \cite{liu2018,so2019,ma2021,zhang2023}. This selection is intended to isolate the contribution of physics-consistent generative inversion rather than to expand the paper into an application benchmark suite.

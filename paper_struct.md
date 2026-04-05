@@ -23,23 +23,22 @@ Physics-consistent generative inverse design of angle-resolved Fourier-operator 
 * 结构图+光谱图+2D角谱图+1D-t（theta）图
 * 模拟图像处理效果*2+ 指标结果分析
 * 其他波长结果证明
-* 把别的文章sota的用我的score算一下对比一下
+* 和别的文章的score算一下对比一下：Score=0.988， 透过率振幅比=0.97， 工作带宽=100nm， NA=0.64
+
 
 3.2 模型对比+消融实验 Comparison with baseline methods
 * 代理模型对比（transformer显著提高）
 * 数据scale实验
 * cGAN，CVAE，diffusion w/o physics，拓扑
-* 比较：Best score，Mean score，OTF MAE，time-to-success
+* 比较：Best score，Mean score，OTF MAE
 
 3.3 Generalization to other OTF targets
-* 偏振复用尝试
-* 高阶微分/时空微分结果/高斯滤波等
+
+* 偏振复用/偏振无关/四阶微分/时空微分结果/低通
 
 四 Discussions （简单写）
 * 为什么生成式方法适合这个问题：高维，一对多，优解稀疏，扩散比直接回归/GAN/VAE 更稳定
-* 当前方法局限性
-* 下一步策略
-* 单波长作为条件
+* 可扩展的应用场景：偏振-频率-角度三重设计
 
 五 Conclusion
 * 提出一个面向自由形态二值超表面的 OTF 逆向设计闭环。

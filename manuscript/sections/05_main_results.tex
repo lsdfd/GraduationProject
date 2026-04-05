@@ -1,0 +1,19 @@
+\section{Main Results}
+
+\subsection{Second-order Fourier-operator metasurface as the anchor demonstration}
+
+We first examine the primary benchmark: a freeform metasurface designed to realize a second-order Fourier-operator response over a prescribed angular window. This example is used as the anchor demonstration because it requires the transfer function to satisfy a structured, physically meaningful profile rather than a single scalar criterion. The proposed framework produces candidates whose verified response closely tracks the target field and whose operator-level image transformations reproduce the expected second-derivative behavior.
+
+The most important observation is not simply that a high-performing differentiator can be obtained. Rather, the verified response maps indicate that the generated structure captures the full angular operator geometry with much greater fidelity than models trained only against reduced objectives. This supports the central premise that response-field conditioning and physical reranking are essential when the design objective is intrinsically angle resolved.
+
+\subsection{Response-level verification}
+
+To evaluate the main design, we compare the target field, surrogate prediction, and physically verified response on the same angle--frequency grid. The surrogate is useful for concentrating candidates, but the physically verified map reveals the true quality of the inverse solution. In the strongest candidates, the verified response preserves both the target curvature and the intended even-symmetry structure across the operating band, indicating that the generator has learned a nontrivial correspondence between target operator shape and freeform geometry.
+
+We also observe that candidates with similar scalar matching scores may differ substantially in their off-axis behavior. This is precisely why response-field evaluation is more informative than isolated operating-point metrics. By retaining the full target geometry in the evaluation protocol, the framework distinguishes designs that are merely locally adequate from designs that faithfully realize the intended operator over the specified response domain.
+
+\subsection{Operator-level behavior and physical plausibility}
+
+Image-domain tests provide an intuitive but secondary validation of the design. When the verified metasurface response is applied to representative inputs, the output reproduces the expected edge-enhanced or second-derivative-like patterns, confirming that the response-level agreement translates into operator-level function. More importantly, the physical reranking stage suppresses candidates that appear structurally plausible yet exhibit distorted transfer behavior under verification.
+
+Taken together, these results support the claim that physics-consistent generative inverse design is not only able to synthesize candidate geometries, but able to do so in a way that preserves the intended operator physics. The anchor demonstration therefore serves as evidence for the larger response-space paradigm rather than as an isolated showcase.

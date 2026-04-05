@@ -1,0 +1,91 @@
+\documentclass[10pt,leqno]{amsart}
+
+\usepackage[UTF8,fontset=fandol]{ctex}
+\usepackage{graphicx}
+\baselineskip=16pt
+
+\usepackage{indentfirst,csquotes}
+\topmargin=.5cm
+\textheight=20cm
+\textwidth=32cc
+\baselineskip=16pt
+\evensidemargin=.9cm
+\oddsidemargin=.9cm
+
+\usepackage{amssymb,amsthm,amsmath}
+\usepackage{xcolor,paralist,hyperref,titlesec,fancyhdr,etoolbox}
+
+\newtheorem{theorem}{Theorem}[]
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{conjecture}[theorem]{Conjecture}
+
+\titleformat{\section}
+  {\normalfont\Large\bfseries\centering}
+  {\thesection.}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.2ex}{0.8ex}
+
+\titleformat{\subsection}
+  {\normalfont\large\bfseries}
+  {\thesubsection.}{0.5em}{}
+\titlespacing*{\subsection}{0pt}{1ex}{0.5ex}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  filecolor=black,
+  urlcolor=black,
+  citecolor=black
+}
+
+\def\proof{\noindent {\it Proof. $\, $}}
+\def\endproof{\hfill $\Box$ \vskip 5 pt }
+
+\newcommand{\otf}{\textsf{OTF}}
+\newcommand{\rcwa}{\textsf{RCWA}}
+\newcommand{\tp}{T_{pp}}
+\newcommand{\ts}{T_{ss}}
+\newcommand{\lam}{\lambda}
+\newcommand{\ang}{\theta}
+\newcommand{\Rtar}{\mathbf{R}^{\star}}
+\newcommand{\Rpred}{\widehat{\mathbf{R}}}
+\newcommand{\Rsim}{\mathbf{R}_{\mathrm{sim}}}
+\newcommand{\G}{\mathcal{G}}
+\newcommand{\D}{\mathcal{D}}
+\newcommand{\score}{\mathcal{S}}
+\newcommand{\loss}{\mathcal{L}}
+
+\title[物理一致的角分辨傅里叶算子超表面生成式逆向设计]
+{物理一致的角分辨傅里叶算子超表面生成式逆向设计}
+
+\author[Your Name]{Your Name}
+\date{\today}
+\address{School of XXX, University of XXX, City, Country}
+\email{your\_email@example.com}
+\keywords{超表面，逆向设计，傅里叶光学，角分辨响应，扩散模型，\rcwa，偏振复用}
+
+\begin{document}
+
+\begin{abstract}
+本文围绕“物理一致的角分辨傅里叶算子超表面生成式逆向设计”这一核心主题，构建了一个可维护的双语论文工程初稿。全文的主线并非将多个任务简单拼接为一个展示平台，而是强调：自由形态傅里叶算子超表面的设计应当在统一的角度--频率--偏振响应空间中表述。基于这一表述，逆向问题可被写成从目标响应场到物理可实现结构的一对多条件生成问题，并通过仿真驱动数据、候选筛选、物理验证与重排序来保证物理一致性。这样，二阶微分、偏振相关算子和光谱结构化响应都被视为同一统一范式中的不同切片，而不是相互独立的任务集合。
+\end{abstract}
+
+\maketitle
+
+\input{sections/01_introduction}
+\input{sections/02_unified_response_formulation}
+\input{sections/03_physics_consistent_framework}
+\input{sections/04_experimental_setup}
+\input{sections/05_main_results}
+\input{sections/06_unified_angle_frequency_polarization_validation}
+\input{sections/07_ablation_and_analysis}
+\input{sections/08_discussion}
+\input{sections/09_conclusion}
+
+\bibliographystyle{amsplain}
+\bibliography{refs}
+
+\end{document}

@@ -1,0 +1,19 @@
+\section{Unified Validation Across Angle, Frequency, and Polarization}
+
+\subsection{Angle-domain validation}
+
+The first axis of validation concerns angular response. We test whether the framework can preserve target transfer-function structure over finite incidence-angle windows rather than only at a single nominal point. The resulting verified fields show that the same response-conditioned generator used for the main differentiator can accommodate alternative angular envelopes and operator widths without changes to the underlying inverse-design formulation.
+
+This observation is important because angle-domain control is the bridge between metasurface scattering physics and Fourier-operator functionality. A design framework that cannot generalize across angular target shapes would remain tied to isolated demonstrations. The present results instead suggest that angle dependence is naturally handled when the target is represented directly as part of the response field.
+
+\subsection{Frequency-domain validation}
+
+We next consider frequency-structured targets in which the desired operator behavior varies systematically across wavelength. Rather than treating each wavelength as a separate inverse-design problem, the generator is conditioned on a single response field whose spectral slices jointly define the objective. The resulting candidates reveal that spectrally selective operator behavior can be incorporated without changing the overall framework or introducing ad hoc task-specific branches.
+
+This frequency-domain result reinforces the main conceptual claim of the paper. Spectral selectivity is not an ``additional task'' layered onto a baseline pipeline; it is another projection of the same angle--frequency--polarization design space. The framework succeeds to the extent that it preserves this coupling and uses it to synthesize physically admissible structures.
+
+\subsection{Polarization-domain validation}
+
+Finally, we validate the framework on polarization-dependent targets in which distinct transfer-function profiles are assigned to different polarization channels. Previous works on angle-multiplexed and dual-polarization metasurfaces have demonstrated the physical feasibility of such behavior \cite{kamali2017,kwon2020,cotrufo2023natcom}. Here the important point is that polarization selectivity enters through the same response-space representation already used for the main differentiator.
+
+The verified results indicate that polarization channel separation can be learned and enforced within the unified framework while preserving operator fidelity. This cross-axis consistency is central to the paper's scientific positioning. The design pipeline is therefore not a library of angle, spectral, and polarization modules, but a single physics-consistent inverse-design method operating on a unified response manifold.
