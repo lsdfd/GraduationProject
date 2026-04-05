@@ -1,6 +1,4 @@
 # Combined source bundle for sample 4928 Figure 3 and Figure 4
-
-
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import RegularGridInterpolator

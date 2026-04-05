@@ -4,7 +4,7 @@ from scipy.interpolate import RegularGridInterpolator
 from pathlib import Path
 import os
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[4]
 npz_path = ROOT / "data" / "train_data_20000.npz"
 sample_idx = 4928
 channel_key = "tpp_mag"
