@@ -1,51 +1,86 @@
-\documentclass[10pt,leqno]{amsart}
+\documentclass[10pt,a4paper]{article}
 
-\usepackage[UTF8,fontset=fandol]{ctex}
+% ============================================
+% arXiv 标准单栏模板
+% ============================================
+
+% ===== 页面设置 =====
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\setstretch{1.18}
+
+% ===== 中文支持 =====
+\usepackage[UTF8,fontset=none]{ctex}
+\setCJKmainfont{Songti SC}
+\setCJKsansfont{PingFang SC}
+\setCJKmonofont{STFangsong}
+\setCJKfamilyfont{zhsong}{Songti SC}
+\setCJKfamilyfont{zhhei}{Heiti SC}
+\setCJKfamilyfont{zhfs}{STFangsong}
+\setCJKfamilyfont{zhkai}{Kaiti SC}
+
+% ===== 基础包 =====
 \usepackage{graphicx}
-\baselineskip=16pt
-
-\usepackage{indentfirst,csquotes}
-\topmargin=.5cm
-\textheight=20cm
-\textwidth=32cc
-\baselineskip=16pt
-\evensidemargin=.9cm
-\oddsidemargin=.9cm
-
 \usepackage{amssymb,amsthm,amsmath}
-\usepackage{xcolor,paralist,hyperref,titlesec,fancyhdr,etoolbox}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{natbib}
+\usepackage[section]{placeins}
 
-\newtheorem{theorem}{Theorem}[]
-\newtheorem{definition}[theorem]{Definition}
-\newtheorem{example}[theorem]{Example}
-\newtheorem{lemma}[theorem]{Lemma}
-\newtheorem{proposition}[theorem]{Proposition}
-\newtheorem{corollary}[theorem]{Corollary}
-\newtheorem{conjecture}[theorem]{Conjecture}
-
-\titleformat{\section}
-  {\normalfont\Large\bfseries\centering}
-  {\thesection.}{0.5em}{}
-\titlespacing*{\section}{0pt}{1.2ex}{0.8ex}
-
-\titleformat{\subsection}
-  {\normalfont\large\bfseries}
-  {\thesubsection.}{0.5em}{}
-\titlespacing*{\subsection}{0pt}{1ex}{0.5ex}
-
+% ===== 颜色设置 =====
 \hypersetup{
-  colorlinks=true,
-  linkcolor=black,
-  filecolor=black,
-  urlcolor=black,
-  citecolor=black
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=blue,
+    urlcolor=blue,
+    citecolor=blue
 }
 
-\def\proof{\noindent {\it Proof. $\, $}}
-\def\endproof{\hfill $\Box$ \vskip 5 pt }
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.8}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
 
+% ===== 标题格式 =====
+\makeatletter
+\def\@maketitle{%
+  \newpage
+  \null
+  \vskip -2em%
+  \begin{center}%
+  \let \footnote \thanks
+    {\Large \bfseries \@title \par}%
+    \vskip 1em%
+    {\normalsize
+      \lineskip .5em%
+      \begin{tabular}[t]{c}%
+        \@author
+      \end{tabular}\par}%
+    \vskip 0.5em%
+    {\small \itshape \@date}%
+  \end{center}%
+  \par
+  \vskip 1em}
+\makeatother
+
+% ===== 摘要格式 =====
+\makeatletter
+\renewenvironment{abstract}{%
+  \begin{center}%
+    \bfseries 摘要
+  \end{center}%
+  \par
+  \setlength{\parindent}{2em}%
+}{\par}
+\makeatother
+
+% ===== 自定义命令 =====
 \newcommand{\otf}{\textsf{OTF}}
-\newcommand{\rcwa}{\textsf{RCWA}}
 \newcommand{\tp}{T_{pp}}
 \newcommand{\ts}{T_{ss}}
 \newcommand{\lam}{\lambda}
@@ -57,35 +92,41 @@
 \newcommand{\D}{\mathcal{D}}
 \newcommand{\score}{\mathcal{S}}
 \newcommand{\loss}{\mathcal{L}}
-
-\title[物理一致的角分辨傅里叶算子超表面生成式逆向设计]
-{物理一致的角分辨傅里叶算子超表面生成式逆向设计}
-
-\author[Your Name]{Your Name}
-\date{\today}
-\address{School of XXX, University of XXX, City, Country}
-\email{your\_email@example.com}
-\keywords{超表面，逆向设计，傅里叶光学，角分辨响应，扩散模型，\rcwa，偏振复用}
+\newcommand{\etal}{\textit{et al.}}
 
 \begin{document}
 
-\begin{abstract}
-本文围绕“物理一致的角分辨傅里叶算子超表面生成式逆向设计”这一核心主题，构建了一个可维护的双语论文工程初稿。全文的主线并非将多个任务简单拼接为一个展示平台，而是强调：自由形态傅里叶算子超表面的设计应当在统一的角度--频率--偏振响应空间中表述。基于这一表述，逆向问题可被写成从目标响应场到物理可实现结构的一对多条件生成问题，并通过仿真驱动数据、候选筛选、物理验证与重排序来保证物理一致性。这样，二阶微分、偏振相关算子和光谱结构化响应都被视为同一统一范式中的不同切片，而不是相互独立的任务集合。
-\end{abstract}
+% ===== 标题 =====
+\title{物理一致的角分辨傅里叶算子超表面生成式逆向设计}
+
+% ===== 作者 =====
+\author{%
+作者姓名$^{1}$\thanks{邮箱: your\_email@example.com} \\
+\small $^{1}$XXX学院, XXX大学, 城市, 国家%
+}
+
+% ===== 日期 =====
+\date{\today}
 
 \maketitle
 
-\input{sections/01_introduction}
-\input{sections/02_unified_response_formulation}
-\input{sections/03_physics_consistent_framework}
-\input{sections/04_experimental_setup}
-\input{sections/05_main_results}
-\input{sections/06_unified_angle_frequency_polarization_validation}
-\input{sections/07_ablation_and_analysis}
-\input{sections/08_discussion}
-\input{sections/09_conclusion}
+% ===== 摘要 =====
+\begin{abstract}
+本文面向角度分辨傅里叶算子超表面（AFOM）提出一个通用框架，用于实现 wavelength--theta--polarization 的联合设计与控制。围绕自由形态二值超表面的统一逆向设计问题，本文进一步将不同器件目标写成 wavelength--theta--polarization 响应张量上的统一条件对象。相比于把微分、低通、偏振复用或时空微分分别写成孤立任务，本文将它们统一表述为目标光学传递函数在波长、角度和偏振维度上的不同切片，并把逆向设计写成从目标响应张量到候选结构集合的一对多生成问题。对应地，我们构建了包含制造约束结构生成、仿真标注、任务打分、数据增强、前向代理训练、条件扩散采样和基于仿真验证的重评分选优的闭环流程。结果表明，这套统一表述能够在多类目标上实现高保真设计，并且多个目标设计达到了当前所有设计结果中的最高性能：大NA、高透过率、宽带二阶微分任务在多个波长下得到超过 0.93 的验证分数，低通滤波任务达到 0.993 的高分，偏振无关、偏振复用、四阶微分、低通滤波和时空微分任务也都能在同一框架下得到高质量验证结果。本文的核心贡献是建立一个把目标定义、模型训练、候选生成和最终选择都重新绑定到验证散射响应上的响应中心逆向设计框架。
 
-\bibliographystyle{amsplain}
+\vspace{0.5em}
+\noindent\textbf{关键词:} 超表面；逆向设计；傅里叶光学；角分辨响应；扩散模型；电磁仿真；偏振复用
+\end{abstract}
+
+% ===== 正文部分 =====
+\input{sections/01_introduction}
+\input{sections/02_methods}
+\input{sections/03_results}
+\input{sections/04_discussion}
+\input{sections/05_conclusion}
+
+% ===== 参考文献 =====
+\bibliographystyle{unsrt}
 \bibliography{refs}
 
 \end{document}

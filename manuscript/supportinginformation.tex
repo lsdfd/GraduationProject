@@ -1,0 +1,380 @@
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\setstretch{1.15}
+\usepackage{graphicx}
+\usepackage{amssymb,amsthm,amsmath}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage[section]{placeins}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.8}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
+
+\newcommand{\otf}{\textsf{OTF}}
+\newcommand{\tp}{T_{pp}}
+\newcommand{\ts}{T_{ss}}
+\newcommand{\lam}{\lambda}
+\newcommand{\ang}{\theta}
+\newcommand{\loss}{\mathcal{L}}
+\newcommand{\Rtar}{\mathbf{R}^{\star}}
+\newcommand{\Rpred}{\widehat{\mathbf{R}}}
+
+\newcommand{\placeholderfigure}[2]{%
+\begin{figure}[!htbp]
+\centering
+\fbox{%
+\begin{minipage}[c][2.1in][c]{0.9\linewidth}
+\centering
+\textbf{Figure Placeholder}\\[0.4em]
+\small #1
+\end{minipage}}
+\caption{#2}
+\end{figure}
+}
+
+\begin{document}
+
+\title{Supporting Information\\[0.4em]\large Physics-Consistent Generative Inverse Design of Angle-Resolved Fourier-Operator Metasurfaces}
+\author{}
+\date{\today}
+\maketitle
+
+This supporting information expands the methodological details that are only summarized in the main manuscript. The presentation below is organized as a conventional supplementary note rather than an implementation guide, with emphasis on dataset construction, forward surrogate design, and the theoretical and architectural details of the conditional diffusion inverse model.
+
+\section{Dataset Preparation and Task Metrics}
+
+\subsection{Freeform structure generation and physical labeling}
+
+The design space is a family of freeform binary metasurface layouts with spatial size $64\times 64$, where the binary convention is $1=\mathrm{material}$ and $0=\mathrm{air}$. Each structure is generated from a coarse random field, symmetrized under the constraint class $C_4+\sigma_x$, and then smoothed, binarized, and morphologically regularized so that overly thin bridges, isolated islands, and very small voids are discouraged. This construction intentionally enlarges the accessible geometry family beyond a low-dimensional parametric library while preserving fabrication-oriented regularity.
+
+The target fill ratio is not fixed at a single value; instead, the dataset spans five nominal fill-ratio levels,
+\begin{equation}
+\mathrm{fill}\in\{0.4,0.5,0.6,0.7,0.8\},
+\end{equation}
+and the geometric generation process further perturbs the coarse-grid scale, smoothing strength, and minimum feature threshold. As a result, the final structure set contains both topological diversity and systematic variation in material occupancy.
+
+Each structure is labeled by rigorous coupled-wave analysis under a fixed material platform consisting of a silicon patterned layer on a silica substrate, illuminated from air. The sampling grid is defined jointly over wavelength, incidence angle, and polarization-preserving transmission channels, so the design target is not a scalar device label but a discretized response tensor.
+
+\begin{table}[!htbp]
+\centering
+\caption{Dataset and labeling configuration.}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.36\linewidth}X}
+\toprule
+Item & Configuration \\
+\midrule
+Structure representation & Freeform binary pattern, $64\times64$ pixels \\
+Symmetry prior & $C_4+\sigma_x$ \\
+Binary convention & $1=\mathrm{material}$, $0=\mathrm{air}$ \\
+Nominal fill-ratio levels & $0.4, 0.5, 0.6, 0.7, 0.8$ \\
+Periodicity & $500$ nm \\
+Patterned-layer thickness & $500$ nm \\
+Structured material & Si \\
+Input / output media & Air / SiO$_2$ \\
+Wavelength sampling & $800$--$1300$ nm, step $50$ nm ($11$ points) \\
+Angle sampling & $-40^\circ$ to $40^\circ$, step $5^\circ$ ($17$ points) \\
+Retained channels & $\tp$ and $\ts$ magnitudes \\
+Response tensor size & $2\times11\times17$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Response tensor organization}
+
+For each structure, the physical label is written as
+\begin{equation}
+\mathbf{R}(\lam,\ang)=
+\begin{bmatrix}
+\tp(\lam,\ang)\\
+\ts(\lam,\ang)
+\end{bmatrix}
+\in \mathbb{R}^{2\times 11\times 17}.
+\end{equation}
+The learning framework therefore operates on two coupled objects: a binary geometry $x\in\{0,1\}^{64\times64}$ and a discretized response tensor $\mathbf{R}$. During training, the response tensor is standardized pointwise:
+\begin{equation}
+\widetilde{\mathbf{R}}_{qjk}=\frac{\mathbf{R}_{qjk}-\mu_{qjk}}{\sigma_{qjk}+\varepsilon},
+\end{equation}
+where $q$ indexes polarization channel, $j$ indexes wavelength, and $k$ indexes angle. This location-wise normalization preserves physically meaningful weak-response regions, such as operator zeros and polarization leakage bands, which would otherwise be suppressed by a single global scaling factor.
+
+\subsection{Task-specific metric family}
+
+The framework uses a family of task-aware scores rather than a single universal metric. For one-dimensional operator targets, the ideal angular envelope is written as
+\begin{equation}
+g_m(\theta)=\left|\frac{\sin\theta}{\sin\theta_{\max}}\right|^m,
+\end{equation}
+where $m=2,3,4$ denotes second-, third-, and fourth-order operator behavior. At each wavelength row, the score is decomposed into center suppression, shape agreement, edge support, and finite-bandwidth persistence:
+\begin{equation}
+S_m=(1-w_b)\left(w_cS_c+w_sS_s+w_eS_e\right)+w_bS_b.
+\end{equation}
+In the present study, the coefficient set is
+\begin{equation}
+w_c=0.6,\qquad w_s=0.3,\qquad w_e=0.1,\qquad w_b=0.2.
+\end{equation}
+
+For polarization-independent operation, the two channels must simultaneously retain the desired row behavior while remaining matched at large angles:
+\begin{align}
+S_{\mathrm{PI}}&=(1-\beta)\min(S_p,S_s)+\beta S_{\mathrm{match}},\\
+S_{\mathrm{match}}&=1-\frac{|T_{pp}(+\theta_a)-T_{ss}(+\theta_a)|+|T_{pp}(-\theta_a)-T_{ss}(-\theta_a)|}{2A_{\max}},
+\end{align}
+with $\beta=0.15$ and $\theta_a=40^\circ$ in the present evaluation protocol.
+
+For polarization-multiplexed operation, one channel is designated as active while the other is suppressed:
+\begin{align}
+S_{\mathrm{sil}}&=\max\left(0,1-\frac{R_{\mathrm{passive,max}}}{\tau}\right),\\
+S_{\mathrm{PM}}&=\frac{w_aS_{\mathrm{act}}+w_qS_{\mathrm{sil}}}{w_a+w_q},
+\end{align}
+with $w_a=0.7$ and $w_q=0.3$.
+
+For low-pass targets, the ideal row is modeled as
+\begin{equation}
+g_\sigma(\theta)=\exp\!\left(-\frac{\theta^2}{\sigma^2}\right),
+\end{equation}
+and the current protocol searches over $\sigma\in\{8^\circ,12^\circ,16^\circ\}$ to identify the best-matching effective passband width. The ranking itself is driven mainly by the row-shape term, while center transmission and edge rejection are retained as diagnostic quantities.
+
+For spatiotemporal differentiation, the target is evaluated on a two-dimensional wavelength--angle window:
+\begin{equation}
+G^{\star}(\lambda,\theta)\propto k_x^2(\theta)\bigl(\omega(\lambda)-\omega_0\bigr)^2.
+\end{equation}
+The corresponding score combines zero-line suppression, corner-lobe preservation, and auxiliary agreement terms:
+\begin{equation}
+S_{\mathrm{ST}}=0.50S_{\mathrm{zero}}+0.40S_{\mathrm{corner}}+0.10S_{\mathrm{aux}},
+\end{equation}
+where the auxiliary contribution balances weighted template error and modal projection consistency.
+
+\begin{table}[!htbp]
+\centering
+\caption{Task-specific metrics used in the present framework.}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.18\linewidth}>{\raggedright\arraybackslash}p{0.20\linewidth}>{\raggedright\arraybackslash}p{0.28\linewidth}X}
+\toprule
+Task & Target form & Main score components & Physical emphasis \\
+\midrule
+Second / third / fourth order & Row envelope $g_m(\theta)$ & center, shape, edge, bandwidth & operator zero, angular growth, outer-angle support, finite spectral persistence \\
+Polarization-independent & matched row response in both channels & per-channel row score + large-angle matching & simultaneous operator behavior and polarization consistency \\
+Polarization-multiplexed & active row + silent passive row & active-shape + passive suppression & one channel performs the task while the other remains quiet \\
+Low-pass & Gaussian row envelope $g_\sigma(\theta)$ & shape-dominant score with center / edge diagnostics & central passband and outer-angle rejection \\
+Spatiotemporal differentiation & 2D window $k_x^2(\omega-\omega_0)^2$ & zero lines, corners, weighted error, projection & joint wavelength--angle morphology rather than a single row \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\placeholderfigure
+{Suggested final content: freeform structure generation, RCWA labeling on the wavelength--angle grid, and a compact schematic of the row-wise and 2D scoring logic.}
+{Placeholder for the dataset preparation and metric definition overview. A final figure can integrate the geometric generation process, the response-grid labeling stage, and representative score decompositions for row and window targets.}
+
+\section{Forward Surrogate Architecture and Design Rationale}
+
+\subsection{Forward mapping}
+
+The forward surrogate approximates the map
+\begin{equation}
+\mathcal{F}_{\phi}: \{0,1\}^{64\times64}\rightarrow \mathbb{R}^{2\times11\times17},
+\end{equation}
+which predicts the joint $\tp$ and $\ts$ magnitudes over the full wavelength--angle sampling grid. Its role is deliberately limited but physically important: it provides a fast approximation to the structure-to-response map for candidate screening and supplies the response-consistency term used later in diffusion training.
+
+\subsection{Architecture summary}
+
+The surrogate is constructed as a coordinate-aware convolutional encoder followed by multiscale response-grid fusion. Two Cartesian coordinate channels are concatenated to the binary geometry, allowing the network to correlate planar layout with directional scattering. A hierarchy of residual blocks then extracts features at progressively coarser scales. The deepest latent representation is globally pooled, passed through a multilayer perceptron, and broadcast back onto the response grid. Finally, all feature levels are interpolated to the $11\times17$ response resolution and fused together with the explicit response-grid coordinates.
+
+This architecture can be summarized as
+\begin{equation}
+\Rpred = H\!\left(P_0,P_1,P_2,P_3,G_{\mathrm{global}},C_{\lambda\theta}\right),
+\end{equation}
+where $P_\ell$ denotes projected multiscale encoder features, $G_{\mathrm{global}}$ denotes the broadcast latent summary, and $C_{\lambda\theta}$ denotes the response-grid coordinate field.
+
+\subsection{Design rationale}
+
+The coordinate channels are useful because angle-resolved scattering is not a translation-invariant texture problem. The multiscale encoder is needed because operator performance depends on both small subwavelength boundary features and large-scale topology. The global broadcast branch allows every wavelength--angle location to access long-range structural statistics such as fill ratio, connectivity, and gross symmetry. Joint prediction of $\tp$ and $\ts$ is preferable to training two unrelated models because both channels originate from the same geometry and their correlation structure is part of the task definition itself.
+
+\subsection{Training protocol}
+
+The surrogate is trained on the standardized response tensor using an $L_1$ loss,
+\begin{equation}
+\loss_{\mathrm{fwd}}=\left\|\mathcal{F}_{\phi}(x)-\widetilde{\mathbf{R}}\right\|_1.
+\end{equation}
+The present training setup uses a batch size of $64$, AdamW optimization with learning rate $10^{-4}$ and weight decay $10^{-4}$, a $90\%/10\%$ train--validation split, gradient clipping at $1.0$, ReduceLROnPlateau learning-rate scheduling, and early stopping. Symmetry-preserving flips are used as data augmentation during training.
+
+\begin{table}[!htbp]
+\centering
+\caption{Detailed architecture of the forward surrogate.}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.18\linewidth}>{\raggedright\arraybackslash}p{0.18\linewidth}>{\raggedright\arraybackslash}p{0.17\linewidth}X}
+\toprule
+Stage & Resolution / channels & Main operation & Architectural role \\
+\midrule
+Input assembly & $64\times64$, $1+2$ channels & binary structure plus $(x,y)$ coordinates & breaks pure translation invariance and exposes geometric position information \\
+Stem block & $64\times64$, $32$ channels & convolution + residual refinement & extracts low-level boundary and occupancy features \\
+Encoder stage 1 & $32\times32$, $64$ channels & residual downsampling & captures short-range morphology with enlarged receptive field \\
+Encoder stage 2 & $16\times16$, $128$ channels & residual downsampling & fuses mesoscale topology and local motifs \\
+Encoder stage 3 & $8\times8$, $256$ channels & residual downsampling & aggregates global structure-aware context \\
+Latent refinement & $8\times8$, $256$ channels & stacked residual blocks & stabilizes the deepest representation before fusion \\
+Global context branch & pooled latent $\rightarrow128$ channels & adaptive pooling + MLP + broadcast & injects device-level topology and effective fill information into every response location \\
+Multiscale projection & all stages $\rightarrow 11\times17$ & bilinear interpolation to response grid & aligns all learned features with the physical wavelength--angle manifold \\
+Grid-coordinate injection & $11\times17$, $2$ channels & explicit response-plane coordinates & distinguishes central / outer angles and short / long wavelengths \\
+Fusion block & $11\times17$, concatenated multiscale tensor & convolutional fusion across scales & combines local, global, and coordinate information on the output grid \\
+Prediction head & $11\times17$, $2$ channels & final convolutional regression head & jointly predicts $\tp$ and $\ts$ maps \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption{Forward surrogate training protocol.}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.28\linewidth}X}
+\toprule
+Item & Setting \\
+\midrule
+Loss & pointwise normalized-space $L_1$ regression \\
+Optimizer & AdamW \\
+Learning rate / weight decay & $10^{-4}$ / $10^{-4}$ \\
+Batch size & $64$ \\
+Train--validation split & $90\%$ / $10\%$ \\
+Stabilization & gradient clipping, adaptive learning-rate decay, early stopping \\
+Augmentation & symmetry-preserving flips only \\
+Validation readout & denormalized physical-space MAE in addition to normalized loss \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\placeholderfigure
+{Suggested final content: input structure plus coordinate channels, residual encoder stages, global latent broadcast, multiscale projection to the response grid, and the dual-channel output head.}
+{Placeholder for the forward surrogate architecture. A final figure can present the coordinate-aware encoder, the multiscale response-grid fusion pathway, and the dual-polarization prediction head in one consolidated diagram.}
+
+\section{Conditional Diffusion Inverse Design: Theory, Architecture, and Conditioning}
+
+\subsection{Forward diffusion process}
+
+The inverse problem is treated as a conditional diffusion process because a single target response may correspond to multiple admissible structures. Let $x_0\in[-1,1]^{1\times64\times64}$ denote a clean structure image after linear remapping from the binary interval $[0,1]$. The forward noising Markov chain is written as
+\begin{equation}
+q(x_t|x_{t-1})=\mathcal{N}\!\left(x_t;\sqrt{1-\beta_t}\,x_{t-1},\beta_t I\right),
+\end{equation}
+with a cosine schedule for $\beta_t$. By repeated composition, the marginal distribution at step $t$ has the closed form
+\begin{equation}
+q(x_t|x_0)=\mathcal{N}\!\left(x_t;\sqrt{\bar{\alpha}_t}\,x_0,(1-\bar{\alpha}_t)I\right),
+\end{equation}
+where
+\begin{equation}
+\alpha_t=1-\beta_t,\qquad \bar{\alpha}_t=\prod_{s=1}^{t}\alpha_s.
+\end{equation}
+Equivalently,
+\begin{equation}
+x_t=\sqrt{\bar{\alpha}_t}\,x_0+\sqrt{1-\bar{\alpha}_t}\,\epsilon,\qquad \epsilon\sim\mathcal{N}(0,I).
+\end{equation}
+
+\subsection{Reverse model and velocity parameterization}
+
+The reverse process seeks a parameterized model
+\begin{equation}
+p_{\theta}(x_{t-1}|x_t,\mathbf{c}),
+\end{equation}
+conditioned on the target response tensor $\mathbf{c}$. In standard diffusion formulations, one may predict either the injected noise $\epsilon$, the clean sample $x_0$, or a linear combination of the two. In the present framework, the chosen target is the velocity parameter
+\begin{equation}
+v^\star=\sqrt{\bar{\alpha}_t}\,\epsilon-\sqrt{1-\bar{\alpha}_t}\,x_0.
+\end{equation}
+This choice is convenient because the pair $(x_t,v^\star)$ can be linearly inverted to recover both $\epsilon$ and $x_0$. Starting from
+\begin{align}
+x_t &= \sqrt{\bar{\alpha}_t}\,x_0+\sqrt{1-\bar{\alpha}_t}\,\epsilon,\\
+v^\star &= \sqrt{\bar{\alpha}_t}\,\epsilon-\sqrt{1-\bar{\alpha}_t}\,x_0,
+\end{align}
+one directly obtains
+\begin{align}
+\hat{x}_0 &= \sqrt{\bar{\alpha}_t}\,x_t-\sqrt{1-\bar{\alpha}_t}\,\hat{v},\\
+\hat{\epsilon} &= \sqrt{1-\bar{\alpha}_t}\,x_t+\sqrt{\bar{\alpha}_t}\,\hat{v},
+\end{align}
+where $\hat{v}=v_{\theta}(x_t,t,\mathbf{c})$ is the network prediction. This is the parameterization used throughout training and sampling.
+
+\subsection{Training objective}
+
+The diffusion loss is the mean-squared error between predicted and target velocity:
+\begin{equation}
+\loss_{\mathrm{diff}}=\mathbb{E}_{x_0,\epsilon,t}\left[\left\|v_{\theta}(x_t,t,\mathbf{c})-v^\star\right\|_2^2\right].
+\end{equation}
+This basic objective is then augmented with two physically motivated regularizers:
+\begin{equation}
+\loss_{\mathrm{total}}=\loss_{\mathrm{diff}}+\lambda_{\mathrm{phys}}\loss_{\mathrm{phys}}+\lambda_{\mathrm{bin}}\loss_{\mathrm{bin}}.
+\end{equation}
+The response-consistency term is
+\begin{equation}
+\loss_{\mathrm{phys}}=\left\|\mathcal{F}_{\phi}\!\left(\frac{\hat{x}_0+1}{2}\right)-\mathbf{c}\right\|_1,
+\end{equation}
+which compares the surrogate-predicted response of the denoised sample against the target condition. The binarization term is
+\begin{equation}
+\loss_{\mathrm{bin}}=\mathrm{mean}\!\left(x(1-x)\right),
+\end{equation}
+which penalizes ambiguous gray values in the denoised prediction. In the present training setup,
+\begin{equation}
+\lambda_{\mathrm{phys}}=0.5,\qquad \lambda_{\mathrm{bin}}=0.05.
+\end{equation}
+
+\subsection{Conditional representation and conditioning mechanisms}
+
+The target response tensor
+\begin{equation}
+\mathbf{c}\in\mathbb{R}^{2\times11\times17}
+\end{equation}
+is encoded by a dedicated condition encoder rather than by a single label embedding. The condition encoder outputs three complementary objects:
+\begin{enumerate}[leftmargin=1.5em]
+\item a global condition embedding,
+\item multiscale condition feature maps,
+\item a sequence of spectral tokens.
+\end{enumerate}
+These three condition objects enter the U-Net in distinct ways. First, multiscale condition maps are additively injected into residual blocks after suitable resizing. Second, the global condition embedding is concatenated with the time embedding and converted into scale--shift modulation coefficients inside residual blocks. Third, token-level cross-attention is applied in the deeper latent hierarchy, allowing spatial features to attend directly to the full spectral condition sequence.
+
+\subsection{Classifier-free guidance and sampling}
+
+Classifier-free guidance is implemented by randomly dropping the true condition during training and replacing it with a learned null condition. At inference time, the conditional and unconditional predictions are combined as
+\begin{equation}
+v_{\mathrm{cfg}}=v_{\mathrm{uncond}}+s_{\mathrm{cfg}}\left(v_{\mathrm{cond}}-v_{\mathrm{uncond}}\right),
+\end{equation}
+where the default guidance strength is $s_{\mathrm{cfg}}=3.0$. Sampling starts from Gaussian noise, iterates the reverse process from $t=T-1$ to $0$, remaps the final result from $[-1,1]$ to $[0,1]$, and thresholds it at $0.5$ to obtain a binary candidate structure.
+
+\begin{table}[!htbp]
+\centering
+\caption{Detailed architecture of the conditional diffusion inverse model.}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.20\linewidth}>{\raggedright\arraybackslash}p{0.18\linewidth}>{\raggedright\arraybackslash}p{0.18\linewidth}X}
+\toprule
+Module & Resolution / form & Main operation & Architectural role \\
+\midrule
+Noisy input branch & $64\times64$, $1$ channel & diffusion-state input convolution & initializes the spatial denoising stream \\
+Time embedding path & vector embedding & sinusoidal embedding + MLP & encodes diffusion time step for all residual blocks \\
+Condition encoder stem & $11\times17$, multi-channel & coordinate-aware convolutional encoding & extracts structured response features from the target tensor \\
+Condition downsampling path & $11\times17 \rightarrow 6\times9 \rightarrow 3\times5$ & residual downsampling & builds multiscale condition maps aligned with U-Net depths \\
+Global condition embedding & vector embedding & pooled condition summary & provides compact response-level context for scale--shift modulation \\
+Spectral token projection & token sequence & flatten + linear projection & converts deep condition features into tokens for cross-attention \\
+Encoder residual stage 1 & shallow spatial level & residual block + condition-map injection & couples early geometry denoising to high-resolution condition maps \\
+Encoder residual stage 2 & intermediate spatial level & residual block + condition-map injection & matches mesoscale geometry updates to intermediate condition maps \\
+Deep encoder stage & deep spatial level & residual block + self-attention + cross-attention & lets latent geometry features access global condition tokens \\
+Bottleneck block & deepest latent level & residual blocks + self-attention + cross-attention & performs globally conditioned denoising at the most compressed representation \\
+Decoder stage 1 & deep upsampling level & skip fusion + residual block + cross-attention & reconstructs geometry while retaining token-level global conditioning \\
+Decoder stage 2 & intermediate upsampling level & skip fusion + residual block & restores mid-scale structure with condition-map support \\
+Decoder stage 3 & shallow upsampling level & skip fusion + residual block & reconstructs high-resolution binary boundaries under local conditioning \\
+Output projection & $64\times64$, $1$ channel & normalization + final convolution & predicts velocity field on the structure plane \\
+Classifier-free guidance & conditional / unconditional pair & guided score combination during sampling & strengthens target adherence in reverse diffusion \\
+Physics-consistency branch & surrogate-evaluated denoised sample & response-consistency regularization & ties generation to the target electromagnetic response \\
+Binarization regularizer & denoised sample in $[0,1]$ & gray-value penalty & encourages sharp binary outputs \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\placeholderfigure
+{Suggested final content: the forward diffusion process, the velocity-parameterized reverse model, multiscale condition injection, cross-attention, and classifier-free guidance.}
+{Placeholder for the conditional diffusion formulation. A final figure can combine the forward and reverse diffusion equations with the conditional U-Net, explicitly marking multiscale condition injection, global modulation, and token-level cross-attention.}
+
+\end{document}

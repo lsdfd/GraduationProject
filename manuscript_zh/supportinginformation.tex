@@ -1,0 +1,386 @@
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\setstretch{1.15}
+\usepackage[UTF8,fontset=fandol]{ctex}
+\usepackage{graphicx}
+\usepackage{amssymb,amsthm,amsmath}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage[section]{placeins}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.8}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
+
+\newcommand{\otf}{\textsf{OTF}}
+\newcommand{\tp}{T_{pp}}
+\newcommand{\ts}{T_{ss}}
+\newcommand{\lam}{\lambda}
+\newcommand{\ang}{\theta}
+\newcommand{\loss}{\mathcal{L}}
+\newcommand{\Rtar}{\mathbf{R}^{\star}}
+\newcommand{\Rpred}{\widehat{\mathbf{R}}}
+
+\newcommand{\placeholderfigure}[2]{%
+\begin{figure}[!htbp]
+\centering
+\fbox{%
+\begin{minipage}[c][2.1in][c]{0.9\linewidth}
+\centering
+\textbf{Figure Placeholder}\\[0.4em]
+\small #1
+\end{minipage}}
+\caption{#2}
+\end{figure}
+}
+
+\begin{document}
+
+\title{补充材料\\[0.4em]\large 物理一致的角分辨傅里叶算子超表面生成式逆向设计}
+\author{}
+\date{\today}
+\maketitle
+
+本补充材料用于展开正文中被简写的方法细节。行文方式将尽量保持论文补充材料风格，而不是工程说明风格，重点围绕数据集构建、前向代理模型，以及条件扩散逆向设计的理论与结构。
+
+\section{数据集制备与任务打分}
+
+\subsection{自由形态结构生成与物理标注}
+
+本文考虑的设计空间是尺寸为 $64\times64$ 的自由形态二值超表面图案，其中 $1$ 表示材料区域，$0$ 表示空气区域。每个结构由粗网格随机场出发，经 $C_4+\sigma_x$ 对称约束、平滑、二值化和形态学规整后得到。这样的构造方式一方面显著扩展了可探索的几何形态，另一方面又避免了过细桥连、小孤岛和微小孔洞等不利于制造的局部细节。
+
+数据集并不对应单一填充率，而是在
+\begin{equation}
+\mathrm{fill}\in\{0.4,0.5,0.6,0.7,0.8\}
+\end{equation}
+五个名义填充率档位上进行分布，同时进一步扰动粗网格尺度、平滑强度和最小特征阈值。这样得到的结构集合既包含拓扑层面的自由度，也包含材料占空比层面的系统变化。
+
+每个结构都通过 RCWA 进行标注。本文采用固定物理平台：硅图形层位于二氧化硅基底上，入射介质为空气；周期为 $500$~nm，结构层厚度为 $500$~nm。响应在波长、入射角和偏振保持传输通道上离散采样，因此训练目标不是单一器件标签，而是一个离散响应张量。
+
+\begin{table}[!htbp]
+\centering
+\caption{数据集与物理标注配置。}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.36\linewidth}X}
+\toprule
+项目 & 配置 \\
+\midrule
+结构表示 & 自由形态二值图案，$64\times64$ 像素 \\
+对称先验 & $C_4+\sigma_x$ \\
+二值约定 & $1=\mathrm{material}$，$0=\mathrm{air}$ \\
+名义填充率档位 & $0.4, 0.5, 0.6, 0.7, 0.8$ \\
+周期 & $500$ nm \\
+结构层厚度 & $500$ nm \\
+结构材料 & Si \\
+入射 / 输出介质 & Air / SiO$_2$ \\
+波长采样 & $800$--$1300$ nm，步长 $50$ nm（共 $11$ 点） \\
+角度采样 & $-40^\circ$ 到 $40^\circ$，步长 $5^\circ$（共 $17$ 点） \\
+保留通道 & $\tp$ 与 $\ts$ 幅值 \\
+响应张量尺寸 & $2\times11\times17$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{响应张量表示}
+
+对每个结构，物理标签可写为
+\begin{equation}
+\mathbf{R}(\lam,\ang)=
+\begin{bmatrix}
+\tp(\lam,\ang)\\
+\ts(\lam,\ang)
+\end{bmatrix}
+\in \mathbb{R}^{2\times 11\times 17}.
+\end{equation}
+因此，学习框架始终围绕两个对象展开：结构图像 $x\in\{0,1\}^{64\times64}$ 和响应张量 $\mathbf{R}$。在训练阶段，对响应张量采用逐格点标准化：
+\begin{equation}
+\widetilde{\mathbf{R}}_{qjk}=\frac{\mathbf{R}_{qjk}-\mu_{qjk}}{\sigma_{qjk}+\varepsilon},
+\end{equation}
+其中 $q$ 表示偏振通道，$j$ 表示波长索引，$k$ 表示角度索引。这样的处理不会把零点、泄漏带和弱响应肩部等物理上重要但数值较小的位置平均掉。
+
+\subsection{任务打分函数族}
+
+本文并不使用单一通用分数来覆盖全部算子目标，而是按物理功能定义一组 task-aware 指标。对于一维行算子目标，理想角谱包络写为
+\begin{equation}
+g_m(\theta)=\left|\frac{\sin\theta}{\sin\theta_{\max}}\right|^m,
+\end{equation}
+其中 $m=2,3,4$ 分别对应二阶、三阶和四阶算子。每个波长切片上的总分由中心抑制、形状拟合、边缘支撑和带宽保持共同构成：
+\begin{equation}
+S_m=(1-w_b)\left(w_cS_c+w_sS_s+w_eS_e\right)+w_bS_b.
+\end{equation}
+本文当前采用
+\begin{equation}
+w_c=0.6,\qquad w_s=0.3,\qquad w_e=0.1,\qquad w_b=0.2.
+\end{equation}
+
+对偏振无关任务，两个通道都必须保持目标行响应，并在大角度处彼此匹配：
+\begin{align}
+S_{\mathrm{PI}}&=(1-\beta)\min(S_p,S_s)+\beta S_{\mathrm{match}},\\
+S_{\mathrm{match}}&=1-\frac{|T_{pp}(+\theta_a)-T_{ss}(+\theta_a)|+|T_{pp}(-\theta_a)-T_{ss}(-\theta_a)|}{2A_{\max}},
+\end{align}
+其中 $\beta=0.15$，$\theta_a=40^\circ$。
+
+对偏振复用任务，一个通道负责执行目标，另一个通道尽量静默：
+\begin{align}
+S_{\mathrm{sil}}&=\max\left(0,1-\frac{R_{\mathrm{passive,max}}}{\tau}\right),\\
+S_{\mathrm{PM}}&=\frac{w_aS_{\mathrm{act}}+w_qS_{\mathrm{sil}}}{w_a+w_q},
+\end{align}
+当前取 $w_a=0.7$、$w_q=0.3$。
+
+对低通目标，理想角谱包络写为
+\begin{equation}
+g_\sigma(\theta)=\exp\!\left(-\frac{\theta^2}{\sigma^2}\right),
+\end{equation}
+并在 $\sigma\in\{8^\circ,12^\circ,16^\circ\}$ 的候选集合中搜索最合适的等效通带宽度。当前排序主要由形状项驱动，而中心通带保持和边缘抑制则作为诊断量保留。
+
+对时空微分任务，目标定义在二维 wavelength--theta 窗口上：
+\begin{equation}
+G^{\star}(\lambda,\theta)\propto k_x^2(\theta)\bigl(\omega(\lambda)-\omega_0\bigr)^2.
+\end{equation}
+其总分写为
+\begin{equation}
+S_{\mathrm{ST}}=0.50S_{\mathrm{zero}}+0.40S_{\mathrm{corner}}+0.10S_{\mathrm{aux}},
+\end{equation}
+其中辅助项同时考虑加权模板误差与模式投影一致性。
+
+\begin{table}[!htbp]
+\centering
+\caption{本文使用的任务打分摘要。}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.18\linewidth}>{\raggedright\arraybackslash}p{0.20\linewidth}>{\raggedright\arraybackslash}p{0.28\linewidth}X}
+\toprule
+任务 & 目标形式 & 主要分数组成 & 物理含义 \\
+\midrule
+二阶 / 三阶 / 四阶 & 行包络 $g_m(\theta)$ & 中心、形状、边缘、带宽 & 零点、增长规律、外角响应、有限带宽保持 \\
+偏振无关 & 双通道共享行响应 & 双通道行分数 + 大角度匹配 & 同时实现目标功能并保持偏振一致性 \\
+偏振复用 & 主动行 + 静默被动行 & 主动通道形状 + 被动抑制 & 一个通道工作、另一个通道安静 \\
+低通 & 高斯行包络 $g_\sigma(\theta)$ & 形状主导，辅以中心 / 边缘诊断 & 中心通带与外角抑制 \\
+时空微分 & 2D 窗口 $k_x^2(\omega-\omega_0)^2$ & 零线、角落、模板误差、模式投影 & 联合波长--角度形貌而非单行匹配 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\placeholderfigure
+{建议后续正式配图：自由形态结构生成、RCWA 标注网格、行打分与二维窗口打分的统一示意。}
+{数据集制备与任务打分占位图。正式图可将结构生成、物理标注和典型评分分解统一到一张总览图中。}
+
+\section{前向代理模型结构与设计考虑}
+
+\subsection{前向映射目标}
+
+前向代理模型所近似的是
+\begin{equation}
+\mathcal{F}_{\phi}: \{0,1\}^{64\times64}\rightarrow \mathbb{R}^{2\times11\times17},
+\end{equation}
+即从结构直接预测整个双偏振 wavelength--theta 响应张量。它的作用边界很明确：不直接替代严格电磁仿真给出最终结论，而是为候选筛选和逆向训练提供快速的响应近似。
+
+\subsection{结构设计}
+
+当前 surrogate 采用带坐标注入的卷积编码器与多尺度响应网格融合结构。输入端首先将二值结构图与两个笛卡尔坐标通道拼接，使模型能够把平面布局与角分辨散射方向性联系起来。随后，多层残差编码器在不同尺度上抽取局部细节与全局拓扑特征。最深层 latent 经过全局池化和 MLP 后广播回整个响应网格，使每个输出格点都能够感知填充率、连通性与整体拓扑信息。最后，各尺度特征在 $11\times17$ 的响应平面上融合，并与显式的响应网格坐标共同输入输出头，得到双通道预测。
+
+因此，整体结构可概括为
+\begin{equation}
+\Rpred = H\!\left(P_0,P_1,P_2,P_3,G_{\mathrm{global}},C_{\lambda\theta}\right),
+\end{equation}
+其中 $P_\ell$ 表示不同尺度特征在响应网格上的投影，$G_{\mathrm{global}}$ 表示全局 latent 广播分支，$C_{\lambda\theta}$ 表示响应平面的显式坐标场。
+
+\subsection{物理考虑}
+
+输入坐标注入的必要性在于，角分辨散射不是普通的平移不变纹理问题。多尺度编码是必要的，因为器件性能同时依赖边界级局部结构和整体拓扑。全局广播分支则使每个波长--角度采样点都能获得长程结构信息。两个偏振通道采用联合输出，也更符合物理对象本身的性质，因为 $\tp$ 和 $\ts$ 都由同一几何产生，其相关性本身就是偏振无关和偏振复用任务的重要组成部分。
+
+\subsection{训练设置}
+
+前向代理训练使用标准化后的响应张量作为监督信号，主损失为
+\begin{equation}
+\loss_{\mathrm{fwd}}=\left\|\mathcal{F}_{\phi}(x)-\widetilde{\mathbf{R}}\right\|_1.
+\end{equation}
+当前训练配置采用 batch size $64$、AdamW 优化器、学习率 $10^{-4}$、权重衰减 $10^{-4}$、$90\%/10\%$ 的训练/验证划分、梯度裁剪、学习率自适应衰减与 early stopping。训练时同时使用保持物理定义不变的对称翻转增强。
+
+\begin{table}[!htbp]
+\centering
+\caption{前向代理模型的详细架构。}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.18\linewidth}>{\raggedright\arraybackslash}p{0.18\linewidth}>{\raggedright\arraybackslash}p{0.17\linewidth}X}
+\toprule
+阶段 & 分辨率 / 通道 & 主要操作 & 架构作用 \\
+\midrule
+输入组装 & $64\times64$，$1+2$ 通道 & 二值结构与 $(x,y)$ 坐标拼接 & 打破纯平移不变性并显式提供几何位置信息 \\
+Stem block & $64\times64$，$32$ 通道 & 卷积 + 残差细化 & 提取低层边界与填充特征 \\
+编码阶段 1 & $32\times32$，$64$ 通道 & 残差下采样 & 捕捉短程形貌并扩大感受野 \\
+编码阶段 2 & $16\times16$，$128$ 通道 & 残差下采样 & 融合中尺度拓扑与局部结构母题 \\
+编码阶段 3 & $8\times8$，$256$ 通道 & 残差下采样 & 聚合更强的全局结构信息 \\
+latent 精炼 & $8\times8$，$256$ 通道 & 堆叠残差块 & 稳定最深层高阶表征 \\
+全局上下文分支 & 池化 latent $\rightarrow128$ 通道 & 自适应池化 + MLP + 广播 & 向全部输出位置注入整体拓扑与有效填充信息 \\
+多尺度投影 & 各尺度 $\rightarrow 11\times17$ & 双线性插值到响应网格 & 让全部特征在物理采样平面对齐 \\
+网格坐标注入 & $11\times17$，$2$ 通道 & 显式响应平面坐标 & 区分中心 / 外角与短波 / 长波位置 \\
+融合模块 & $11\times17$，拼接后的多尺度张量 & 卷积融合 & 统一局部、全局和坐标信息 \\
+输出头 & $11\times17$，$2$ 通道 & 最终卷积预测 & 联合输出 $\tp$ 与 $\ts$ 响应图 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[!htbp]
+\centering
+\caption{前向代理模型训练协议摘要。}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.28\linewidth}X}
+\toprule
+项目 & 设置 \\
+\midrule
+损失函数 & 标准化响应空间中的逐格点 $L_1$ 回归 \\
+优化器 & AdamW \\
+学习率 / 权重衰减 & $10^{-4}$ / $10^{-4}$ \\
+Batch size & $64$ \\
+训练 / 验证划分 & $90\%$ / $10\%$ \\
+稳定化策略 & 梯度裁剪、学习率自适应衰减、early stopping \\
+数据增强 & 仅采用保持物理定义不变的对称翻转 \\
+验证读出 & 同时关注标准化损失与反标准化后的物理空间 MAE \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\placeholderfigure
+{建议后续正式配图：输入结构与坐标通道、残差编码层级、全局广播、多尺度响应网格融合、双通道输出头。}
+{前向代理模型占位图。正式图可将坐标感知输入、多尺度编码与响应网格融合画成一张清晰的架构图。}
+
+\section{条件扩散逆向设计：理论、结构与条件嵌入}
+
+\subsection{扩散正向过程}
+
+由于同一目标响应往往对应多个可能结构，逆向问题被表述为条件扩散生成过程。设 $x_0\in[-1,1]^{1\times64\times64}$ 表示由二值结构线性映射得到的干净样本，则正向加噪马尔可夫链可写为
+\begin{equation}
+q(x_t|x_{t-1})=\mathcal{N}\!\left(x_t;\sqrt{1-\beta_t}\,x_{t-1},\beta_t I\right),
+\end{equation}
+其中 $\beta_t$ 由 cosine schedule 给出。经多步递推后，$x_t$ 关于 $x_0$ 的边缘分布可写成闭式：
+\begin{equation}
+q(x_t|x_0)=\mathcal{N}\!\left(x_t;\sqrt{\bar{\alpha}_t}\,x_0,(1-\bar{\alpha}_t)I\right),
+\end{equation}
+其中
+\begin{equation}
+\alpha_t=1-\beta_t,\qquad \bar{\alpha}_t=\prod_{s=1}^{t}\alpha_s.
+\end{equation}
+于是可以得到熟悉的重参数化形式：
+\begin{equation}
+x_t=\sqrt{\bar{\alpha}_t}\,x_0+\sqrt{1-\bar{\alpha}_t}\,\epsilon,\qquad \epsilon\sim\mathcal{N}(0,I).
+\end{equation}
+
+\subsection{反向过程与 velocity 参数化推导}
+
+目标是在给定条件 $\mathbf{c}$ 的情况下学习反向过程
+\begin{equation}
+p_{\theta}(x_{t-1}|x_t,\mathbf{c}).
+\end{equation}
+在扩散模型中，常见的预测对象包括噪声 $\epsilon$、干净样本 $x_0$，或二者的线性组合。本文采用的是 velocity 参数化，其目标定义为
+\begin{equation}
+v^\star=\sqrt{\bar{\alpha}_t}\,\epsilon-\sqrt{1-\bar{\alpha}_t}\,x_0.
+\end{equation}
+之所以采用这种形式，是因为它和 $(x_t,x_0,\epsilon)$ 之间具有简洁的线性可逆关系。由
+\begin{align}
+x_t &= \sqrt{\bar{\alpha}_t}\,x_0+\sqrt{1-\bar{\alpha}_t}\,\epsilon,\\
+v^\star &= \sqrt{\bar{\alpha}_t}\,\epsilon-\sqrt{1-\bar{\alpha}_t}\,x_0,
+\end{align}
+可直接解出
+\begin{align}
+\hat{x}_0 &= \sqrt{\bar{\alpha}_t}\,x_t-\sqrt{1-\bar{\alpha}_t}\,\hat{v},\\
+\hat{\epsilon} &= \sqrt{1-\bar{\alpha}_t}\,x_t+\sqrt{\bar{\alpha}_t}\,\hat{v},
+\end{align}
+其中 $\hat{v}=v_{\theta}(x_t,t,\mathbf{c})$ 是网络预测。也就是说，一旦预测了 velocity，就能同时恢复去噪结构估计和噪声估计，这也是当前参数化在数值上较稳定的原因之一。
+
+\subsection{训练目标与物理约束}
+
+扩散基本损失为 velocity 空间中的均方误差：
+\begin{equation}
+\loss_{\mathrm{diff}}=\mathbb{E}_{x_0,\epsilon,t}\left[\left\|v_{\theta}(x_t,t,\mathbf{c})-v^\star\right\|_2^2\right].
+\end{equation}
+但仅靠扩散重建损失并不足以保证生成结果具有正确的电磁响应，因此总目标写为
+\begin{equation}
+\loss_{\mathrm{total}}=\loss_{\mathrm{diff}}+\lambda_{\mathrm{phys}}\loss_{\mathrm{phys}}+\lambda_{\mathrm{bin}}\loss_{\mathrm{bin}}.
+\end{equation}
+其中响应一致性项为
+\begin{equation}
+\loss_{\mathrm{phys}}=\left\|\mathcal{F}_{\phi}\!\left(\frac{\hat{x}_0+1}{2}\right)-\mathbf{c}\right\|_1,
+\end{equation}
+即利用前向代理模型比较去噪样本的预测响应与目标条件；二值正则项为
+\begin{equation}
+\loss_{\mathrm{bin}}=\mathrm{mean}\!\left(x(1-x)\right),
+\end{equation}
+用于压制灰区不确定性。本文当前使用
+\begin{equation}
+\lambda_{\mathrm{phys}}=0.5,\qquad \lambda_{\mathrm{bin}}=0.05.
+\end{equation}
+
+\subsection{条件表示与条件嵌入方式}
+
+模型条件是双通道响应张量
+\begin{equation}
+\mathbf{c}\in\mathbb{R}^{2\times11\times17}.
+\end{equation}
+条件编码器并不只输出单一向量，而是同时产生三类表示：
+\begin{enumerate}[leftmargin=1.5em]
+\item 全局条件向量；
+\item 多尺度条件特征图；
+\item spectral token 序列。
+\end{enumerate}
+它们通过三条不同路径进入 U-Net：
+\begin{enumerate}[leftmargin=1.5em]
+\item \textbf{条件图注入：} 多尺度条件图经过尺寸匹配后，以加性方式注入残差块；
+\item \textbf{全局条件调制：} 全局条件向量与时间嵌入共同生成 scale--shift 参数，用来调制残差块内部的归一化特征；
+\item \textbf{token 级 cross-attention：} 深层 latent 特征通过 cross-attention 直接访问条件 token，从而耦合空间生成与全局光谱条件。
+\end{enumerate}
+
+\subsection{classifier-free guidance 与采样}
+
+训练时，模型以一定概率丢弃真实条件并用可学习的空条件替代，从而实现 classifier-free guidance 的训练准备。推理时，conditional 与 unconditional 的预测按
+\begin{equation}
+v_{\mathrm{cfg}}=v_{\mathrm{uncond}}+s_{\mathrm{cfg}}\left(v_{\mathrm{cond}}-v_{\mathrm{uncond}}\right)
+\end{equation}
+进行组合，其中默认引导强度为 $s_{\mathrm{cfg}}=3.0$。采样从高斯噪声出发，沿时间步逐步反推回 $x_0$，再从 $[-1,1]$ 映射回 $[0,1]$ 并以阈值 $0.5$ 二值化，最终得到候选结构。
+
+\begin{table}[!htbp]
+\centering
+\caption{条件扩散逆向模型的详细架构。}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.20\linewidth}>{\raggedright\arraybackslash}p{0.18\linewidth}>{\raggedright\arraybackslash}p{0.18\linewidth}X}
+\toprule
+模块 & 分辨率 / 形式 & 主要操作 & 架构作用 \\
+\midrule
+加噪输入支路 & $64\times64$，$1$ 通道 & 扩散状态输入卷积 & 初始化空间去噪主干 \\
+时间嵌入路径 & 向量嵌入 & 正弦时间嵌入 + MLP & 为全部残差块编码扩散步信息 \\
+条件编码器 stem & $11\times17$，多通道输入 & 带坐标的卷积编码 & 从目标响应张量抽取结构化条件特征 \\
+条件下采样路径 & $11\times17 \rightarrow 6\times9 \rightarrow 3\times5$ & 残差下采样 & 构建与 U-Net 深度对齐的多尺度条件图 \\
+全局条件向量 & 紧凑向量表征 & 池化后的条件摘要 & 为 scale--shift 调制提供全局响应上下文 \\
+光谱 token 投影 & token 序列 & 展平 + 线性投影 & 将深层条件特征转换为可注意力访问的 token \\
+编码阶段 1 & 浅层空间尺度 & 残差块 + 条件图注入 & 在高分辨率阶段引入局部条件约束 \\
+编码阶段 2 & 中间空间尺度 & 残差块 + 条件图注入 & 将中尺度几何演化与中尺度条件图绑定 \\
+深层编码阶段 & 深层空间尺度 & 残差块 + self-attention + cross-attention & 让 latent 几何特征访问全局条件 token \\
+瓶颈模块 & 最深 latent 层级 & 残差块 + self-attention + cross-attention & 在最压缩表征中进行全局条件化去噪 \\
+解码阶段 1 & 深层上采样尺度 & skip 融合 + 残差块 + cross-attention & 在重建初期保持 token 级全局条件约束 \\
+解码阶段 2 & 中间上采样尺度 & skip 融合 + 残差块 & 恢复中尺度几何结构并承接条件图信息 \\
+解码阶段 3 & 浅层上采样尺度 & skip 融合 + 残差块 & 重建高分辨率边界与二值轮廓 \\
+输出投影 & $64\times64$，$1$ 通道 & 归一化 + 最终卷积 & 在结构平面上预测 velocity 场 \\
+Classifier-free guidance & conditional / unconditional 对 & 采样时的引导组合 & 强化反向扩散中的目标条件约束 \\
+Physics consistency 分支 & surrogate 评估的去噪样本 & 响应一致性正则 & 将生成过程重新绑定到目标电磁响应 \\
+二值正则 & 映射到 $[0,1]$ 的去噪样本 & 灰值惩罚 & 鼓励输出接近清晰二值结构 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\placeholderfigure
+{建议后续正式配图：扩散正向过程、velocity 参数化、条件 U-Net、三类条件嵌入路径与 classifier-free guidance。}
+{条件扩散逆向设计占位图。正式图建议将扩散公式推导、U-Net 主干以及条件图 / 全局向量 / token 三条条件嵌入路径统一展示。}
+
+\end{document}

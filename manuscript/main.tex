@@ -1,48 +1,53 @@
-\documentclass[10pt,leqno]{amsart}
+\documentclass[10pt,a4paper]{article}
 
+% ============================================
+% arXiv Standard Single Column Template
+% ============================================
+
+% ===== Page Setup =====
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\setstretch{1.18}
+
+% ===== Basic Packages =====
 \usepackage{graphicx}
-\baselineskip=16pt
-
-\usepackage{indentfirst,csquotes}
-\topmargin=.5cm
-\textheight=20cm
-\textwidth=32cc
-\baselineskip=16pt
-\evensidemargin=.9cm
-\oddsidemargin=.9cm
-
 \usepackage{amssymb,amsthm,amsmath}
-\usepackage{xcolor,paralist,hyperref,titlesec,fancyhdr,etoolbox}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{natbib}
+\usepackage[section]{placeins}
 
-\newtheorem{theorem}{Theorem}[]
-\newtheorem{definition}[theorem]{Definition}
-\newtheorem{example}[theorem]{Example}
-\newtheorem{lemma}[theorem]{Lemma}
-\newtheorem{proposition}[theorem]{Proposition}
-\newtheorem{corollary}[theorem]{Corollary}
-\newtheorem{conjecture}[theorem]{Conjecture}
-
-\titleformat{\section}
-  {\normalfont\Large\bfseries\centering}
-  {\thesection.}{0.5em}{}
-\titlespacing*{\section}{0pt}{1.2ex}{0.8ex}
-
-\titleformat{\subsection}
-  {\normalfont\large\bfseries}
-  {\thesubsection.}{0.5em}{}
-\titlespacing*{\subsection}{0pt}{1ex}{0.5ex}
-
+% ===== Color Setup =====
 \hypersetup{
-  colorlinks=true,
-  linkcolor=black,
-  filecolor=black,
-  urlcolor=black,
-  citecolor=black
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=blue,
+    urlcolor=blue,
+    citecolor=blue
 }
 
-\def\proof{\noindent {\it Proof. $\, $}}
-\def\endproof{\hfill $\Box$ \vskip 5 pt }
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.8}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
 
+% ===== Abstract Style =====
+\makeatletter
+\renewenvironment{abstract}{%
+  \begin{center}%
+    \bfseries Abstract
+  \end{center}%
+  \par
+  \setlength{\parindent}{2em}%
+}{\par}
+\makeatother
+
+% ===== Custom Commands =====
 \newcommand{\otf}{\textsf{OTF}}
 \newcommand{\rcwa}{\textsf{RCWA}}
 \newcommand{\tp}{T_{pp}}
@@ -58,34 +63,39 @@
 \newcommand{\loss}{\mathcal{L}}
 \newcommand{\etal}{\textit{et al.}}
 
-\title[Physics-consistent generative inverse design]
-{Physics-consistent Generative Inverse Design of Angle-Resolved Fourier-Operator Metasurfaces}
-
-\author[Your Name]{Your Name}
-\date{\today}
-\address{School of XXX, University of XXX, City, Country}
-\email{your\_email@example.com}
-\keywords{metasurfaces, inverse design, Fourier optics, angle-resolved response, diffusion model, \rcwa, polarization multiplexing}
-
 \begin{document}
 
-\begin{abstract}
-We present a maintainable manuscript draft centered on physics-consistent generative inverse design of angle-resolved Fourier-operator metasurfaces. The governing thesis is that freeform Fourier-operator metasurface design should be formulated in a unified angle--frequency--polarization response space rather than as a collection of disconnected task-specific optimizations. Within this formulation, the inverse problem becomes conditional generation of physically admissible structures from target response fields, with physical consistency enforced through simulation-grounded supervision, candidate verification, and post-generation reranking. The resulting narrative emphasizes a unified design paradigm: second-order differentiation, polarization-selective operators, and spectrally structured transfer functions are treated as different slices of the same response-space objective rather than as separate application libraries.
-\end{abstract}
+% ===== Title =====
+\title{Physics-Consistent Generative Inverse Design of Angle-Resolved Fourier-Operator Metasurfaces}
+
+% ===== Author =====
+\author{%
+Your Name$^{1}$\thanks{Email: your\_email@example.com} \\
+\small $^{1}$School of XXX, University of XXX, City, Country%
+}
+
+% ===== Date =====
+\date{\today}
 
 \maketitle
 
-\input{sections/01_introduction}
-\input{sections/02_unified_response_formulation}
-\input{sections/03_physics_consistent_framework}
-\input{sections/04_experimental_setup}
-\input{sections/05_main_results}
-\input{sections/06_unified_angle_frequency_polarization_validation}
-\input{sections/07_ablation_and_analysis}
-\input{sections/08_discussion}
-\input{sections/09_conclusion}
+% ===== Abstract =====
+\begin{abstract}
+Fourier-operator metasurfaces are usually reported task by task, for example as differentiators, edge detectors, angular filters, or polarization-selective processors. Here we focus on Angle-Resolved Fourier-Operator Metasurfaces (AFOM) and propose a general framework for joint wavelength--theta--polarization design and control. In freeform inverse design, the key object to specify and recover is the optical transfer function itself over wavelength, incidence angle, and polarization. This paper rewrites the problem in that form and develops a physics-consistent generative design loop for freeform binary metasurfaces conditioned on the target response tensor. The workflow combines fabrication-aware structure generation, rigorous simulation-based labeling on a two-channel wavelength--angle grid, surrogate-assisted candidate screening, conditional diffusion-based inverse sampling, and simulation-verified reranking under task-specific scores. Within this unified formulation, a large-NA, high-transmission, broadband second-order differentiator is used as the leading benchmark, while polarization-independent, polarization-multiplexed, fourth-order, low-pass, and spatiotemporal targets are treated as controlled variations of the same response-space inverse problem. The results show that this formulation supports high-fidelity verified designs across these diverse targets, with multiple target designs achieving the highest performance among all current designs: second-order cases reach verified task scores above 0.93 across multiple wavelengths, the low-pass benchmark attains a verified score of 0.993, and polarization-independent, polarization-multiplexed, fourth-order, low-pass, and spatiotemporal targets are all successfully realized within the same framework. The main contribution is a response-centered paradigm for metasurface inverse design in which target definition, model training, candidate generation, and final selection remain tied to the verified scattering behavior of the device.
 
-\bibliographystyle{amsplain}
+\vspace{0.5em}
+\noindent\textbf{Keywords:} metasurfaces; inverse design; Fourier optics; angle-resolved response; diffusion model; full-wave simulation; polarization multiplexing
+\end{abstract}
+
+% ===== Main Content =====
+\input{sections/01_introduction}
+\input{sections/02_methods}
+\input{sections/03_results}
+\input{sections/04_discussion}
+\input{sections/05_conclusion}
+
+% ===== References =====
+\bibliographystyle{unsrt}
 \bibliography{refs}
 
 \end{document}

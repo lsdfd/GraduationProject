@@ -1,0 +1,83 @@
+\section{Methods}
+
+\subsection{Closed-loop framework}
+
+The proposed workflow is organized as a task-driven physical loop in which the generator is embedded within a broader inverse-design pipeline. A target operation is first converted into a task-aware score, and this score quantifies device performance on the desired function while defining the response object used for training, screening, and final reporting. The resulting wavelength--angle--polarization target then drives dataset construction, model training, conditional generation, and final simulation-based reranking. In symbolic form, the workflow can be written as
+\begin{equation}
+\mathbf{R}^{\star}\xrightarrow{\ \mathcal{S}\ }\mathcal{D}_{\mathrm{train}}
+\xrightarrow{\ \mathcal{F},\mathcal{G}\ }\widehat{\mathcal{G}}_{1:K}
+\xrightarrow{\ \mathrm{Sim.}\ }\widehat{\mathcal{G}}_{\mathrm{best}},
+\end{equation}
+where $\mathbf{R}^{\star}$ is the target response tensor, $\mathcal{S}$ denotes the task-specific score family, which converts agreement between the target OTF and device response into a directly comparable task-performance score, $\mathcal{D}_{\mathrm{train}}$ is the simulation-grounded training set, $\mathcal{F}$ is the forward surrogate, $\mathcal{G}$ is the conditional diffusion generator, and $\widehat{\mathcal{G}}_{1:K}$ denotes the generated candidate set. The reported output is determined by the candidate with the best verified simulation score under the chosen task, because the manuscript ultimately reports task performance rather than model-internal preference.
+
+This choice is essential for two reasons. First, the forward and inverse models are trained against the same optical object that is later used for physical verification. Second, the candidate set remains explicit throughout inference, which is necessary because the inverse mapping from response to geometry is multimodal. The role of the forward surrogate is especially important here. The diffusion model does not directly encode electromagnetic response laws; by itself it learns structure-generation patterns from data. The forward surrogate provides an approximate structure-to-response map and injects response-level physical constraints through the surrogate-guided physics loss used during diffusion training. This loss pulls the generative process back toward regions that satisfy the target electromagnetic response, so the sampled candidates are shaped jointly by data priors and physical consistency. The pipeline therefore treats rigorous electromagnetic simulation as the physical source of truth at both training and inference time, while learned models are used to allocate solver effort, populate the feasible set efficiently, and inject response-aware constraints during training.
+
+\subsection{Dataset construction, scoring, and augmentation}
+
+The geometry class is a fabrication-oriented $64\times64$ freeform binary pattern with the convention $1=\mathrm{material}$ and $0=\mathrm{air}$. The structure generator starts from a coarse random field, imposes $C_4+\sigma_x+\sigma_y$ symmetry, and upsamples to the final resolution. This $D_4$-type symmetry prior is introduced to promote in-plane isotropy while retaining freeform flexibility: under this constraint, the structure or angular response over the $0^{\circ}$--$45^{\circ}$ sector is already sufficient to determine the full metasurface by symmetry folding. Two rounds of Gaussian smoothing followed by binarization are then used to progressively form a manufacturable freeform pattern: the first round turns the rough random field into a continuous shape prototype, while the second further regularizes boundaries and suppresses fragmented high-frequency details. To approximately enforce a minimum feature size, the code then applies morphology-based opening and closing operations. The opening step removes small protrusions, isolated islands, and overly thin bridges, whereas the closing step fills small holes and narrow cracks; if the cleanup becomes too aggressive, the procedure falls back to a more conservative closing-only variant. This produces a structure space that goes well beyond a small analytic family while remaining compatible with fabrication-oriented constraints.
+
+All structures are labeled by RCWA under a fixed material stack consisting of a $500$~nm-period silicon patterned layer of thickness $500$~nm, illuminated from air and transmitting into silica. The response grid contains $11$ sampled wavelengths from $800$ to $1300$~nm in $50$~nm steps and $17$ sampled angles from $-40^{\circ}$ to $40^{\circ}$ in $5^{\circ}$ steps. Two polarization-preserving channels are retained, namely $T_{pp}$ and $T_{ss}$ magnitude maps, so each training condition is represented as a tensor of shape $[2,11,17]$. Although compact, this discretization is already sufficient to resolve wavelength drift, angular curvature, and polarization leakage across the operator families considered here.
+
+Let $R_q(\lambda_j,\theta)$ denote the verified response slice of polarization channel $q\in\{p,s\}$ at sampled wavelength $\lambda_j$, and let
+\begin{equation}
+\widetilde{R}_q(\lambda_j,\theta)=\frac{R_q(\lambda_j,\theta)}{\max_{\theta}R_q(\lambda_j,\theta)+\varepsilon}
+\end{equation}
+be the row-wise normalized response used for shape comparison. The role of the scoring functional family is to project each physical target onto a verified response criterion that is both task aware and numerically comparable across structures. In that sense, the score does not merely rank candidates after simulation; it acts as the explicit bridge from optical specification to learnable target.
+
+For the second-order differentiator with large NA, high transmission, and broadband operation, the ideal angular envelope is written as
+\begin{equation}
+g_2(\theta)=\left|\frac{\sin\theta}{\sin\theta_{\max}}\right|^{2},
+\end{equation}
+and the row-wise score is defined by
+\begin{equation}
+S_2=(1-\alpha)\left(w_c S_c+w_s S_s+w_e S_e\right)+\alpha S_b.
+\end{equation}
+Here $S_c$ rewards suppression near $\theta=0$, $S_s$ measures agreement with the target $k_x^2$-like envelope, $S_e$ rewards sufficiently strong outer-angle transmission, and $S_b$ enforces persistence of the same operator behavior at neighboring wavelengths. These four terms correspond respectively to low-spatial-frequency suppression, correct differentiator-like angular growth, preservation of high-spatial-frequency content, and finite-bandwidth robustness. Other task-specific scores are built on the same response-centered principle and are detailed in the Supporting Information.
+
+\subsection{Forward surrogate}
+
+The forward surrogate learns the mapping
+\begin{equation}
+\mathcal{F}_{\phi}: \mathbf{G}\in\{0,1\}^{64\times64}\mapsto \widehat{\mathbf{R}}\in\mathbb{R}^{2\times11\times17},
+\end{equation}
+where $\widehat{\mathbf{R}}(:,j,k)$ denotes the joint two-polarization prediction at the $j$th wavelength sample and the $k$th angle sample. Its role is intentionally limited but physically important: it provides a fast approximation to the structure-to-response map for large-scale candidate screening, supplies the response-consistency term used to guide diffusion training, and reallocates RCWA effort toward candidates that are more likely to satisfy the target response.
+
+Architecturally, the model is a coordinate-aware convolutional encoder followed by multiscale response-grid fusion. Two Cartesian coordinate channels are concatenated to the binary geometry so that the network can relate planar layout to angular scattering directionality rather than treating the pattern as a translation-invariant texture. Residual convolutional blocks then encode the structure across progressively coarser scales, which is important because local subwavelength boundaries and global topology influence the response in different ways. Instead of decoding back to the image plane, all feature levels are projected directly onto the $11\times17$ wavelength--angle grid and fused there, so the prediction head operates on the same physical sampling manifold used for RCWA labels.
+
+The deepest latent representation is further compressed by a global multilayer perceptron and broadcast to the whole response grid, injecting device-level information such as overall topology and effective fill into every wavelength--angle location. The response grid itself is also endowed with explicit coordinates, allowing the network to distinguish central from outer angles and short from long wavelengths. Finally, the two polarization-preserving channels are predicted jointly rather than separately, because $T_{pp}$ and $T_{ss}$ originate from the same geometry and their correlation or leakage is itself part of the physical specification.
+
+For training, the response tensor is normalized pointwise across channel, wavelength, and angle, invalid simulation samples are removed before statistics are computed, and augmentation is restricted to symmetry-preserving flips that leave the optical response unchanged. The surrogate is optimized with an $L_1$ loss in normalized response space,
+
+The surrogate is optimized with an $L_1$ loss in normalized response space,
+\begin{equation}
+\mathcal{L}_{\mathrm{fwd}}=\left\|\mathcal{F}_{\phi}(\mathbf{G})-\widetilde{\mathbf{R}}\right\|_{1},
+\end{equation}
+while physical-space MAE is tracked during validation after denormalization. In the retained training log, the normalized validation loss decreases from about $0.63$ at initialization to about $0.366$ near the end of training, which is sufficient for the model to act as a practical screening oracle even though final claims are still deferred to full-wave simulation.
+
+\subsection{Conditional diffusion inverse design}
+
+The inverse model is a conditional diffusion process that takes the target response tensor as condition and samples binary structure candidates. During training, binary layouts are remapped from $[0,1]$ to $[-1,1]$, a cosine noise schedule is used, and the model is trained in the velocity parameterization $v$. Let $x_0$ denote the clean structure, $x_t$ the noisy sample at time step $t$, and $\mathbf{c}$ the normalized target response tensor. The forward noising process is
+\begin{equation}
+x_t=\sqrt{\bar{\alpha}_t}\,x_0+\sqrt{1-\bar{\alpha}_t}\,\epsilon,\qquad \epsilon\sim\mathcal{N}(0,I),
+\end{equation}
+and the network learns $v_{\theta}(x_t,t,\mathbf{c})$ under a diffusion loss
+\begin{equation}
+\mathcal{L}_{\mathrm{diff}}=\left\|v_{\theta}(x_t,t,\mathbf{c})-v^{\star}(x_0,\epsilon,t)\right\|_2^2.
+\end{equation}
+
+The backbone is a conditional U-Net with three design choices that are particularly important for this problem. First, the condition is itself a structured two-channel response field, so the model uses a dedicated condition encoder in place of a simple class-label embedding. This encoder maps the target tensor into a global condition embedding, a hierarchy of condition feature maps, and a set of spectral tokens, so the same response specification is available in both compact and spatially structured forms. Second, the global embedding is injected into residual blocks together with the time embedding, while the condition feature maps are fused into the corresponding decoder and encoder resolutions; in parallel, cross-attention injects the spectral tokens into the latent spatial hierarchy, allowing local geometry evolution to remain coupled to the global wavelength--angle response pattern throughout denoising. Third, classifier-free guidance is enabled by condition dropout during training and by guided sampling during inference.
+
+Pure diffusion loss is not enough for this application, because a visually plausible binary layout can still be physically poor. The training objective therefore adds two auxiliary terms:
+\begin{equation}
+\mathcal{L}_{\mathrm{total}}
+=\mathcal{L}_{\mathrm{diff}}
++\lambda_{\mathrm{phys}}\mathcal{L}_{\mathrm{phys}}
++\lambda_{\mathrm{bin}}\mathcal{L}_{\mathrm{bin}},
+\end{equation}
+where $\mathcal{L}_{\mathrm{phys}}=\|\mathcal{F}_{\phi}(\widehat{x}_0)-\mathbf{c}\|_1$ encourages the denoised prediction to preserve the target response under the forward surrogate, and $\mathcal{L}_{\mathrm{bin}}$ penalizes uncertain gray values through $x(1-x)$. In this formulation, $\mathcal{L}_{\mathrm{phys}}$ is the mechanism that injects response-level physical constraints into diffusion training through the surrogate-predicted electromagnetic behavior. In the retained training setup, $\lambda_{\mathrm{phys}}=0.5$ and $\lambda_{\mathrm{bin}}=0.05$. The final saved validation loss is around $0.129$, with the physics term remaining a nontrivial contributor throughout training. This supports the interpretation that the inverse model is being pushed toward physically meaningful candidates instead of merely toward dataset likeness.
+
+\subsection{Physics-guided inference and simulation-based reranking}
+
+Inference is deliberately candidate-based. For each target case, an ideal target OTF over $(\lambda,\theta,p)$ is constructed, normalized with the saved statistics, and repeated $K$ times to condition batch sampling. The diffusion model then produces multiple binary candidates with classifier-free guidance. The surrogate supplies an inexpensive first-pass ranking, after which selected candidates are pushed back through full-wave simulation under the exact wavelength and angle points relevant to the task.
+
+The final metric is task specific but always evaluated in verified response space. For example, the second-order score combines center suppression, agreement with the ideal even-symmetric angular profile, and outer-angle support. The polarization-independent score adds channel matching. The polarization-multiplexed score rewards the active channel while suppressing the passive one. The spatiotemporal score evaluates the full wavelength--angle window instead of a single row. This division of labor is the practical definition of physics consistency in the paper: neural models generate and pre-rank candidates, while verified scattering responses determine what is ultimately reported as the design outcome.
