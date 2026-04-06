@@ -383,4 +383,55 @@ Physics consistency 分支 & surrogate 评估的去噪样本 & 响应一致性�
 {建议后续正式配图：扩散正向过程、velocity 参数化、条件 U-Net、三类条件嵌入路径与 classifier-free guidance。}
 {条件扩散逆向设计占位图。正式图建议将扩散公式推导、U-Net 主干以及条件图 / 全局向量 / token 三条条件嵌入路径统一展示。}
 
+\section{对比模型与评估维度}
+
+\subsection{对比模型}
+
+本文在统一的 response-centered 设定下比较几类具有代表性的逆向设计范式。Topology optimization 直接围绕目标任务分数迭代更新结构，其优点是物理指向明确，但当目标种类增多或需要探索多个候选解时，计算代价会迅速上升。
+
+CVAE 将目标响应作为条件，通过连续潜变量生成结构，优点是训练与采样都较稳定，但容易把本来多模态的可行解集压缩成更平滑、更平均的结果。cGAN 同样执行从目标响应到结构的条件生成，只是以对抗训练为核心。它可以生成更锐利的结构形态，但训练稳定性和对多种可行模式的覆盖通常更难兼顾。
+
+前向引导扩散模型与这些基线的差别主要有两点。第一，反向去噪过程天然更适合描述一对多的条件分布，因此与超表面逆向设计问题本身更匹配。第二，前向代理在训练中以响应一致性约束的方式参与，使生成过程不仅受到数据分布约束，还持续受到目标电磁响应的牵引。
+
+\subsection{评估维度}
+
+所有对比模型都在相同目标条件下，并采用同一套仿真后验证逻辑进行评估。本文把比较维度分成三类：
+\begin{enumerate}[leftmargin=1.5em]
+\item \textbf{任务表现：} best score、mean score、top-$k$ score 和阈值成功率；
+\item \textbf{响应保真：} 全波验证后的 response / spectrum MAE；
+\item \textbf{生成质量：} binary rate、diversity 和 inference time。
+\end{enumerate}
+这些维度分别衡量模型能否稳定命中高质量解、其真实光学响应是否贴近目标，以及生成结果是否适合后续制造导向筛选。
+
+\begin{table}[!htbp]
+\centering
+\caption{本文对比模型及评估维度摘要。}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.23\linewidth}>{\raggedright\arraybackslash}p{0.31\linewidth}X}
+\toprule
+模型 / 维度 & 核心思想 & 主要揭示的问题 \\
+\midrule
+Topology optimization & 围绕任务目标进行迭代结构更新 & 物理直接，但更偏向高代价单目标搜索 \\
+CVAE & 条件潜变量生成 & 采样高效，但潜空间压缩可能削弱多模态覆盖 \\
+cGAN & 对抗式条件生成 & 输出较锐利，但模式覆盖与训练稳定性更难兼顾 \\
+前向引导 diffusion & 带响应一致性约束的迭代去噪生成 & 更适合一对多逆向设计并朝高价值响应区域收缩 \\
+\midrule
+任务表现 & best、mean、top-$k$、success rate & 衡量模型能否反复找到高质量验证解 \\
+响应保真 & 验证后的 response / spectrum MAE & 衡量真实光学响应是否逼近目标条件 \\
+生成质量 & binary rate、diversity、inference time & 衡量输出是否适合制造、是否多样、以及获得成本 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{对比分析}
+
+前向引导扩散模型的优势，并不只是生成出的结构在视觉上更像二值超表面，而是它与逆向问题本身的结构更匹配。对同一个目标响应而言，可行结构往往天然是一对多的，因此扩散模型比单次确定性回归更适合去近似整个条件可行集。
+
+前向代理进一步强化了这一优势。如果没有响应引导，生成模型即便贴近训练数据分布，也可能偏离真正目标传递函数所对应的物理解空间。而在本文中，扩散模型在训练过程中持续通过前向代理检查去噪候选是否仍然朝目标响应靠近，因此更不容易偏离高价值解区域。对于本文这类“高分解稀疏但真实存在”的任务，这一点尤其重要。
+
+因此，前向引导扩散模型更有能力同时兼顾三件事：较高的验证任务分数、较低的响应失配，以及足够有用的候选多样性。这也是它成为本文核心逆向设计模型的主要原因。
+
+\placeholderfigure
+{建议后续正式配图：Topology optimization、CVAE、cGAN 与前向引导 diffusion 在任务表现、响应保真与生成质量三个维度上的统一比较。}
+{对比模型总览占位图。正式图可将代表性逆向设计范式与统一评估维度放在同一张图中展示。}
+
 \end{document}

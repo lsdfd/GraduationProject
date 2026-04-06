@@ -377,4 +377,63 @@ Binarization regularizer & denoised sample in $[0,1]$ & gray-value penalty & enc
 {Suggested final content: the forward diffusion process, the velocity-parameterized reverse model, multiscale condition injection, cross-attention, and classifier-free guidance.}
 {Placeholder for the conditional diffusion formulation. A final figure can combine the forward and reverse diffusion equations with the conditional U-Net, explicitly marking multiscale condition injection, global modulation, and token-level cross-attention.}
 
+\section{Comparative Models and Evaluation Dimensions}
+
+\subsection{Comparative models}
+
+The present study compares several representative inverse-design paradigms under a unified response-centered setting. Topology optimization starts directly from the target task score and iteratively updates the structure so as to improve verified performance. Its main advantage is physical directness, but the computational cost grows rapidly when many targets or many candidate solutions must be explored.
+
+The conditional variational autoencoder (CVAE) treats the target response as a condition and generates structures through a continuous latent variable. This formulation is efficient and stable, but it tends to compress a multimodal feasible set into smoother average solutions. The conditional generative adversarial network (cGAN) also maps target responses to structures, now through adversarial training. It can produce sharper outputs, yet its training stability and coverage of diverse feasible modes are often harder to maintain.
+
+The physics-guided diffusion model differs from these baselines in two ways. First, the reverse process naturally models a one-to-many conditional distribution, which is well matched to metasurface inverse design. Second, the forward surrogate is inserted as a response-consistency guide during training, so generation is steered not only by data statistics but also by whether the denoised candidate remains close to the desired electromagnetic response.
+
+\subsection{Evaluation dimensions}
+
+All comparative models are evaluated under the same target condition and the same simulation-based verification logic. The reported dimensions are grouped into three categories:
+\begin{enumerate}[leftmargin=1.5em]
+\item \textbf{Task performance:} best score, mean score, top-$k$ score, and success rate above threshold;
+\item \textbf{Response fidelity:} response or spectrum MAE after full-wave verification;
+\item \textbf{Generation quality:} binary rate, diversity, and inference time.
+\end{enumerate}
+Together, these dimensions measure whether a model can hit strong solutions, whether its verified optical response truly matches the target, and whether the generated structures are suitable for manufacturing-oriented screening.
+
+\begin{table}[!htbp]
+\centering
+\caption{Comparative models and the evaluation dimensions used in this study.}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.23\linewidth}>{\raggedright\arraybackslash}p{0.31\linewidth}X}
+\toprule
+Model / dimension & Main idea & What it is intended to reveal \\
+\midrule
+Topology optimization & iterative task-guided structure update & physically direct but expensive single-target search \\
+CVAE & conditional latent-variable generation & fast conditional generation with compact latent representation \\
+cGAN & adversarial conditional generation & sharp outputs with potentially limited mode coverage \\
+Physics-guided diffusion & iterative denoising with response-consistency guidance & one-to-many generation guided toward physically useful response regions \\
+\midrule
+Task performance & best, mean, top-$k$, threshold success rate & whether a method can repeatedly find strong verified solutions \\
+Response fidelity & verified response / spectrum MAE & whether the optical response is truly close to the target condition \\
+Generation quality & binary rate, diversity, inference time & whether outputs are manufacturable, diverse, and efficient to obtain \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Comparative discussion}
+
+The advantage of the physics-guided diffusion model is not only that it produces visually plausible binary structures, but that it is better aligned with the structure of the inverse problem itself. The mapping from target response to admissible metasurface geometry is intrinsically one-to-many, so a diffusion model is better suited than single-shot deterministic regression to approximate the full conditional feasible set.
+
+The forward surrogate further strengthens this advantage. Without response guidance, a generator may remain close to the training distribution while drifting away from the actual target transfer function. By contrast, the present diffusion model is trained so that denoised candidates are repeatedly pulled back toward the desired response manifold. This is particularly valuable in the present task family, where high-scoring solutions are sparse but physically meaningful.
+
+As a result, the forward-guided diffusion model is better positioned to balance three goals simultaneously: high verified task scores, low response mismatch, and useful candidate diversity. This balance is the main reason it becomes the central inverse-design model of the present study.
+
+\IfFileExists{figures/si_figure4_baseline_comparison.png}{
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{figures/si_figure4_baseline_comparison.png}
+\caption{Supplementary Figure 4. Baseline-comparison overview under the unified evaluation protocol. The top row summarizes generation quality in terms of best, mean, and top-3 task scores together with the verified best-candidate spectrum MAE. The bottom row compares the normalized top-1 angular response curves at the target wavelength of 1050 nm for the $|t_{pp}|$ and $|t_{ss}|$ channels. Physics-guided diffusion achieves the best balance between verified task score and spectrum fidelity while producing target-consistent response profiles.}
+\end{figure}
+}{
+\placeholderfigure
+{Place the user-provided baseline comparison panel at \texttt{manuscript/figures/si\_figure4\_baseline\_comparison.png}. The intended content is the four-panel overview comparing topology optimization, CVAE, cGAN, and diffusion in generation quality, spectrum MAE, and top-1 angular response curves.}
+{Placeholder for Supplementary Figure 4. Once the comparison panel is saved to the expected figure path, it will be inserted here automatically with the final caption.}
+}
+
 \end{document}

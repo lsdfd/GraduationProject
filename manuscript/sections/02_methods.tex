@@ -3,6 +3,14 @@
 \subsection{Closed-loop framework}
 
 The proposed workflow is organized as a task-driven physical loop in which the generator is embedded within a broader inverse-design pipeline. A target operation is first converted into a task-aware score, and this score quantifies device performance on the desired function while defining the response object used for training, screening, and final reporting. The resulting wavelength--angle--polarization target then drives dataset construction, model training, conditional generation, and final simulation-based reranking. In symbolic form, the workflow can be written as
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{figures/assets/figure1_framework.png}
+\caption{Overview of the physics-consistent AFOM inverse-design framework. A target wavelength--angle--polarization response tensor drives simulation-grounded dataset construction, forward-surrogate training, conditional diffusion-based inverse design, surrogate-assisted candidate selection, and final output verification across unified AFOM functional families.}
+\label{fig:framework}
+\end{figure}
+
+Figure~\ref{fig:framework} summarizes this closed-loop pipeline from target response specification to candidate generation and final task-specific output verification. In symbolic form, the workflow can be written as
 \begin{equation}
 \mathbf{R}^{\star}\xrightarrow{\ \mathcal{S}\ }\mathcal{D}_{\mathrm{train}}
 \xrightarrow{\ \mathcal{F},\mathcal{G}\ }\widehat{\mathcal{G}}_{1:K}

@@ -42,29 +42,27 @@
 \citation{phillips2021ensemble}
 \@writefile{toc}{\contentsline {section}{\numberline {2}Methods}{4}{section.2}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Closed-loop framework}{4}{subsection.2.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Overview of the physics-consistent AFOM inverse-design framework. A target wavelength--angle--polarization response tensor drives simulation-grounded dataset construction, forward-surrogate training, conditional diffusion-based inverse design, surrogate-assisted candidate selection, and final output verification across unified AFOM functional families.}}{5}{figure.1}\protected@file@percent }
+\newlabel{fig:framework}{{1}{5}{Overview of the physics-consistent AFOM inverse-design framework. A target wavelength--angle--polarization response tensor drives simulation-grounded dataset construction, forward-surrogate training, conditional diffusion-based inverse design, surrogate-assisted candidate selection, and final output verification across unified AFOM functional families}{figure.1}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Dataset construction, scoring, and augmentation}{5}{subsection.2.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Forward surrogate}{5}{subsection.2.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Conditional diffusion inverse design}{6}{subsection.2.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Physics-guided inference and simulation-based reranking}{7}{subsection.2.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {3}Results}{7}{section.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Second-Order Differentiators with Large NA, High Transmission, and Broadband Operation}{7}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Forward surrogate}{6}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Conditional diffusion inverse design}{7}{subsection.2.4}\protected@file@percent }
 \citation{cotrufo2023natcom,deng2024,qiu2025highorder,zhou2025laplace}
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Top ranked second-order candidates at 1050~nm. The ranking overview visualizes the concentration of operator-like responses that motivates task-aware simulation-based reranking.}}{8}{figure.1}\protected@file@percent }
-\newlabel{fig:second1050}{{1}{8}{Top ranked second-order candidates at 1050~nm. The ranking overview visualizes the concentration of operator-like responses that motivates task-aware simulation-based reranking}{figure.1}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Image-domain validation for the leading 1050~nm second-order result. The response-level agreement translates into practical edge-enhancement behavior rather than remaining a numerical score gain only.}}{9}{figure.2}\protected@file@percent }
-\newlabel{fig:imaging}{{2}{9}{Image-domain validation for the leading 1050~nm second-order result. The response-level agreement translates into practical edge-enhancement behavior rather than remaining a numerical score gain only}{figure.2}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Representative verified results used throughout the paper. Scores reflect task-specific rankings rather than abstract model confidence.}}{9}{table.1}\protected@file@percent }
-\newlabel{tab:cases}{{1}{9}{Representative verified results used throughout the paper. Scores reflect task-specific rankings rather than abstract model confidence}{table.1}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Generalization to other OTF targets}{9}{subsection.3.2}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Polarization-aware generalization. Left: polarization-independent top case at 1000~nm. Right: polarization-multiplexed top candidates at 1100~nm. The same inverse-design loop can either align the two channels or intentionally separate them.}}{10}{figure.3}\protected@file@percent }
-\newlabel{fig:pol}{{3}{10}{Polarization-aware generalization. Left: polarization-independent top case at 1000~nm. Right: polarization-multiplexed top candidates at 1100~nm. The same inverse-design loop can either align the two channels or intentionally separate them}{figure.3}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Generalization beyond second-order differentiation. Left: low-pass target at 1050~nm. Right: top spatiotemporal candidate at 950~nm from the wavelength--angle window ranking pipeline.}}{10}{figure.4}\protected@file@percent }
-\newlabel{fig:generalization}{{4}{10}{Generalization beyond second-order differentiation. Left: low-pass target at 1050~nm. Right: top spatiotemporal candidate at 950~nm from the wavelength--angle window ranking pipeline}{figure.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Physics-guided inference and simulation-based reranking}{8}{subsection.2.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Results}{8}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Second-Order Differentiators with Large NA, High Transmission, and Broadband Operation}{8}{subsection.3.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Top ranked second-order candidates at 1050~nm. The ranking overview visualizes the concentration of operator-like responses that motivates task-aware simulation-based reranking.}}{9}{figure.2}\protected@file@percent }
+\newlabel{fig:second1050}{{2}{9}{Top ranked second-order candidates at 1050~nm. The ranking overview visualizes the concentration of operator-like responses that motivates task-aware simulation-based reranking}{figure.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Image-domain validation for the leading 1050~nm second-order result. The response-level agreement translates into practical edge-enhancement behavior rather than remaining a numerical score gain only.}}{9}{figure.3}\protected@file@percent }
+\newlabel{fig:imaging}{{3}{9}{Image-domain validation for the leading 1050~nm second-order result. The response-level agreement translates into practical edge-enhancement behavior rather than remaining a numerical score gain only}{figure.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Representative verified results used throughout the paper. Scores reflect task-specific rankings rather than abstract model confidence.}}{10}{table.1}\protected@file@percent }
+\newlabel{tab:cases}{{1}{10}{Representative verified results used throughout the paper. Scores reflect task-specific rankings rather than abstract model confidence}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Generalization to other OTF targets}{10}{subsection.3.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Polarization-aware generalization. Left: polarization-independent top case at 1000~nm. Right: polarization-multiplexed top candidates at 1100~nm. The same inverse-design loop can either align the two channels or intentionally separate them.}}{11}{figure.4}\protected@file@percent }
+\newlabel{fig:pol}{{4}{11}{Polarization-aware generalization. Left: polarization-independent top case at 1000~nm. Right: polarization-multiplexed top candidates at 1100~nm. The same inverse-design loop can either align the two channels or intentionally separate them}{figure.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Generalization beyond second-order differentiation. Left: low-pass target at 1050~nm. Right: top spatiotemporal candidate at 950~nm from the wavelength--angle window ranking pipeline.}}{12}{figure.5}\protected@file@percent }
+\newlabel{fig:generalization}{{5}{12}{Generalization beyond second-order differentiation. Left: low-pass target at 1050~nm. Right: top spatiotemporal candidate at 950~nm from the wavelength--angle window ranking pipeline}{figure.5}{}}
 \citation{kaplan2020scaling}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Model comparison and evaluation protocol}{11}{subsection.3.3}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Comparison protocol used in this study. The metrics are computed after full-wave verification. Quantitative training endpoints are listed only where directly retained evidence is available.}}{11}{table.2}\protected@file@percent }
-\newlabel{tab:compare}{{2}{11}{Comparison protocol used in this study. The metrics are computed after full-wave verification. Quantitative training endpoints are listed only where directly retained evidence is available}{table.2}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {4}Discussion}{11}{section.4}\protected@file@percent }
 \citation{faraji2018folded,cai2024angleresolved}
 \citation{jiang2024multidimensional}
 \citation{guo2022stokes}
@@ -73,9 +71,10 @@
 \bibdata{refs}
 \bibcite{shastri2021photonics}{{1}{}{{}}{{}}}
 \bibcite{prucnal2016recent}{{2}{}{{}}{{}}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Discussion}{13}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Conclusion}{13}{section.5}\protected@file@percent }
 \bibcite{wetzstein2020inference}{{3}{}{{}}{{}}}
 \bibcite{yu2014}{{4}{}{{}}{{}}}
-\@writefile{toc}{\contentsline {section}{\numberline {5}Conclusion}{12}{section.5}\protected@file@percent }
 \bibcite{koenderink2015}{{5}{}{{}}{{}}}
 \bibcite{genevet2017}{{6}{}{{}}{{}}}
 \bibcite{kamali2018review}{{7}{}{{}}{{}}}
@@ -122,4 +121,4 @@
 \bibcite{jiang2024multidimensional}{{48}{}{{}}{{}}}
 \bibcite{guo2022stokes}{{49}{}{{}}{{}}}
 \providecommand\NAT@force@numbers{}\NAT@force@numbers
-\gdef \@abspage@last{15}
+\gdef \@abspage@last{17}

@@ -1,0 +1,128 @@
+\documentclass[10pt,twocolumn]{article}
+
+% ============================================
+% Optica-like Two-Column Draft Layout
+% ============================================
+
+% ===== Page Setup =====
+\usepackage[a4paper,margin=0.72in,columnsep=0.24in]{geometry}
+\setlength{\parindent}{1em}
+\setlength{\parskip}{0pt}
+
+% ===== Basic Packages =====
+\usepackage{graphicx}
+\usepackage{amssymb,amsthm,amsmath}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{natbib}
+\usepackage[section]{placeins}
+\usepackage{abstract}
+\usepackage{titlesec}
+\setlength{\emergencystretch}{1.5em}
+
+% ===== Color Setup =====
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.8}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
+
+% ===== Section Style =====
+\titleformat{\section}{\large\bfseries}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection.}{0.5em}{}
+\titlespacing*{\section}{0pt}{1.0ex plus 0.4ex minus 0.2ex}{0.5ex}
+\titlespacing*{\subsection}{0pt}{0.8ex plus 0.3ex minus 0.2ex}{0.4ex}
+
+% ===== Abstract Style =====
+\renewcommand{\abstractnamefont}{\normalfont\bfseries}
+\renewcommand{\abstracttextfont}{\small}
+\setlength{\absleftindent}{0pt}
+\setlength{\absrightindent}{0pt}
+
+% ===== Custom Commands =====
+\newcommand{\otf}{\textsf{OTF}}
+\newcommand{\rcwa}{\textsf{RCWA}}
+\newcommand{\tp}{T_{pp}}
+\newcommand{\ts}{T_{ss}}
+\newcommand{\lam}{\lambda}
+\newcommand{\ang}{\theta}
+\newcommand{\Rtar}{\mathbf{R}^{\star}}
+\newcommand{\Rpred}{\widehat{\mathbf{R}}}
+\newcommand{\Rsim}{\mathbf{R}_{\mathrm{sim}}}
+\newcommand{\G}{\mathcal{G}}
+\newcommand{\D}{\mathcal{D}}
+\newcommand{\score}{\mathcal{S}}
+\newcommand{\loss}{\mathcal{L}}
+\newcommand{\etal}{\textit{et al.}}
+
+\makeatletter
+\renewcommand\maketitle{%
+  \begingroup
+  \renewcommand\thefootnote{\fnsymbol{footnote}}%
+  \thispagestyle{plain}%
+  \twocolumn[{%
+    \centering
+    {\Large\bfseries \@title \par}%
+    \vspace{0.6em}
+    {\normalsize \@author \par}%
+    \vspace{0.35em}
+    {\footnotesize \@thanks \par}%
+    \vspace{0.1em}
+    {\small \@date \par}%
+    \vspace{0.8em}
+    \begin{minipage}{0.92\textwidth}
+    \small
+    \sloppy
+    \begin{abstract}
+    Fourier-operator metasurfaces are usually reported task by task, for example as differentiators, edge detectors, angular filters, or polarization-selective processors. Here we focus on Angle-Resolved Fourier-Operator Metasurfaces (AFOM) and propose a general framework for joint wavelength--theta--polarization design and control. In freeform inverse design, the key object to specify and recover is the optical transfer function itself over wavelength, incidence angle, and polarization. This paper rewrites the problem in that form and develops a physics-consistent generative design loop for freeform binary metasurfaces conditioned on the target response tensor. The workflow combines fabrication-aware structure generation, rigorous simulation-based labeling on a two-channel wavelength--angle grid, surrogate-assisted candidate screening, conditional diffusion-based inverse sampling, and simulation-verified reranking under task-specific scores. Within this unified formulation, a large-NA, high-transmission, broadband second-order differentiator is used as the leading benchmark, while polarization-independent, polarization-multiplexed, fourth-order, low-pass, and spatiotemporal targets are treated as controlled variations of the same response-space inverse problem. The results show that this formulation supports high-fidelity verified designs across these diverse targets, with multiple target designs achieving the highest performance among all current designs: second-order cases reach verified task scores above 0.93 across multiple wavelengths, the low-pass benchmark attains a verified score of 0.993, and polarization-independent, polarization-multiplexed, fourth-order, low-pass, and spatiotemporal targets are all successfully realized within the same framework. The main contribution is a response-centered paradigm for metasurface inverse design in which target definition, model training, candidate generation, and final selection remain tied to the verified scattering behavior of the device.
+
+    \vspace{0.5em}
+    \noindent\textbf{Keywords:} metasurfaces; inverse design; Fourier optics; angle-resolved response; diffusion model; full-wave simulation; polarization multiplexing
+    \end{abstract}
+    \end{minipage}
+    \vspace{0.8em}
+  }]%
+  \endgroup
+}
+\makeatother
+
+\begin{document}
+
+% ===== Title =====
+\title{Physics-Consistent Generative Inverse Design of Angle-Resolved Fourier-Operator Metasurfaces}
+
+% ===== Author =====
+\author{%
+Your Name$^{1}$\thanks{Email: your\_email@example.com} \\
+\small $^{1}$School of XXX, University of XXX, City, Country%
+}
+
+% ===== Date =====
+\date{\today}
+
+\maketitle
+
+% ===== Main Content =====
+\input{sections/01_introduction}
+\input{sections/02_methods}
+\input{sections/03_results}
+\input{sections/04_discussion}
+\input{sections/05_conclusion}
+
+% ===== References =====
+\bibliographystyle{unsrt}
+\bibliography{refs}
+
+\end{document}

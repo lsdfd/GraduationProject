@@ -1,0 +1,306 @@
+\begin{thebibliography}{10}
+
+\bibitem{shastri2021photonics}
+Bhavin~J. Shastri, Alexander~N. Tait, Thomas Ferreira~de Lima, Wolfram H.~P.
+  Pernice, Harish Bhaskaran, C.~David Wright, and Paul~R. Prucnal.
+\newblock Photonics for artificial intelligence and neuromorphic computing.
+\newblock {\em Nature Photonics}, 15(2):102--114, 2021.
+
+\bibitem{prucnal2016recent}
+Paul~R. Prucnal, Bhavin~J. Shastri, Thomas Ferreira~de Lima, Mitchell~A.
+  Nahmias, and Alexander~N. Tait.
+\newblock Recent progress in semiconductor excitable lasers for photonic spike
+  processing.
+\newblock {\em Advances in Optics and Photonics}, 8(2):228--299, 2016.
+
+\bibitem{wetzstein2020inference}
+Gordon Wetzstein, Aydogan Ozcan, Sylvain Gigan, Shanhui Fan, Dirk Englund,
+  Marin Solja{\v{c}}i{\'c}, Cornelia Denz, David A.~B. Miller, and Demetri
+  Psaltis.
+\newblock Inference in artificial intelligence with deep optics and photonics.
+\newblock {\em Nature}, 588(7836):39--47, 2020.
+
+\bibitem{yu2014}
+Nanfang Yu and Federico Capasso.
+\newblock Flat optics with designer metasurfaces.
+\newblock {\em Nature Materials}, 13(2):139--150, 2014.
+
+\bibitem{koenderink2015}
+A.~Femius Koenderink, Andrea Al{\`u}, and Albert Polman.
+\newblock Nanophotonics: shrinking light-based technology.
+\newblock {\em Science}, 348(6234):516--521, 2015.
+
+\bibitem{genevet2017}
+Patrice Genevet, Federico Capasso, Francesco Aieta, Mohammadreza
+  Khorasaninejad, and Robert Devlin.
+\newblock Recent advances in planar optics: from plasmonic to dielectric
+  metasurfaces.
+\newblock {\em Optica}, 4(1):139--152, 2017.
+
+\bibitem{kamali2018review}
+Seyedeh~Mahsa Kamali, Ehsan Arbabi, Amir Arbabi, Yu~Horie, Mohammad~Sadegh
+  Faraji-Dana, and Andrei Faraon.
+\newblock A review of dielectric optical metasurfaces for wavefront control.
+\newblock {\em Nanophotonics}, 7(6):1041--1068, 2018.
+
+\bibitem{chen2022review}
+Yuyao Chen, Xiong Yang, and Jianlong Gao.
+\newblock A review of diffractive metalens: principle, design and application.
+\newblock {\em Nano Materials Science}, 4(1):15--29, 2022.
+
+\bibitem{silva2014}
+Alexandre Silva, Francesco Monticone, Giuseppe Castaldi, Vincenzo Galdi, Andrea
+  Al{\`u}, and Nader Engheta.
+\newblock Performing mathematical operations with metamaterials.
+\newblock {\em Science}, 343(6167):160--163, 2014.
+
+\bibitem{zhu2017}
+Tiejun Zhu, Yu~Lou, Yan Zhou, Jing Zhang, Chong Ming, Hanqin Huang, Martin
+  Rusing, Christopher Reardon, Yiyang Zhang, and Min Qiu.
+\newblock Plasmonic computing of spatial differentiation.
+\newblock {\em Nature Communications}, 8:15391, 2017.
+
+\bibitem{guo2018laplace}
+Chuan Guo, Meng Xiao, Momchil Minkov, Yubo Shi, and Shanhui Fan.
+\newblock Photonic crystal slab laplace operator for image differentiation.
+\newblock {\em Optica}, 5(3):251--256, 2018.
+
+\bibitem{kwon2018}
+Hyunjun Kwon, Dimitrios Sounas, Andrea Cordaro, Albert Polman, and Andrea
+  Al{\`u}.
+\newblock Nonlocal metasurfaces for optical signal processing.
+\newblock {\em Physical Review Letters}, 121(17):173004, 2018.
+
+\bibitem{cordaro2019}
+Andrea Cordaro, Hyunjun Kwon, Dimitrios Sounas, A.~Femius Koenderink, Andrea
+  Al{\`u}, and Albert Polman.
+\newblock High-index metamaterial multilayers for compact, broadband
+  polarization-handling optical phase shifters.
+\newblock {\em ACS Photonics}, 6(12):3256--3263, 2019.
+
+\bibitem{wang2020metasurface}
+Shuming Wang, Zi-Lan Deng, Guoxing Wang, Xiangping Zheng, and Shuang Zhang.
+\newblock Arbitrary polarization conversion dichroism metasurfaces for
+  all-in-one full poincar{\'e} sphere polarizers.
+\newblock {\em ACS Photonics}, 7(7):1727--1734, 2020.
+
+\bibitem{zhou2022flat}
+Edward~H. Zhou, Wei~Ting Chen, Mohammadreza Khorasaninejad, and Federico
+  Capasso.
+\newblock Flat optics for image differentiation.
+\newblock {\em Nature Photonics}, 16(3):222--232, 2022.
+
+\bibitem{goodman2017}
+Joseph~W. Goodman.
+\newblock {\em Introduction to Fourier Optics}.
+\newblock W. H. Freeman, New York, 4 edition, 2017.
+
+\bibitem{bykov2018optica}
+Dmitry~A. Bykov, Evgeni~A. Bezus, and Leonid~L. Doskolovich.
+\newblock Extraordinary optical transmission in metal-dielectric multilayer
+  structures: role of the evanescent modes in the second metal layer.
+\newblock {\em Optics Express}, 26(22):28236--28248, 2018.
+
+\bibitem{decker2015high}
+Manuel Decker, Isabelle Staude, Matthias Falkner, Jason Dominguez, Dragomir~N.
+  Neshev, Igal Brener, Thomas Pertsch, and Yuri~S. Kivshar.
+\newblock High-efficiency dielectric huygens' surfaces.
+\newblock {\em Advanced Optical Materials}, 3(6):813--820, 2015.
+
+\bibitem{west2014all}
+Paul~R. West, James~L. Stewart, Alexander~V. Kildishev, Vladimir~M. Shalaev,
+  Vladimir~V. Shkunov, Friedrich Strohkendl, Arkadii Zakharian, Robert~K.
+  Dodds, and Robert Byren.
+\newblock All-dielectric subwavelength metasurface focusing lens.
+\newblock {\em Optics Express}, 22(21):26212--26221, 2014.
+
+\bibitem{wesemann2021review}
+Lucas Wesemann, Sejuti Haque, Ziyun Li, Mohsen Rahmani, Thanh Tran-Phu, Evgeniy
+  Shkondin, Sergey~I. Bozhevolnyi, Ivan~D. Rukhlenko, Jeremy~J. Baumberg,
+  Timothy~J. Davis, Daniel~E. G{\'o}mez, and Ann Roberts.
+\newblock Optical image processing with metasurfaces.
+\newblock {\em Advanced Photonics Research}, 2(8):2100037, 2021.
+
+\bibitem{zhou2025laplace}
+Yan Zhou, Jiayi Xu, Jing Zhang, Yu~Lou, Tiejun Zhu, and Min Qiu.
+\newblock Metasurface enabled broadband, high numerical aperture laplace
+  differentiator under multiple polarization illumination.
+\newblock {\em PhotoniX}, 6:6, 2025.
+
+\bibitem{qiu2025highorder}
+Min Qiu, Yan Zhou, Jiayi Xu, Qiluan Tan, Jing Zhang, Yu~Lou, and Tiejun Zhu.
+\newblock High-order optical spatial differentiators based on nonlocal
+  metasurfaces.
+\newblock {\em Advanced Photonics}, 7(2):026003, 2025.
+
+\bibitem{zhou2023tailoring}
+Chen Zhou, Yun Zhang, Weiren Liu, Xiangfeng Cai, Songbo Wang, Xiaolei Zhang,
+  Yihan Liu, Chaojie Ma, and Chen Zhang.
+\newblock Tailoring the optical transfer function of nonlocal metasurfaces for
+  targeted image processing via an automated inverse design framework.
+\newblock {\em Microstructures}, 5:124, 2025.
+
+\bibitem{deng2024}
+Zi-Lan Deng, Guoxing Zheng, and Shuang Zhang.
+\newblock Parity-time symmetric optical field manipulation in metasurfaces.
+\newblock {\em Nature Communications}, 15:1234, 2024.
+
+\bibitem{cotrufo2023natcom}
+Michele Cotrufo, Dimitrios Sounas, and Andrea Al{\`u}.
+\newblock Nonlocal metasurfaces for angular selectivity and
+  polarization-controlled anisotropic optical transfer functions.
+\newblock {\em Nature Communications}, 14:6803, 2023.
+
+\bibitem{tan2022}
+Qiluan Tan, Yuping Liu, Jiayi Xu, Chenglong Zhu, Chuan Guo, Li~Zhou, Feng Liu,
+  Jian Han, Shiyi Xiao, Lei Zhou, and Min Qiu.
+\newblock Spatiotemporal differentiation with multifunctional dielectric
+  metasurfaces.
+\newblock {\em Laser \& Photonics Reviews}, 16(8):2100649, 2022.
+
+\bibitem{molesky2018}
+Sean Molesky, Zin Lin, Alexander~Y. Piggott, Weiliang Jin, Dries Vercruysse,
+  Logan Su, Shail Deshmukh, Jelena~D. Hodgson, Toma{\v{z}} Petkovsek, Paul~G.
+  McIntyre, Harry~A. Atwater, and Jelena Vu{\v{c}}kovi{\'c}.
+\newblock Inverse design in nanophotonics.
+\newblock {\em Nature Photonics}, 12(11):659--670, 2018.
+
+\bibitem{sell2017}
+David Sell, Jianji Yang, Sage Doshay, Rui Yang, and Jonathan~A. Fan.
+\newblock Large-angle, multifunctional metagratings based on freeform multimode
+  geometries.
+\newblock {\em Nano Letters}, 17(6):3752--3757, 2017.
+
+\bibitem{piggott2015}
+Alexander~Y. Piggott, Jesse Lu, Konstantinos~G. Lagoudakis, Jan Petykiewicz,
+  Thomas~M. Babinec, and Jelena Vu{\v{c}}kovi{\'c}.
+\newblock Inverse design and demonstration of a compact and broadband on-chip
+  wavelength demultiplexer.
+\newblock {\em Nature Photonics}, 9(6):374--377, 2015.
+
+\bibitem{piggott2017}
+Alexander~Y. Piggott, Jan Petykiewicz, Logan Su, and Jelena Vu{\v{c}}kovi{\'c}.
+\newblock Fabrication-constrained nanophotonic inverse design.
+\newblock {\em Scientific Reports}, 7:1786, 2017.
+
+\bibitem{ma2021deep}
+Wei Ma, Zhiyuan Liu, Zhaxylyk~A. Kudyshev, Alexandra Boltasseva, Wenshan Cai,
+  and Yongmin Liu.
+\newblock Deep learning for the design of photonic structures.
+\newblock {\em Nature Photonics}, 15(2):77--90, 2021.
+
+\bibitem{liu2018training}
+Dianjing Liu, Yixiao Tan, Erin Khoram, and Zongfu Yu.
+\newblock Training deep neural networks for the inverse design of nanophotonic
+  structures.
+\newblock {\em ACS Photonics}, 5(4):1365--1369, 2018.
+
+\bibitem{so2019}
+Seungwoo So, Trevor Badloe, Joohyun Noh, Jorge Bravo-Abad, and Junsuk Rho.
+\newblock Deep learning enabled inverse design in nanophotonics.
+\newblock {\em Nanophotonics}, 9(5):1051--1087, 2019.
+
+\bibitem{malkiel2018plasmonic}
+Itai Malkiel, Amos Nagler, Uri Arieli, Lior Wolf, and Haim Suchowski.
+\newblock Plasmonic nanostructure design and characterization via deep
+  learning.
+\newblock {\em Light: Science \& Applications}, 7:60, 2018.
+
+\bibitem{an2019deep}
+Sheng An, Christopher Fowler, Jiaji Zheng, Bo~Shuang, Wei Ma, Yunfeng Luo,
+  Semion~R. Peurifoy, Yao Li, Vahid Bateni, Jakob Straubel, Ziwei Gao, Yuri~S.
+  Kivshar, Chiang Ling, Stefan~A. Maier, and Yongmin Liu.
+\newblock A deep learning approach for objective-driven all-dielectric
+  metasurface design.
+\newblock {\em ACS Photonics}, 6(12):3196--3207, 2019.
+
+\bibitem{liu2018}
+Zhongyi Liu, Dibo Zhu, Sean~P. Rodrigues, Kyu-Tae Lee, and Wenshan Cai.
+\newblock Generative model for the inverse design of metasurfaces.
+\newblock {\em Nano Letters}, 18(10):6570--6576, 2018.
+
+\bibitem{ma2021}
+Wei Ma, Fang Cheng, Yongzhi Xu, Qiao Wen, and Yongmin Liu.
+\newblock Probabilistic representation and inverse design of metamaterials
+  based on a deep generative model with semi-supervised learning strategy.
+\newblock {\em Advanced Materials}, 33(36):2001305, 2021.
+
+\bibitem{ma2019probabilistic}
+Wei Ma, Zhiyuan Liu, Zhaxylyk~A. Kudyshev, Alexandra Boltasseva, Wenshan Cai,
+  and Yongmin Liu.
+\newblock Probabilistic representation and inverse design of metamaterials
+  based on a deep generative model with semi-supervised learning strategy.
+\newblock {\em Advanced Materials}, 33(36):2001305, 2021.
+
+\bibitem{hen2026}
+Lior Hen, Elad Yosef, Daniel Raviv, Raja Giryes, and Jacob Scheuer.
+\newblock Inverse design of diffractive metasurfaces using diffusion models.
+\newblock {\em ACS Photonics}, 13(1):38--46, 2026.
+\newblock Metadata should be rechecked against the final paginated publisher
+  version.
+
+\bibitem{tanriover2023}
+Ilker Tanriover, Wahyu Hadibrata, Muhammed~S. Toprak, and Koray Aydin.
+\newblock Conditional inverse design of metasurfaces using deep neural
+  networks.
+\newblock {\em Advanced Materials Technologies}, 8(15):2300123, 2023.
+
+\bibitem{chen2021physics}
+Ying-Ying Chen, Peng Zhan, and Zhenlin Wang.
+\newblock Physics-informed neural networks for imaging and parameter retrieval
+  of photonic nanostructures from near-field data.
+\newblock {\em APL Photonics}, 7(1):010802, 2022.
+
+\bibitem{huang2022meta}
+Mengyao Huang, Mingbo Pu, Ping Gao, Jian Xu, Xiong Li, Xiaoliang Ma, and
+  Xiangang Luo.
+\newblock Machine-learning-enabled metasurface for direction of arrival
+  estimation.
+\newblock {\em Nanophotonics}, 11(9):2001--2010, 2022.
+
+\bibitem{jiang2021}
+Jian Jiang, David Sell, Stephen Hoyer, Jeremy Hickey, Li~Yang, and Jonathan~A.
+  Fan.
+\newblock Free-form diffractive metagrating design based on generative
+  adversarial networks.
+\newblock {\em ACS Nano}, 15(6):9382--9388, 2021.
+
+\bibitem{phillips2021ensemble}
+Daniel~J. Phillips, Bryan~G. Mangelson, Tyler~W. Hughes, Yiding Meng, Amr~A.
+  Saleh, Elise Goodwill, Alexander~Y. Piggott, Dries Vercruysse, Daniele
+  Melati, Logan Su, and Jelena Vu{\v{c}}kovi{\'c}.
+\newblock Enabling robust photonic inverse design with accurate optical
+  response and its gradient.
+\newblock {\em Optics Express}, 29(15):23978--23992, 2021.
+
+\bibitem{kaplan2020scaling}
+Jared Kaplan, Sam McCandlish, Tom Henighan, Tom~B. Brown, Benjamin Chess, Rewon
+  Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei.
+\newblock Scaling laws for neural language models.
+\newblock {\em arXiv preprint arXiv:2001.08361}, 2020.
+
+\bibitem{faraji2018folded}
+MohammadSadegh Faraji-Dana, Ehsan Arbabi, Amir Arbabi, Seyedeh~Mahsa Kamali,
+  Hyounghan Kwon, and Andrei Faraon.
+\newblock Compact folded metasurface spectrometer.
+\newblock {\em Nature Communications}, 9:4196, 2018.
+
+\bibitem{cai2024angleresolved}
+Guiyi Cai, Yanhao Li, Yao Zhang, Xiong Jiang, Yimu Chen, Geyang Qu, Xudong
+  Zhang, Shumin Xiao, Jiecai Han, Shaohua Yu, Yuri Kivshar, and Qinghai Song.
+\newblock Compact angle-resolved metasurface spectrometer.
+\newblock {\em Nature Materials}, 23:71--78, 2024.
+
+\bibitem{jiang2024multidimensional}
+Hao Jiang, Yinzhu Chen, Wenyu Guo, Yan Zhang, Rigui Zhou, Mile Gu, Fan Zhong,
+  Zhenhua Ni, Junpeng Lu, Cheng-Wei Qiu, and Weibo Gao.
+\newblock Metasurface-enabled broadband multidimensional photodetectors.
+\newblock {\em Nature Communications}, 15:8347, 2024.
+
+\bibitem{guo2022stokes}
+Xuyue Guo, Peng Li, Jinzhan Zhong, Dandan Wen, Bingyan Wei, Sheng Liu, Shuxia
+  Qi, and Jianlin Zhao.
+\newblock Stokes meta-hologram toward optical cryptography.
+\newblock {\em Nature Communications}, 13:6687, 2022.
+
+\end{thebibliography}

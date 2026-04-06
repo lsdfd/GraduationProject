@@ -87,31 +87,6 @@
 \label{fig:generalization}
 \end{figure}
 
-因此，图~\ref{fig:pol} 和图~\ref{fig:generalization} 支持的是同一个结论：本文的方法并非只对二阶微分有效，而是对应一条能够吸收通道要求、目标曲率、目标包络乃至目标支撑维度变化的统一 response-space 闭环。
+因此，图~\ref{fig:pol} 和图~\ref{fig:generalization} 支持的是同一个结论：本文的方法并非只对二阶微分有效，而是对应一条能够吸收通道要求、目标曲率、目标包络乃至目标支撑维度变化的统一 response-space 闭环。更完整的对比模型设置、评估维度与比较分析见补充材料第4节。
 
 \FloatBarrier
-
-\subsection{模型对比与评估协议}
-
-本文采用统一的 baseline 对比框架，覆盖 topology optimization、CVAE、cGAN 和 diffusion，并且全部在相同目标条件下、用同一套仿真后验证指标族比较。统一评测输出 best score、mean score、top-3 score、阈值成功率、spectrum MAE、binary rate、diversity 和 inference time。对当前问题来说，这种比较语言是合适的，因为强逆向设计器既要命中高质量样本，也要在可行集里生成足够多、足够多样且物理上有用的候选。
-
-不过，就当前研究材料的保留情况而言，直接可用的 checkpoint 主要支持前向 surrogate 和 physics-guided diffusion 主线，而 cVAE、cGAN 与 topo-opt 并没有同步保留完整 checkpoint。表~\ref{tab:compare} 因此承担两个角色：一方面把正式对比协议写清，另一方面诚实记录当前直接可验证的模型证据，而不去编造缺失的 baseline 数字。
-
-\begin{table}[!htbp]
-\centering
-\caption{本文使用的模型对比协议。所有核心指标都在仿真验证之后统计。只有直接保留下来的证据，才在表中填写具体数值。}
-\label{tab:compare}
-\begin{tabular}{>{\raggedright\arraybackslash}p{2.1cm}>{\raggedright\arraybackslash}p{2.4cm}>{\raggedleft\arraybackslash}p{2.1cm}>{\raggedleft\arraybackslash}p{2.1cm}}
-\toprule
-方法 & 条件 / 目标 & 直接保留证据 & 状态 \\
-\midrule
-Forward surrogate & structure $\rightarrow$ response，normalized $L_1$ & val loss $\approx 0.366$ & checkpoint + log 保留 \\
-Diffusion & response $\rightarrow$ structure，扩散 + 物理 + 二值损失 & val loss $\approx 0.129$ & checkpoint + log 保留 \\
-CVAE & response $\rightarrow$ structure，变分基线 & 统一评测接口已实现 & 本地缺 checkpoint \\
-cGAN & response $\rightarrow$ structure，对抗式基线 & 统一评测接口已实现 & 本地缺 checkpoint \\
-Topo-opt & task-guided iterative search & 统一评测接口已实现 & 旧依赖本地未补齐 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-即便如此，这一节仍然是有价值的。因为这一评估协议已经把“正确的比较问题”定义出来了：逆向模型必须在共享目标下比较验证 best-case score、平均候选质量、OTF MAE、二值程度和多样性。当前 physics-guided diffusion 主线是唯一带有可直接加载 checkpoint 的端到端保留方案，因此它自然成为本文的核心方法。

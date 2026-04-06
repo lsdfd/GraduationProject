@@ -1,13 +1,13 @@
 # Fdb version 4
-["bibtex main"] 1775473699.83032 "main.aux" "main.bbl" "main" 1775473703.17893 0
+["bibtex main"] 1775484320.12991 "main.aux" "main.bbl" "main" 1775484323.42537 0
   "./refs.bib" 1775473222.63894 25032 3ddff0f31a9567cb7957190450cb19ba ""
   "/usr/local/texlive/2026/texmf-dist/bibtex/bst/base/unsrt.bst" 1292289607 18030 1376b4b231b50c66211e47e42eda2875 ""
-  "main.aux" 1775473702.87922 8715 dc7d9c4be76ca6b0b278a19b9de05eed "pdflatex"
+  "main.aux" 1775484323.18888 8903 396bdc103696e84ef3bc1cbe6aa80128 "pdflatex"
   (generated)
   "main.bbl"
   "main.blg"
   (rewritten before read)
-["pdflatex"] 1775473699.92277 "main.tex" "main.pdf" "main" 1775473703.17905 0
+["pdflatex"] 1775484320.23053 "main.tex" "main.pdf" "main" 1775484323.42549 0
   "../data/optica_lowpass_scores/tpp_mag_optica_lowpass_top5_plots/lambda_1050.0nm_top5.png" 1775380359.91178 1129333 556558fdac063d4df99c0bd1b33bbafa ""
   "../data/polarization_independent_scores/joint_top1_plots/lambda_1000.0nm_top1.png" 1774592939.29098 583231 0793462fecbf224fa02997e6430fd4cf ""
   "../data/polarization_multiplexed_scores/p_active_s_silent/p_active_s_silent_top5_plots/p_active_s_silent_lambda_1100.0nm_top5.png" 1774597425.86489 1557738 4105249bca5d893f8c230392786c8dbf ""
@@ -50,6 +50,7 @@
   "/usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx12.pfb" 1248133631 32080 340ef9bf63678554ee606688e7b5339d ""
   "/usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb" 1248133631 30251 6afa5cb1d0204815a708a080681d4674 ""
   "/usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb" 1248133631 36299 5f9df58c2139e7edcf37c8fca4bd384d ""
+  "/usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi5.pfb" 1248133631 37912 77d683123f92148345f3fc36a38d9ab1 ""
   "/usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi7.pfb" 1248133631 36281 c355509802a035cadc5f15869451dcee ""
   "/usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb" 1248133631 35752 024fb6c41858982481f6968b5fc26508 ""
   "/usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr12.pfb" 1248133631 32722 d7379af29a190c3f453aba36302ff5a9 ""
@@ -126,13 +127,14 @@
   "/usr/local/texlive/2026/texmf-var/fonts/map/pdftex/updmap/pdftex.map" 1775397519 5573038 b99aad5e4898a9034e953632f940512b ""
   "/usr/local/texlive/2026/texmf-var/web2c/pdftex/pdflatex.fmt" 1774209607 3636776 dc5fa9b6b1453b9d196cd42edf876004 ""
   "/usr/local/texlive/2026/texmf.cnf" 1774209515 577 648cd9f92f9c0eac486f4c71c85cfbbe ""
-  "main.aux" 1775473702.87922 8715 dc7d9c4be76ca6b0b278a19b9de05eed "pdflatex"
-  "main.bbl" 1775473699.92088 13139 e52a96c8192ed9034d99d47fa60e16e0 "bibtex main"
-  "main.out" 1775473702.88001 2680 fbb367e76e5a58cf8c6832ebf7b83854 "pdflatex"
+  "figures/assets/figure1_framework.png" 1775484200.81358 1623361 53a8141384a335dee9230b16a5dac7c4 ""
+  "main.aux" 1775484323.18888 8903 396bdc103696e84ef3bc1cbe6aa80128 "pdflatex"
+  "main.bbl" 1775484320.22828 13139 e52a96c8192ed9034d99d47fa60e16e0 "bibtex main"
+  "main.out" 1775484323.19032 2410 596763a8e637dc00b8f22c78eae1cc05 "pdflatex"
   "main.tex" 1775472695.39928 4402 cc50c6b91fbc0163cc75eb159dae9f2a ""
   "sections/01_introduction.tex" 1775468075.62984 12272 ff33b5479251923f6932359dcb8b13fe ""
-  "sections/02_methods.tex" 1775473116.29517 14104 f053fb46af0802785134dea9931ef1d0 ""
-  "sections/03_results.tex" 1775473682.9706 12032 29a8f95a249dda78a78cf6882b159ccf ""
+  "sections/02_methods.tex" 1775484259.8018 14828 d41226f07353c8a8949ec6d6abd59d04 ""
+  "sections/03_results.tex" 1775477039.02003 9287 d340e8c7c86b8178244b75da0cdddac0 ""
   "sections/04_discussion.tex" 1775473222.63858 2085 2708f804e7b5dd525989bbf1f5da2a23 ""
   "sections/05_conclusion.tex" 1775473418.41236 1895 519adbd78bb2f13aa2f703439959fd89 ""
   (generated)

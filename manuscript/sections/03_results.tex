@@ -30,7 +30,9 @@ Figure~\ref{fig:imaging} closes the argument by moving from response space to im
 \centering
 \caption{Representative verified results used throughout the paper. Scores reflect task-specific rankings rather than abstract model confidence.}
 \label{tab:cases}
-\begin{tabular}{>{\raggedright\arraybackslash}p{3.3cm}c>{\raggedleft\arraybackslash}p{2.2cm}>{\raggedleft\arraybackslash}p{4.1cm}}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{>{\raggedright\arraybackslash}p{2.05cm}c>{\raggedleft\arraybackslash}p{1.2cm}>{\raggedright\arraybackslash}p{3.05cm}}
 \toprule
 Task & $\lambda$ (nm) & Main score & Notes \\
 \midrule
@@ -57,14 +59,10 @@ The second axis is polarization multiplexing. The strongest verified multiplexed
 
 \begin{figure}[!htbp]
 \centering
-\begin{minipage}[t]{0.48\linewidth}
-\centering
-\includegraphics[width=\linewidth]{../data/polarization_independent_scores/joint_top1_plots/lambda_1000.0nm_top1.png}
-\end{minipage}\hfill
-\begin{minipage}[t]{0.48\linewidth}
-\centering
-\includegraphics[width=\linewidth]{../data/polarization_multiplexed_scores/p_active_s_silent/p_active_s_silent_top5_plots/p_active_s_silent_lambda_1100.0nm_top5.png}
-\end{minipage}
+\includegraphics[width=0.86\linewidth]{../data/polarization_independent_scores/joint_top1_plots/lambda_1000.0nm_top1.png}
+
+\vspace{0.5em}
+\includegraphics[width=0.86\linewidth]{../data/polarization_multiplexed_scores/p_active_s_silent/p_active_s_silent_top5_plots/p_active_s_silent_lambda_1100.0nm_top5.png}
 \caption{Polarization-aware generalization. Left: polarization-independent top case at 1000~nm. Right: polarization-multiplexed top candidates at 1100~nm. The same inverse-design loop can either align the two channels or intentionally separate them.}
 \label{fig:pol}
 \end{figure}
@@ -75,43 +73,14 @@ Spatiotemporal targets provide the strongest stress test because they are evalua
 
 \begin{figure}[!htbp]
 \centering
-\begin{minipage}[t]{0.48\linewidth}
-\centering
-\includegraphics[width=\linewidth]{../data/optica_lowpass_scores/tpp_mag_optica_lowpass_top5_plots/lambda_1050.0nm_top5.png}
-\end{minipage}\hfill
-\begin{minipage}[t]{0.48\linewidth}
-\centering
-\includegraphics[width=\linewidth]{../data/st2_template_match_20260330_233804/lambda_950nm/rank_001_sample_5409.png}
-\end{minipage}
+\includegraphics[width=0.86\linewidth]{../data/optica_lowpass_scores/tpp_mag_optica_lowpass_top5_plots/lambda_1050.0nm_top5.png}
+
+\vspace{0.5em}
+\includegraphics[width=0.86\linewidth]{../data/st2_template_match_20260330_233804/lambda_950nm/rank_001_sample_5409.png}
 \caption{Generalization beyond second-order differentiation. Left: low-pass target at 1050~nm. Right: top spatiotemporal candidate at 950~nm from the wavelength--angle window ranking pipeline.}
 \label{fig:generalization}
 \end{figure}
 
-Taken together, Figures~\ref{fig:pol} and~\ref{fig:generalization} support the same conclusion. The present method goes beyond a differentiator-specific recipe. It forms a unified response-space design loop that can absorb changes in channel requirements, target curvature, target envelope, and even in the dimensionality of the target support.
+Taken together, Figures~\ref{fig:pol} and~\ref{fig:generalization} support the same conclusion. The present method goes beyond a differentiator-specific recipe. It forms a unified response-space design loop that can absorb changes in channel requirements, target curvature, target envelope, and even in the dimensionality of the target support. A more detailed description of the comparative models, evaluation dimensions, and comparison logic is provided in Supporting Information Section~4.
 
 \FloatBarrier
-
-\subsection{Model comparison and evaluation protocol}
-
-A unified comparison protocol is defined for topology optimization, CVAE, cGAN, and diffusion under the same target condition and the same simulation-based post-verification metrics. The shared evaluation reports best score, mean score, top-3 score, success rate above threshold, spectrum MAE, binary rate, diversity, and inference time. This is the correct comparison language for the present problem because a strong inverse designer should hit good samples consistently and should also populate the feasible set with diverse physically useful candidates.
-
-At the current stage of the study, the retained checkpoints directly support the forward surrogate and the physics-guided diffusion pipeline, whereas the cVAE and cGAN baselines and the topology-optimization branch are not all accompanied by synchronized checkpoints. Table~\ref{tab:compare} therefore serves two purposes. It makes the quantitative protocol explicit and it records only the directly available evidence without fabricating missing baseline numbers.
-
-\begin{table}[!htbp]
-\centering
-\caption{Comparison protocol used in this study. The metrics are computed after full-wave verification. Quantitative training endpoints are listed only where directly retained evidence is available.}
-\label{tab:compare}
-\begin{tabular}{>{\raggedright\arraybackslash}p{2.1cm}>{\raggedright\arraybackslash}p{2.4cm}>{\raggedleft\arraybackslash}p{2.1cm}>{\raggedleft\arraybackslash}p{2.1cm}}
-\toprule
-Method & Condition / objective & Direct retained evidence & Status \\
-\midrule
-Forward surrogate & structure $\rightarrow$ response, normalized $L_1$ & val loss $\approx 0.366$ & checkpoint + log retained \\
-Diffusion & response $\rightarrow$ structure, diffusion + physics + binary losses & val loss $\approx 0.129$ & checkpoint + log retained \\
-CVAE & response $\rightarrow$ structure, variational baseline & unified eval supported & checkpoint absent locally \\
-cGAN & response $\rightarrow$ structure, adversarial baseline & unified eval supported & checkpoint absent locally \\
-Topo-opt & task-guided iterative search & unified eval supported & legacy dependency incomplete locally \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Even with this limitation, the comparison section remains scientifically useful. The evaluation protocol already formalizes the right question: the inverse method should be judged by verified best-case score, average candidate quality, response MAE, binarity, and diversity under shared targets. The present physics-guided diffusion pipeline is the only branch for which the end-to-end checkpointed evidence is directly retained, which is why it becomes the center of the manuscript.
