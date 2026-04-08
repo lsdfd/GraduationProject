@@ -42,6 +42,7 @@ PROJECT_ROOT = _HERE.parents[2]
 DATA_PATH    = PROJECT_ROOT / "data" / "train_data.npz"
 ASSETS_DIR   = _HERE / "assets"
 DEFAULT_THU_IMAGE_PATH = ASSETS_DIR / "fc728b57c87df1ef1c97e5fa08a6434f.png"
+DEFAULT_CUSTOM_IMAGE_PATH = ASSETS_DIR / "581575372c297e43f81babaa2dd7e9a7.png"
 
 # ---------------------------------------------------------------------------
 # Fixed constants
@@ -50,7 +51,9 @@ THETA_MAX = 40.0
 NA        = np.sin(np.radians(THETA_MAX))    # ≈ 0.6428
 LAMBDAS   = np.arange(800.0, 1300.1, 50.0)  # [11]
 THETAS    = np.arange(-40.0, 40.1,  5.0)    # [17]
-NX, NY    = 502, 502
+# 与 scan_kspace.py 保持一致，避免额外的 512 -> 502 重采样。
+N_GRID    = 512
+NX, NY    = N_GRID, N_GRID
 
 POL_MAP: dict[str, np.ndarray] = {
     "x":    np.array([1.0,  0.0]),
@@ -60,8 +63,10 @@ POL_MAP: dict[str, np.ndarray] = {
     "RCP":  np.array([1.0, -1j])  / np.sqrt(2),
     "LCP":  np.array([1.0,  1j])  / np.sqrt(2),
 }
+POL_CHOICES = list(POL_MAP.keys()) + ["all"]
 
-PATTERN_CHOICES = ("square", "thu", "square_thu")
+DEFAULT_PATTERN_SET = ("square", "circle", "checkerboard", "thu", "custom")
+PATTERN_CHOICES = DEFAULT_PATTERN_SET + ("random16", "random64", "square_thu", "all")
 
 
 def _safe_tag(text: str) -> str:
@@ -92,6 +97,30 @@ def _results_case_dir_from_path(path: Path | None) -> Path | None:
     if i + 2 >= len(parts):
         return None
     return Path(*parts[: i + 3])
+
+
+def infer_task_family(path: Path | None, fallback_tag: str | None = None) -> str:
+    if path is not None:
+        parts = list(path.parts)
+        if "results" in parts:
+            i = parts.index("results")
+            if i + 1 < len(parts):
+                bucket = parts[i + 1]
+                if bucket == "p":
+                    return "p_second_order"
+                if bucket == "sp-all":
+                    return "polarization_independent"
+                if bucket in {"sp-mutiplex", "sp-multiplex"}:
+                    return "polarization_multiplexed"
+                if bucket == "fourth":
+                    return "fourth_order"
+                if bucket == "lowpass":
+                    return "lowpass"
+                if bucket == "st":
+                    return "st2"
+    if fallback_tag == "ideal":
+        return "ideal"
+    return "generic"
 
 
 def make_run_output_dir(base_dir: Path, task_tag: str, source_tag: str, lambda_nm: float, polarization: str, pattern: str) -> Path:
@@ -138,6 +167,24 @@ def compute_imaging_metrics(I_in: np.ndarray, I_out: np.ndarray, edge_mask: np.n
     }
 
 
+def compute_center_cut_summary(I_out: np.ndarray) -> dict[str, object]:
+    cy, cx = I_out.shape[0] // 2, I_out.shape[1] // 2
+    x_cut = np.asarray(I_out[cy, :], dtype=np.float64)
+    y_cut = np.asarray(I_out[:, cx], dtype=np.float64)
+    x_peak = max(float(np.max(x_cut)), 1e-12)
+    y_peak = max(float(np.max(y_cut)), 1e-12)
+    return {
+        "cut_row": int(cy),
+        "cut_col": int(cx),
+        "x_cut_peak": x_peak,
+        "y_cut_peak": y_peak,
+        "x_cut_center_value": float(x_cut[cx]),
+        "y_cut_center_value": float(y_cut[cy]),
+        "x_cut_norm": (x_cut / x_peak).tolist(),
+        "y_cut_norm": (y_cut / y_peak).tolist(),
+    }
+
+
 def save_metrics(path: Path, metrics: dict[str, float]) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
@@ -157,6 +204,46 @@ def make_ideal_transfer(KX: np.ndarray, KY: np.ndarray,
     T = (k_rho / K_MAX) ** 2
     T[k_rho > K_MAX] = 0.0
     return T.copy(), T.copy()   # T_ss, T_pp
+
+
+def make_task_ideal_transfer(
+    task_family: str,
+    KX: np.ndarray,
+    KY: np.ndarray,
+    K0: float,
+    K_MAX: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    k_rho = np.sqrt(KX**2 + KY**2)
+    theta_deg = np.degrees(np.arcsin(np.clip(k_rho / max(K0, 1e-12), 0.0, 1.0)))
+
+    if task_family in {"ideal", "generic", "polarization_independent"}:
+        return make_ideal_transfer(KX, KY, K_MAX)
+
+    if task_family in {"p_second_order", "polarization_multiplexed"}:
+        T = np.zeros_like(k_rho, dtype=np.float64)
+        inside = k_rho <= K_MAX
+        T[inside] = (k_rho[inside] / max(K_MAX, 1e-12)) ** 2
+        return np.zeros_like(T), T
+
+    if task_family == "fourth_order":
+        T = np.zeros_like(k_rho, dtype=np.float64)
+        inside = k_rho <= K_MAX
+        T[inside] = (k_rho[inside] / max(K_MAX, 1e-12)) ** 4
+        return np.zeros_like(T), T
+
+    if task_family == "lowpass":
+        sigma_deg = 12.0
+        T = np.exp(-(theta_deg ** 2) / max(sigma_deg ** 2, 1e-12))
+        T[k_rho > K_MAX] = 0.0
+        return np.zeros_like(T), T
+
+    if task_family == "st2":
+        T = np.zeros_like(k_rho, dtype=np.float64)
+        inside = k_rho <= K_MAX
+        T[inside] = (k_rho[inside] / max(K_MAX, 1e-12)) ** 2
+        return T.copy(), T.copy()
+
+    return make_ideal_transfer(KX, KY, K_MAX)
 
 
 def load_from_training(sample_idx: int,
@@ -254,14 +341,54 @@ def _draw_rect(img: np.ndarray, x0: int, x1: int, y0: int, y1: int, value: float
     img[max(0, y0):min(img.shape[0], y1), max(0, x0):min(img.shape[1], x1)] = value
 
 
+def _draw_disk(img: np.ndarray, cx: int, cy: int, radius: int, value: float = 1.0) -> None:
+    yy, xx = np.ogrid[:img.shape[0], :img.shape[1]]
+    mask = (xx - cx) ** 2 + (yy - cy) ** 2 <= radius ** 2
+    img[mask] = value
+
+
+def _make_random_binary_tile(n: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return (rng.random((n, n)) > 0.5).astype(np.float64)
+
+
 def build_builtin_input(pattern: str) -> np.ndarray:
     img = np.zeros((NY, NX), dtype=np.float64)
     cx, cy = NX // 2, NY // 2
 
     if pattern in {"square", "square_thu"}:
-        sq = min(NX, NY) // 16
+        sq = max(8, int(min(NX, NY) * 0.7))
         hs = sq // 2
         _draw_rect(img, cx - hs, cx + hs, cy - hs, cy + hs)
+    elif pattern == "circle":
+        radius = max(8, int(min(NX, NY) * 0.36))
+        _draw_disk(img, cx, cy, radius)
+    elif pattern == "checkerboard":
+        tile = max(8, min(NX, NY) // 8)
+        n_rows = int(np.ceil(NY / tile))
+        n_cols = int(np.ceil(NX / tile))
+        for row in range(n_rows):
+            for col in range(n_cols):
+                if (row + col) % 2 == 0:
+                    _draw_rect(
+                        img,
+                        col * tile,
+                        (col + 1) * tile,
+                        row * tile,
+                        (row + 1) * tile,
+                    )
+    elif pattern == "random16":
+        tile = _make_random_binary_tile(16, 20260408)
+        img = np.asarray(
+            Image.fromarray((tile * 255).astype(np.uint8), mode="L").resize((NX, NY), Image.Resampling.NEAREST),
+            dtype=np.float64,
+        ) / 255.0
+    elif pattern == "random64":
+        tile = _make_random_binary_tile(64, 20260408)
+        img = np.asarray(
+            Image.fromarray((tile * 255).astype(np.uint8), mode="L").resize((NX, NY), Image.Resampling.NEAREST),
+            dtype=np.float64,
+        ) / 255.0
 
     return img
 
@@ -338,6 +465,9 @@ def build_input_image(pattern: str, input_image: str | None = None) -> tuple[np.
     elif pattern in {"thu", "square_thu"}:
         image_path = DEFAULT_THU_IMAGE_PATH
         source_desc = f"{pattern} + {image_path.name}" if pattern == "square_thu" else image_path.name
+    elif pattern == "custom":
+        image_path = DEFAULT_CUSTOM_IMAGE_PATH
+        source_desc = f"{pattern} + {image_path.name}" if pattern == "square_thu" else image_path.name
 
     if image_path is None:
         return builtin, source_desc
@@ -392,6 +522,32 @@ def run_fourier_optics(T_ss: np.ndarray, T_pp: np.ndarray,
     return I_out, I_in, input_label
 
 
+def run_ideal_reference(
+    task_family: str,
+    KX: np.ndarray,
+    KY: np.ndarray,
+    K0: float,
+    K_MAX: float,
+    pattern: str,
+    input_image: str | None = None,
+) -> tuple[np.ndarray, np.ndarray, str, dict[str, object]]:
+    T_ideal_ss, T_ideal_pp = make_task_ideal_transfer(task_family, KX, KY, K0, K_MAX)
+    I_out, I_in, input_label = run_fourier_optics(
+        T_ideal_ss,
+        T_ideal_pp,
+        POL_MAP["x45"],
+        KX,
+        KY,
+        pattern,
+        K0,
+        input_image=input_image,
+    )
+    edge_mask = edge_mask_from_input(I_in)
+    metrics = compute_imaging_metrics(I_in, I_out, edge_mask)
+    metrics.update(compute_center_cut_summary(I_out))
+    return I_out, I_in, input_label, metrics
+
+
 # ===========================================================================
 # 4. 可视化
 # ===========================================================================
@@ -433,15 +589,147 @@ def plot_results(I_in: np.ndarray, I_out: np.ndarray,
     plt.show()
 
 
+def plot_multi_pol_results(
+    I_in: np.ndarray,
+    I_ideal: np.ndarray,
+    ideal_metrics: dict[str, object],
+    result_map: dict[str, tuple[np.ndarray, dict[str, object]]],
+    lambda_nm: float,
+    pattern: str,
+    input_label: str,
+    save_path: Path,
+) -> None:
+    pol_order = [pol for pol in POL_MAP.keys() if pol in result_map]
+    fig, axes = plt.subplots(len(pol_order), 5, figsize=(22.0, 3.2 * len(pol_order)))
+    if len(pol_order) == 1:
+        axes = np.expand_dims(axes, axis=0)
+
+    vmax = max(float(np.percentile(I_out, 99)) for I_out, _ in result_map.values())
+    vmax = vmax or 1.0
+
+    for row_idx, pol in enumerate(pol_order):
+        ax_in, ax_ideal, ax_out, ax_xcut, ax_ycut = axes[row_idx]
+        I_out, metrics = result_map[pol]
+        x_cut_norm = np.asarray(metrics["x_cut_norm"], dtype=np.float64)
+        y_cut_norm = np.asarray(metrics["y_cut_norm"], dtype=np.float64)
+
+        im0 = ax_in.imshow(I_in, cmap="gray", origin="upper", vmin=0.0, vmax=1.0)
+        ax_in.set_title(f"{pol} | Input")
+        ax_in.set_xlabel("x (pixel)")
+        ax_in.set_ylabel("y (pixel)")
+        plt.colorbar(im0, ax=ax_in, fraction=0.046, pad=0.04)
+
+        im_ideal = ax_ideal.imshow(I_ideal, cmap="inferno", origin="upper", vmin=0.0, vmax=vmax)
+        ax_ideal.set_title(
+            f"Ideal output\neta_avg={ideal_metrics['eta_avg']:.4f}, eta_peak={ideal_metrics['eta_peak']:.4f}"
+        )
+        ax_ideal.set_xlabel("x (pixel)")
+        ax_ideal.set_ylabel("y (pixel)")
+        plt.colorbar(im_ideal, ax=ax_ideal, fraction=0.046, pad=0.04)
+
+        im1 = ax_out.imshow(I_out, cmap="inferno", origin="upper", vmin=0.0, vmax=vmax)
+        ax_out.set_title(
+            f"{pol} | Output\neta_avg={metrics['eta_avg']:.4f}, eta_peak={metrics['eta_peak']:.4f}"
+        )
+        ax_out.set_xlabel("x (pixel)")
+        ax_out.set_ylabel("y (pixel)")
+        plt.colorbar(im1, ax=ax_out, fraction=0.046, pad=0.04)
+
+        ax_xcut.plot(np.arange(x_cut_norm.size), x_cut_norm, color="tab:red", lw=1.6)
+        ax_xcut.set_title(f"{pol} | X cut")
+        ax_xcut.set_xlabel("x (pixel)")
+        ax_xcut.set_ylabel("normalized intensity")
+        ax_xcut.set_xlim(0, x_cut_norm.size - 1)
+        ax_xcut.set_ylim(0.0, 1.05)
+        ax_xcut.grid(True, alpha=0.25)
+
+        ax_ycut.plot(np.arange(y_cut_norm.size), y_cut_norm, color="tab:blue", lw=1.6)
+        ax_ycut.set_title(f"{pol} | Y cut")
+        ax_ycut.set_xlabel("y (pixel)")
+        ax_ycut.set_ylabel("normalized intensity")
+        ax_ycut.set_xlim(0, y_cut_norm.size - 1)
+        ax_ycut.set_ylim(0.0, 1.05)
+        ax_ycut.grid(True, alpha=0.25)
+
+    fig.suptitle(
+        f"Fourier optics simulation across polarizations | "
+        f"λ = {lambda_nm:.0f} nm, NA = {NA:.4f}, input = {pattern}, source = {input_label}"
+    )
+    fig.text(0.5, 0.02, "Columns: input, ideal output, output, centered x-cut, centered y-cut", ha="center", va="bottom", fontsize=11)
+    plt.tight_layout(rect=(0, 0.04, 1, 0.97))
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    print(f"Saved → {save_path}")
+    plt.show()
+
+
+def run_single_pattern(
+    pattern: str,
+    pol: str,
+    task_family: str,
+    T_ss: np.ndarray,
+    T_pp: np.ndarray,
+    KX: np.ndarray,
+    KY: np.ndarray,
+    K0: float,
+    K_MAX: float,
+    lambda_nm: float,
+    input_image: str | None,
+    out_path: Path,
+) -> dict[str, object] | dict[str, dict[str, object]]:
+    if pol == "all":
+        result_map: dict[str, tuple[np.ndarray, dict[str, object]]] = {}
+        I_in_ref = None
+        input_label_ref = ""
+        I_ideal_ref = None
+        ideal_metrics_ref = None
+        for pol_name, e_in in POL_MAP.items():
+            I_out, I_in, input_label = run_fourier_optics(
+                T_ss, T_pp, e_in, KX, KY, pattern, K0, input_image=input_image
+            )
+            edge_mask = edge_mask_from_input(I_in)
+            metrics = compute_imaging_metrics(I_in, I_out, edge_mask)
+            metrics.update(compute_center_cut_summary(I_out))
+            print(
+                f"[metrics:{pattern}:{pol_name}] eta_peak={metrics['eta_peak']:.6f} "
+                f"eta_avg={metrics['eta_avg']:.6f} edge_pixels={metrics['edge_pixels']}"
+            )
+            result_map[pol_name] = (I_out, metrics)
+            if I_in_ref is None:
+                I_in_ref = I_in
+                input_label_ref = input_label
+                I_ideal_ref, _, _, ideal_metrics_ref = run_ideal_reference(
+                    task_family, KX, KY, K0, K_MAX, pattern, input_image=input_image
+                )
+        assert I_in_ref is not None
+        assert I_ideal_ref is not None
+        assert ideal_metrics_ref is not None
+        plot_multi_pol_results(I_in_ref, I_ideal_ref, ideal_metrics_ref, result_map, lambda_nm, pattern, input_label_ref, out_path)
+        return {pol_name: metric for pol_name, (_, metric) in result_map.items()}
+
+    e_in = POL_MAP[pol]
+    I_out, I_in, input_label = run_fourier_optics(
+        T_ss, T_pp, e_in, KX, KY, pattern, K0, input_image=input_image
+    )
+    edge_mask = edge_mask_from_input(I_in)
+    metrics = compute_imaging_metrics(I_in, I_out, edge_mask)
+    metrics.update(compute_center_cut_summary(I_out))
+    print(
+        f"[metrics:{pattern}] eta_peak={metrics['eta_peak']:.6f} "
+        f"eta_avg={metrics['eta_avg']:.6f} edge_pixels={metrics['edge_pixels']}"
+    )
+    plot_results(I_in, I_out, lambda_nm, pol, pattern, input_label, metrics, out_path)
+    return metrics
+
+
 # ===========================================================================
 # 5. Main
 # ===========================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="Fourier optics imaging simulation")
-    parser.add_argument("--pol",         default="x45",
-                        choices=list(POL_MAP.keys()),
-                        help="入射偏振（默认 x45，更适合观察较均衡的方向响应）")
+    parser.add_argument("--pol",         default="all",
+                        choices=POL_CHOICES,
+                        help="入射偏振；默认 all，一次输出 6 种偏振的组图")
     parser.add_argument("--lambda_nm",   type=float, default=1000.0,
                         help="工作波长 nm（默认 1000）")
     parser.add_argument("--ideal",       action="store_true",
@@ -458,8 +746,8 @@ def main():
                         help="kspace_result.npz 路径；不指定则找同目录下的文件")
     parser.add_argument("--out",         default=None,
                         help="输出 PNG 路径；不指定时自动新建结果文件夹")
-    parser.add_argument("--pattern",     default="square_thu", choices=PATTERN_CHOICES,
-                        help="输入图案：square / thu / square_thu（默认 square_thu）")
+    parser.add_argument("--pattern",     default="all", choices=PATTERN_CHOICES,
+                        help="输入图案；默认 all，一次输出 square / circle / checkerboard 三张组图")
     parser.add_argument("--input_image", default=None,
                         help="输入图片路径（PNG/JPG）；指定后优先使用图片像素生成输入图")
     args = parser.parse_args()
@@ -482,6 +770,7 @@ def main():
         T_ss, T_pp = make_ideal_transfer(KX, KY, K_MAX)
         src_label  = "ideal  T = (k_rho / k_max)²"
         task_tag = "ideal"
+        task_family = "ideal"
         source_tag = "ideal_laplacian"
         output_base_dir = _HERE
 
@@ -499,6 +788,7 @@ def main():
             structure_source = str(d["structure_source"][0]) if "structure_source" in d.files and len(d["structure_source"]) else ""
         structure_source_path = Path(structure_source) if structure_source else None
         task_tag = _task_tag_from_path(structure_source_path) if structure_source else _task_tag_from_path(npz_path)
+        task_family = infer_task_family(structure_source_path if structure_source else npz_path, task_tag)
         source_tag = "from_kspace"
         output_base_dir = _results_case_dir_from_path(structure_source_path) or _HERE
 
@@ -516,6 +806,7 @@ def main():
         T_pp = build_2d_transfer(t_pp_1d, KX, KY, K0, K_MAX)
         src_label = f"infer: {Path(args.infer_dir).name}"
         task_tag = _task_tag_from_path(Path(args.infer_dir))
+        task_family = infer_task_family(Path(args.infer_dir), task_tag)
         source_tag = f"infer_{Path(args.infer_dir).name}"
         output_base_dir = _results_case_dir_from_path(Path(args.infer_dir)) or _HERE
 
@@ -525,30 +816,42 @@ def main():
         T_pp = build_2d_transfer(t_pp_1d, KX, KY, K0, K_MAX)
         src_label = f"train sample {args.sample}"
         task_tag = "train"
+        task_family = "generic"
         source_tag = f"sample_{args.sample}"
         output_base_dir = _HERE
 
     print(f"Source : {src_label}")
 
-    # --- 仿真 ---------------------------------------------------------------
-    e_in  = POL_MAP[args.pol]
-    I_out, I_in, input_label = run_fourier_optics(
-        T_ss, T_pp, e_in, KX, KY, args.pattern, K0, input_image=args.input_image
-    )
-    edge_mask = edge_mask_from_input(I_in)
-    metrics = compute_imaging_metrics(I_in, I_out, edge_mask)
-    print(f"[metrics] eta_peak={metrics['eta_peak']:.6f} eta_avg={metrics['eta_avg']:.6f} edge_pixels={metrics['edge_pixels']}")
+    pattern_list = list(DEFAULT_PATTERN_SET) if args.pattern == "all" else [args.pattern]
+    if args.input_image is not None and args.pattern == "all":
+        print("[warn] 指定 --input_image 时，默认批量图案模式将退化为单图输入。")
+        pattern_list = ["square"]
 
-    # --- 画图 ---------------------------------------------------------------
+    metrics_payload: dict[str, object] = {}
+
+    # --- 仿真 + 画图 --------------------------------------------------------
     if args.out:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        if len(pattern_list) != 1:
+            print("当使用 --out 时，--pattern 不能为 all。请指定单个 pattern。", file=sys.stderr)
+            sys.exit(1)
     else:
         run_dir = make_run_output_dir(output_base_dir, task_tag, source_tag, lambda_nm, args.pol, args.pattern)
-        out_path = run_dir / "imaging_result.png"
-        save_metrics(run_dir / "metrics.json", metrics)
         print(f"[output_dir] {run_dir}")
-    plot_results(I_in, I_out, lambda_nm, args.pol, args.pattern, input_label, metrics, out_path)
+
+    for pattern_name in pattern_list:
+        if args.out:
+            pattern_out_path = out_path
+        else:
+            suffix = "imaging_result_all.png" if args.pol == "all" else "imaging_result.png"
+            pattern_out_path = run_dir / f"{pattern_name}_{suffix}"
+        metrics_payload[pattern_name] = run_single_pattern(
+            pattern_name, args.pol, task_family, T_ss, T_pp, KX, KY, K0, K_MAX, lambda_nm, args.input_image, pattern_out_path
+        )
+
+    if not args.out:
+        save_metrics(run_dir / "metrics.json", metrics_payload if len(pattern_list) > 1 else metrics_payload[pattern_list[0]])
 
 
 if __name__ == "__main__":

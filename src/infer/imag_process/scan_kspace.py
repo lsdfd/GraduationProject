@@ -220,7 +220,11 @@ def scan_phi(structure: np.ndarray, lambda_nm: float, phi_deg: float, device: st
         except Exception as e:
             print(f"  [phi={phi_deg}°, θ={theta}°] 失败: {e}")
 
-    print(f"[phi={phi_deg}°] RCWA 完成，tpp 范围=[{np.nanmin(tpp_phi):.3f}, {np.nanmax(tpp_phi):.3f}]")
+    print(
+        f"[phi={phi_deg}°] RCWA 完成，"
+        f"tpp 范围=[{np.nanmin(tpp_phi):.3f}, {np.nanmax(tpp_phi):.3f}]，"
+        f"tss 范围=[{np.nanmin(tss_phi):.3f}, {np.nanmax(tss_phi):.3f}]"
+    )
     return tss_phi, tpp_phi
 
 
